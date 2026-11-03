@@ -78,7 +78,7 @@ final class CreatorDirectEditingE2eTest extends CreatorServerE2eSupport {
             final String third = ((RailixValue.StringValue) action(server.baseUri(), "{\"kind\":\"reuse\",\"node\":\"one\",\"from\":\"" + copy
                     + ".next\",\"id\":\"reuse-two\"}").values().get("selection")).value();
             action(server.baseUri(), """
-                    {"kind":"patch","project":{"nodes":{"one":{"id":"one","use":"railix.choice","inputs":{"conditions":[]}}},
+                    {"kind":"patch","project":{"nodes":{"one":{"id":"one","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}}},
                      "links":{"one.next":null,"one.match":[{"from":"one.match","to":"two"}],"one.otherwise":[{"from":"one.otherwise","to":"end"}]}}}
                     """);
             final var links = (RailixValue.ArrayValue) object(Files.readString(file)).values().get("links");
@@ -282,7 +282,7 @@ final class CreatorDirectEditingE2eTest extends CreatorServerE2eSupport {
         Files.writeString(file,threeStepProject());
         try(var server=start(file)) {
             action(server.baseUri(),"""
-                    {"kind":"patch","project":{"nodes":{"one":{"id":"one","use":"railix.choice","inputs":{"conditions":[]}}},
+                    {"kind":"patch","project":{"nodes":{"one":{"id":"one","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}}},
                       "links":{"one.next":null,"one.match":[{"from":"one.match","to":"two"}],
                       "one.otherwise":[{"from":"one.otherwise","to":"two"}]}}}
                     """);

@@ -614,6 +614,13 @@ final class CreatorScene {
         final List<RailixValue> diagnostics = new ArrayList<>();
         final List<RailixValue> problems = new ArrayList<>(array(result, "diagnostics"));
         if (result.values().get("failure") instanceof RailixValue.ObjectValue failure) problems.add(failure);
+        for (final RailixValue item : array(result, "paths")) {
+            if (item instanceof RailixValue.ObjectValue path
+                    && path.values().get("result") instanceof RailixValue.ObjectValue pathResult) {
+                problems.addAll(array(pathResult, "diagnostics"));
+                if (pathResult.values().get("failure") instanceof RailixValue.ObjectValue failure) problems.add(failure);
+            }
+        }
         for (final RailixValue item : problems) {
             if (!(item instanceof RailixValue.ObjectValue diagnostic)) throw new IOException("Example diagnostic is invalid.");
             final String path = text(diagnostic.values(), "path");

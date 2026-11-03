@@ -88,6 +88,9 @@ final class StepRuntimeContractGeneratedE2eTest {
                         case RunResult.Succeeded succeeded -> {
                             value.put("status", RailixValue.string("succeeded"));
                         }
+                        case RunResult.Completed completed -> {
+                            value.put("status", RailixValue.string("completed"));
+                        }
                         case RunResult.Rejected rejected -> {
                             final Diagnostic diagnostic = rejected.diagnostics().getFirst();
                             value.put("status", RailixValue.string("rejected"));

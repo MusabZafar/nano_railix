@@ -24,6 +24,14 @@ its path and shows the real input/output change at each reached Step; union cove
 identifies Steps reached by any Example. Trace payloads do not contain timing data. Example execution increments normal operational
 metrics; visual replay of a retained trace does not execute Steps or increment counters.
 
+Explicit continuations have separate path IDs, call stacks and terminal records. Shared paths
+record the exact Step-entry snapshot and its own atomic commit changes separately. Sibling writes
+may be visible in the full context but must not be highlighted as this Step's edits. Entry deltas
+keep per-path replay aligned with the values actually read. A Branch that only starts paths has
+no own field changes. Failed path diagnostics remain locatable without changing successful Step
+states or marking the running application as broken. Trace-discard state and shared counters are
+synchronized across paths. These records and buffers remain outside production artifacts.
+
 Unexpected Step runtime exceptions retain their Java type and stack in the protected development
 trace and selected-Step projection. Details contain at most eight causes and 32 frames per cause,
 handle cyclic causes and omit exception messages. Creator discloses them on demand in the failing

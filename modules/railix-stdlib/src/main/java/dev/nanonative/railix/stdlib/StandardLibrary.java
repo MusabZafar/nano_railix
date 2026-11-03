@@ -32,9 +32,7 @@ public final class StandardLibrary {
                 http(),
                 httpClient(),
                 fieldManipulation(),
-                filter(),
-                choice(),
-                switchStep()
+                branch()
         ));
         definitions.addAll(PrimitiveSteps.definitions());
         return List.copyOf(definitions);
@@ -135,45 +133,28 @@ public final class StandardLibrary {
                 .implementation(StandardStepHandlers.FieldManipulation.class);
     }
 
-    private static StepDefinition filter() {
-        return StepDefinition.named("railix.filter", "1")
-                .displayName("Filter")
-                .primaryOutcome("match")
-                .input("conditions", Input.candidates(fieldOrLiteral()).defaultCandidate("field"))
-                .outcome("otherwise")
-                .implementation(StandardStepHandlers.Filter.class);
-    }
-
-    private static StepDefinition choice() {
-        return StepDefinition.named("railix.choice", "1")
-                .displayName("Choice")
-                .primaryOutcome("match")
-                .input("conditions", Input.matcherGroups(fieldOrLiteral()))
-                .outcome("otherwise")
-                .implementation(StandardStepHandlers.Choice.class);
-    }
-
-    private static StepDefinition switchStep() {
-        return StepDefinition.named("railix.switch", "1")
-                .searchTerms("route", "case", "branch")
+    private static StepDefinition branch() {
+        return StepDefinition.named("railix.branch", "1")
+                .displayName("Branch")
+                .searchTerms("choice", "if", "filter", "switch", "split", "route", "async", "sync")
                 .primaryOutcome("otherwise")
-                .input("cases", Input.candidates(fieldOrLiteral(
-                        Input.json(ValueShape.ANY).defaultValue(RailixValue.nullValue())
-                )).withAuthoredOutcomes())
-                .implementation(StandardStepHandlers.Switch.class);
+                .input("routes", Input.matcherGroups(fieldOrLiteral()).withAuthoredOutcomes()
+                        .routeInput("own_context", Input.json(ValueShape.BOOLEAN).defaultValue(RailixValue.bool(false))))
+                .input("selection", Input.options(Input.option("first"), Input.option("matching"), Input.option("all"))
+                        .defaultOption("first"))
+                .input("execution", Input.options(Input.option("sequential"), Input.option("parallel"))
+                        .defaultOption("sequential"))
+                .withContinuations()
+                .implementation(StandardStepHandlers.Branch.class);
     }
 
     private static StepDefinition.Option[] fieldOrLiteral() {
-        return fieldOrLiteral(Input.json(ValueShape.ANY));
-    }
-
-    private static StepDefinition.Option[] fieldOrLiteral(final StepDefinition.JsonInput literal) {
         return new StepDefinition.Option[]{
                 Input.option("field")
                         .input("field", Input.path(READ).defaultPath("context", "payload"))
                         .fromOwned("field"),
                 Input.option("literal")
-                        .input("value", literal)
+                        .input("value", Input.json(ValueShape.ANY).defaultValue(RailixValue.nullValue()))
                         .fromOwned("value")
         };
     }

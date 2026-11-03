@@ -29,6 +29,7 @@ import java.util.BitSet;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -485,6 +486,21 @@ final class ExampleSuite implements AutoCloseable {
 
     /** Keeps only a bounded error header, never payloads, contexts or stack traces. */
     static RailixValue.ObjectValue errorSummary(final RailixValue.ObjectValue event) {
+        if (event.values().get("paths") instanceof RailixValue.ArrayValue paths) {
+            final List<RailixValue> issues = new ArrayList<>();
+            for (final RailixValue item : paths.values()) {
+                if (item instanceof RailixValue.ObjectValue path
+                        && path.values().get("result") instanceof RailixValue.ObjectValue result) {
+                    final var issue = errorSummary(result);
+                    if (issue.values().get("diagnostics") instanceof RailixValue.ArrayValue diagnostics) {
+                        issues.addAll(diagnostics.values());
+                    } else if (issue.values().get("failure") instanceof RailixValue.ObjectValue failure) {
+                        issues.add(failure);
+                    }
+                }
+            }
+            if (!issues.isEmpty()) return RailixValue.object(Map.of("diagnostics", RailixValue.array(issues)));
+        }
         final RailixValue.ObjectValue problem;
         final String kind;
         if (event.values().get("diagnostics") instanceof RailixValue.ArrayValue diagnostics
@@ -551,9 +567,10 @@ final class ExampleSuite implements AutoCloseable {
             final int selectedNode,
             final boolean summary
     ) throws IOException {
-        final Deque<TraceFrame> calls = new ArrayDeque<>();
+        final Map<Long, Deque<TraceFrame>> stacks = new HashMap<>();
+        final Map<Long, MutableContext> contexts = new HashMap<>();
+        final Set<Long> closedPaths = new HashSet<>();
         final Set<Integer> nodes = new LinkedHashSet<>();
-        MutableContext context = null;
         RailixValue.ObjectValue initial = null;
         RailixValue.ObjectValue selectedResult = null;
         try (BufferedReader lines = new BufferedReader(
@@ -566,6 +583,9 @@ final class ExampleSuite implements AutoCloseable {
                     throw new IOException("Example view was interrupted.");
                 }
                 final RailixValue.ObjectValue event = event(line);
+                final long path = event.values().containsKey("path") ? longInteger(event, "path") : 0;
+                final Deque<TraceFrame> calls = stacks.computeIfAbsent(path, ignored -> new ArrayDeque<>());
+                final MutableContext context = contexts.get(path);
                 switch (string(event, "type")) {
                     case "trace" -> {
                         if (initial != null || !(event.values().get("context")
@@ -573,9 +593,25 @@ final class ExampleSuite implements AutoCloseable {
                             throw new IOException("Development trace initial context is invalid.");
                         }
                         initial = traceContext;
-                        context = new MutableContext(traceContext);
+                        contexts.put(0L, new MutableContext(traceContext));
+                    }
+                    case "path_start" -> {
+                        if (initial == null || path <= 0 || contexts.containsKey(path)
+                                || !(event.values().get("context") instanceof RailixValue.ObjectValue traceContext)) {
+                            throw new IOException("Development path initial context is invalid.");
+                        }
+                        contexts.put(path, new MutableContext(traceContext));
+                    }
+                    case "path_result" -> {
+                        if (path <= 0 || context == null || !calls.isEmpty() || !closedPaths.add(path)) {
+                            throw new IOException("Development path completed with invalid Step records.");
+                        }
                     }
                     case "step_start" -> {
+                        if (closedPaths.contains(path)) throw new IOException("Development path is already complete.");
+                        if (context != null && event.values().get("entry_changes") instanceof RailixValue.ArrayValue changes) {
+                            context.apply(RailixValue.object(Map.of("changes", changes)));
+                        }
                         final long sequence = longInteger(event, "sequence");
                         final int occurrence = integer(event, "occurrence");
                         final String id = string(event, "id");
@@ -622,7 +658,11 @@ final class ExampleSuite implements AutoCloseable {
                         }
                     }
                     case "result" -> {
-                        if (!calls.isEmpty()) {
+                        if (stacks.values().stream().anyMatch(stack -> !stack.isEmpty())) {
+                            throw new IOException("Development trace completed with open Step records.");
+                        }
+                        if (initial == null) throw new IOException("Development trace has no initial context.");
+                        if (path != 0 || contexts.size() != closedPaths.size() + 1) {
                             throw new IOException("Development trace completed with open Step records.");
                         }
                         if (summary) {
@@ -968,7 +1008,18 @@ final class ExampleSuite implements AutoCloseable {
             final long bytes,
             final String type
     ) throws IOException {
-        final String status = "result".equals(type) ? string(event, "status") : "failed";
+        final String reported = "result".equals(type) ? string(event, "status") : "failed";
+        String status = reported;
+        if ("completed".equals(reported)) {
+            status = errorSummary(event).values().isEmpty() ? "succeeded" : "failed";
+            if ("succeeded".equals(status) && event.values().get("paths") instanceof RailixValue.ArrayValue paths) {
+                for (final RailixValue item : paths.values()) {
+                    if (item instanceof RailixValue.ObjectValue path
+                            && path.values().get("result") instanceof RailixValue.ObjectValue result
+                            && "cancelled".equals(string(result, "status"))) status = "cancelled";
+                }
+            }
+        }
         final String failure = "trace_error".equals(type) ? string(event, "message") : "";
         if (bytes > MAX_EXAMPLE_BYTES - example.storageBytes) {
             return storeStorageFailure(example, file, CASE_STORAGE_TERMINAL, CASE_STORAGE_MESSAGE);

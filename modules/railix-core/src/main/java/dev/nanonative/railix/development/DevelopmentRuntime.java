@@ -192,13 +192,62 @@ public final class DevelopmentRuntime {
         static final int MAX_CONTEXT_CHANGES = 4_096;
         private static final ThreadLocal<Trace> CURRENT = new ThreadLocal<>();
         private final TraceSink sink;
+        private final Trace root;
+        private final long path;
         private final Deque<Pending> calls = new ArrayDeque<>();
         private final Map<String, Integer> occurrences = new HashMap<>();
-        private boolean recording = true;
+        private final AtomicBoolean recording;
+        private RailixValue.ObjectValue lastContext;
         private long sequence;
+        private long nextPath;
 
         private Trace(final TraceSink sink) {
             this.sink = sink;
+            recording = new AtomicBoolean(true);
+            root = this;
+            path = 0;
+        }
+
+        private Trace(final Trace parent) {
+            sink = parent.sink;
+            recording = parent.recording;
+            root = parent.root;
+            synchronized (root) { path = ++root.nextPath; }
+        }
+
+        /**
+         * Captures the active trace for lifecycle-owned outgoing work, with a separate call stack
+         * and context timeline per path. The returned function restores thread-local state.
+         *
+         * @param action non-null compiled continuation
+         * @param context non-null initial-context reader
+         * @return continuation with request-local trace propagation, or the original action
+         */
+        public static <T> java.util.function.BiFunction<T, Integer, RunResult> continuation(
+                final java.util.function.BiFunction<T, Integer, RunResult> action,
+                final java.util.function.Function<T, RailixValue.ObjectValue> context) {
+            java.util.Objects.requireNonNull(action);
+            java.util.Objects.requireNonNull(context);
+            final Trace parent = CURRENT.get();
+            if (parent == null) return action;
+            return (execution, outcome) -> {
+                final Trace previous = CURRENT.get();
+                final Trace branch = new Trace(parent);
+                CURRENT.set(branch);
+                try {
+                    branch.lastContext = context.apply(execution);
+                    branch.emit(object("type", RailixValue.string("path_start"),
+                            "parent_path", RailixValue.number(parent.path), "context", branch.lastContext));
+                    final RunResult result = action.apply(execution, outcome);
+                    final Map<String, RailixValue> event = new LinkedHashMap<>(terminal(result).values());
+                    event.put("type", RailixValue.string("path_result"));
+                    branch.emit(RailixValue.object(event));
+                    branch.complete();
+                    return result;
+                } finally {
+                    if (previous == null) CURRENT.remove(); else CURRENT.set(previous);
+                }
+            };
         }
 
         /** Runs one flow with a request-scoped trace and always removes thread-local state. */
@@ -237,10 +286,10 @@ public final class DevelopmentRuntime {
                 final RailixValue.ObjectValue context
         ) {
             final Trace trace = CURRENT.get();
-            if (trace != null && trace.recording) {
+            if (trace != null && trace.root.recording.get()) {
                 trace.open(node, invocation, use, context);
             }
-            return trace != null && trace.recording;
+            return trace != null && trace.root.recording.get();
         }
 
         /** Completes one successful graph-Step record after context mutations are committed. */
@@ -250,10 +299,10 @@ public final class DevelopmentRuntime {
                 final RailixValue.ObjectValue context
         ) {
             final Trace trace = CURRENT.get();
-            if (trace != null && trace.recording) {
+            if (trace != null && trace.root.recording.get()) {
                 trace.close(invocation, "succeeded", outcome, context);
             }
-            return trace != null && trace.recording;
+            return trace != null && trace.root.recording.get();
         }
 
         /** Completes one rejected, failed, or cancelled graph-Step record. */
@@ -263,10 +312,22 @@ public final class DevelopmentRuntime {
                 final RailixValue.ObjectValue context
         ) {
             final Trace trace = CURRENT.get();
-            if (trace != null && trace.recording) {
-                trace.close(invocation, status(result), "", context);
+            if (trace != null && trace.root.recording.get()) {
+                final Pending call = trace.calls.peek();
+                if (call != null) call.terminal = result;
+                trace.close(invocation, result instanceof RunResult.Completed ? "succeeded" : status(result), "", context);
             }
-            return trace != null && trace.recording;
+            return trace != null && trace.root.recording.get();
+        }
+
+        /** Captures one atomic commit's snapshots without writing to the trace transport under the context lock. */
+        public static boolean committed(final RailixValue.ObjectValue before, final RailixValue.ObjectValue after) {
+            final Trace trace = CURRENT.get();
+            final Pending call = trace == null ? null : trace.calls.peek();
+            if (call == null || !trace.root.recording.get()) return false;
+            call.commitBefore = before;
+            call.commitAfter = after;
+            return true;
         }
 
         /** Invokes one graph handler and records its resolved values and explicit result. */
@@ -276,7 +337,7 @@ public final class DevelopmentRuntime {
                 final StepCall handler
         ) throws InterruptedException {
             final Trace trace = CURRENT.get();
-            if (trace == null || !trace.recording) {
+            if (trace == null || !trace.root.recording.get()) {
                 return handler.process(configuration, input);
             }
             final Pending call = trace.calls.peek();
@@ -295,11 +356,11 @@ public final class DevelopmentRuntime {
                 final StepCall handler
         ) throws InterruptedException {
             final Trace trace = CURRENT.get();
-            if (trace == null || !trace.recording) {
+            if (trace == null || !trace.root.recording.get()) {
                 return handler.process(configuration, input);
             }
             final Pending call = trace.open(-1, invocation, use, null);
-            return trace.recording
+            return trace.root.recording.get()
                     ? trace.invoke(call, true, configuration, input, handler)
                     : handler.process(configuration, input);
         }
@@ -342,8 +403,11 @@ public final class DevelopmentRuntime {
                 final String use,
                 final RailixValue.ObjectValue context
         ) {
-            final int occurrence = occurrences.merge(invocation, 1, Integer::sum) - 1;
-            final Pending call = new Pending(sequence++, occurrence, invocation, use, context);
+            final Pending call;
+            synchronized (root) {
+                final int occurrence = root.occurrences.merge(invocation, 1, Integer::sum) - 1;
+                call = new Pending(root.sequence++, occurrence, invocation, use, context);
+            }
             calls.push(call);
             final Map<String, RailixValue> value = new LinkedHashMap<>();
             value.put("type", RailixValue.string("step_start"));
@@ -353,6 +417,16 @@ public final class DevelopmentRuntime {
             value.put("use", RailixValue.string(use));
             if (node >= 0) {
                 value.put("node", RailixValue.number(node));
+                if (path != 0 && lastContext != null) {
+                    try {
+                        final var changes = changes(lastContext, context);
+                        if (!changes.isEmpty()) value.put("entry_changes", RailixValue.array(changes));
+                    } catch (final ContextChangeLimit exceeded) {
+                        emit(traceError("TRACE_CHANGES_TOO_LARGE", "Development trace context change limit exceeded."));
+                        discard();
+                    }
+                }
+                lastContext = context;
             }
             emit(RailixValue.object(value));
             return call;
@@ -375,6 +449,15 @@ public final class DevelopmentRuntime {
             value.put("id", RailixValue.string(call.invocation));
             value.put("use", RailixValue.string(call.use));
             value.put("status", RailixValue.string(status));
+            if (call.terminal instanceof RunResult.Completed completed) {
+                value.put("outcomes", RailixValue.array(completed.paths().stream()
+                        .filter(path -> path.stepId().equals(invocation)).map(RunResult.PathResult::outcome)
+                        .distinct().<RailixValue>map(RailixValue::string).toList()));
+            } else if (call.terminal instanceof RunResult.Failed failed) {
+                value.put("failure", failureValue(failed));
+            } else if (call.terminal instanceof RunResult.Rejected rejected) {
+                value.put("diagnostics", diagnosticValues(rejected.diagnostics()));
+            }
             if (call.exception != null) {
                 final List<RailixValue> causes = new ArrayList<>();
                 final Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -414,6 +497,10 @@ public final class DevelopmentRuntime {
             final List<RailixValue> changes;
             try {
                 changes = changes(call.context, context);
+                if (path != 0 && call.context != null || call.terminal instanceof RunResult.Completed) {
+                    value.put("own_changes", RailixValue.array(call.commitBefore == null ? List.of()
+                            : changes(call.commitBefore, call.commitAfter)));
+                }
             } catch (final ContextChangeLimit exceeded) {
                 calls.clear();
                 emit(traceError(
@@ -426,30 +513,37 @@ public final class DevelopmentRuntime {
             if (!changes.isEmpty()) {
                 value.put("changes", RailixValue.array(changes));
             }
+            if (call.context != null) lastContext = context;
             emit(RailixValue.object(value));
         }
 
         private void emit(final RailixValue.ObjectValue event) {
-            if (!recording) {
-                return;
-            }
-            try {
-                if (!sink.write(event)) {
+            synchronized (root) {
+                if (!root.recording.get()) return;
+                try {
+                    RailixValue.ObjectValue emitted = event;
+                    if (path != 0) {
+                        final var value = new LinkedHashMap<>(event.values());
+                        value.put("path", RailixValue.number(path));
+                        emitted = RailixValue.object(value);
+                    }
+                    if (!sink.write(emitted)) discard();
+                } catch (final IOException ignored) {
                     discard();
                 }
-            } catch (final IOException ignored) {
-                discard();
             }
         }
 
         private void discard() {
-            recording = false;
-            calls.clear();
-            occurrences.clear();
+            synchronized (root) {
+                root.recording.set(false);
+                calls.clear();
+                root.occurrences.clear();
+            }
         }
 
         private void complete() {
-            if (recording && !calls.isEmpty()) {
+            if (root.recording.get() && !calls.isEmpty()) {
                 throw new IllegalStateException("Trace completed with unfinished Step records.");
             }
         }
@@ -460,6 +554,12 @@ public final class DevelopmentRuntime {
             value.put("status", RailixValue.string(status(result)));
             switch (result) {
                 case RunResult.Succeeded succeeded -> value.put("context", succeeded.context());
+                case RunResult.Completed completed -> {
+                    value.put("context", completed.context());
+                    value.put("paths", RailixValue.array(completed.paths().stream().<RailixValue>map(path ->
+                            object("step", RailixValue.string(path.stepId()), "outcome", RailixValue.string(path.outcome()),
+                                    "result", terminal(path.result()))).toList()));
+                }
                 case RunResult.Rejected rejected -> value.put("diagnostics", diagnosticValues(rejected.diagnostics()));
                 case RunResult.Failed failed -> value.put("failure", failureValue(failed));
                 case RunResult.Cancelled ignored -> {
@@ -471,6 +571,7 @@ public final class DevelopmentRuntime {
         private static String status(final RunResult result) {
             return switch (result) {
                 case RunResult.Succeeded ignored -> "succeeded";
+                case RunResult.Completed ignored -> "completed";
                 case RunResult.Rejected ignored -> "rejected";
                 case RunResult.Failed ignored -> "failed";
                 case RunResult.Cancelled ignored -> "cancelled";
@@ -588,7 +689,10 @@ public final class DevelopmentRuntime {
             private Map<String, RailixValue> inputs = Map.of();
             private Map<String, String> options = Map.of();
             private StepResult result;
+            private RunResult terminal;
             private RuntimeException exception;
+            private RailixValue.ObjectValue commitBefore;
+            private RailixValue.ObjectValue commitAfter;
             private boolean entered;
 
             private Pending(
@@ -750,7 +854,8 @@ public final class DevelopmentRuntime {
                     stepCounters,
                     step,
                     started,
-                    outcome == Integer.MIN_VALUE || outcome < 0 && !cancelled,
+                    outcome == Integer.MIN_VALUE || outcome < 0
+                            && (result == null || result instanceof RunResult.Failed || result instanceof RunResult.Rejected),
                     cancelled
             );
             return this;
@@ -2643,7 +2748,8 @@ public final class DevelopmentRuntime {
 
             private synchronized void endTransport(final boolean interrupted) {
                 transporting = false;
-                if (interrupted || interruptPending) {
+                if (interrupted) Thread.currentThread().interrupt();
+                if (interruptPending) {
                     interruptPending = false;
                     thread.interrupt();
                 }
@@ -2876,6 +2982,11 @@ public final class DevelopmentRuntime {
 
     private static ResultResponse response(final RunResult result) {
         return switch (result) {
+            case RunResult.Completed completed -> {
+                final var value = new LinkedHashMap<>(Trace.terminal(completed).values());
+                value.remove("type");
+                yield new ResultResponse(200, RailixValue.object(value));
+            }
             case RunResult.Succeeded succeeded -> new ResultResponse(200, RailixValue.object(Map.of(
                     "status", RailixValue.string("succeeded"),
                     "context", succeeded.context()

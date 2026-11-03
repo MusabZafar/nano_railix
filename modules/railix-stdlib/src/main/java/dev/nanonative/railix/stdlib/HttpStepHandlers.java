@@ -122,6 +122,10 @@ public final class HttpStepHandlers {
                         status(source.responses().get("status")),
                         source.responses().getOrDefault("body", RailixValue.nullValue()),
                         source.responses().getOrDefault("headers", RailixValue.object(Map.of())));
+                case RunResult.Completed ignored -> send(exchange,
+                        status(source.responses().get("status")),
+                        source.responses().getOrDefault("body", RailixValue.nullValue()),
+                        source.responses().getOrDefault("headers", RailixValue.object(Map.of())));
                 case RunResult.Rejected rejected -> send(exchange,
                         rejected.diagnostics().stream().anyMatch(diagnostic -> diagnostic.code().equals("APPLICATION_SOURCE_INACTIVE"))
                                 ? 503 : 400, RailixValue.object(Map.of(

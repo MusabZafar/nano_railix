@@ -1673,7 +1673,7 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
             assertThat(choice.statusCode()).isEqualTo(200);
             assertThat(choice.body())
                     .contains("\"id\":\"choice\"")
-                    .contains("\"input\":\"conditions[0][0].when.all[0]\"")
+                    .contains("\"input\":\"routes[0].groups[0][0].when.all[0]\"")
                     .contains("\"value\":true")
                     .contains("\"value\":false")
                     .doesNotContain("\"type\"");
@@ -2516,12 +2516,12 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                     {"name":"match","payload":[],"context":{"payload":{"value":"allow"}}},
                     {"name":"otherwise","payload":[],"context":{"payload":{"value":"deny"}}}
                   ]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[[{
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[{
                     "option":"field","inputs":{"field":["context","payload","value"]},
                     "when":{"transforms":[],"all":[[
                       {"use":"value.equals","inputs":{"expected":"allow"}}
                     ]]}
-                  }]]}},
+                  }]]}]}},
                   {"id":"matched","use":"railix.field-manipulation","inputs":{
                     "field":["context","result"],
                     "value":[{"option":"literal","inputs":{"literal":"matched"}}],"steps":[]}},

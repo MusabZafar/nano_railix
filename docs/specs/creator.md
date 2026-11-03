@@ -588,6 +588,7 @@ No other Example is chosen automatically.
 Scope filtering reads cached, revision-bound reachability summaries, never replays traces from render,
 hover or paint. Loading, unavailable and empty results are distinct from the global list.
 Inspector tabs use Configure, Data, Appearance and Grouping, with consistent symbols and text labels.
+They expose their selected state to assistive technology and support arrow, Home and End keys.
 Data owns recorded context changes and the observed branch exit. It uses the central Example
 selection, with changed JSON fields visible by default and the eye action revealing the full context.
 There is no separate Results tab, before/after JSON renderer or local Example selector.
@@ -595,7 +596,7 @@ The desktop Inspector can be resized from its left edge with pointer or keyboard
 the full available width. Resizing is presentation state, not a project edit.
 Appearance offers searchable embedded and user-supplied SVG/PNG symbols through the existing icon
 catalog. A chosen symbol is embedded in Creator metadata, never processing configuration, and can be
-reset or undone. Grouping starts with the selected Step's
+reset or undone. Grouping, not Appearance, owns group assignment. It starts with the selected Step's
 assignment, with other reusable groups behind an All groups disclosure. Foundry uses consistently fitted,
 functional module symbols. Connected belt ends have low-contrast, belt-width openings rather than
 bright port dots. Moving plates carry direction marks. The selected Example has the strongest
@@ -605,6 +606,18 @@ Form simplification retains those tabs and all editing actions. A single value s
 numbered candidate heading or inactive reorder controls. Multiple sources and authored cases retain
 their identities and ordering. Duplicate path headings may be visually suppressed only for one
 source path with the same label. Distinct and multiple option inputs retain their labels.
+Short JSON literals use a single-line field. Objects and arrays use a multiline editor. Both
+preserve JSON types, exact numbers, invalid drafts and Reset behavior. Narrow Inspector columns
+stack source, comparison and operand controls instead of truncating their meaning. One route
+needs no extra enclosing frame. Color and Reset controls remain aligned on one row.
+An empty route shows its Add condition action, not an already expanded source catalog.
+Further OR alternatives expand only when requested. Grouping repeats a managed group's title
+only when it differs from the target already named by the selection or assignment control.
+Grouping selects immediately with visible loading feedback. A delayed read must not switch back
+from a newer tab, steal field focus or reopen a closed Inspector. Read failures offer an explicit
+Retry without stopping the application. Symbol selection uses the same visible disclosure marker
+as other expandable controls. The phone Example row retains its caption and labels its Clear
+action so it cannot be mistaken for closing the Inspector.
 Save responses and observation refreshes must preserve an unfinished field value, focus, caret
 selection and text scroll position within the same Inspector selection and tab. Unsaved active
 text also participates in the reload warning before its change event commits it.
@@ -631,12 +644,16 @@ Entered groups and work areas have a separate return control beside the entry st
 entry Step remains functional and selectable. Touch supports single-tap entry/return, canvas pan and
 pinch zoom. Narrow layouts provide 44 CSS-pixel control targets and a scrollable Inspector.
 Opening or resizing the Inspector keeps the selected Step visible at the current zoom when canvas
-space remains. Narrow split views reserve room for the Step, return portal and timing legend.
-Short narrow windows use a full-screen Inspector instead of collapsing its form.
+space remains. At phone widths the Inspector is a full-screen editing surface, not a squeezed
+canvas/editor split. It reuses the existing Example selector, Undo, Redo and Settings control.
+The covered HUD and canvas are not interactive or keyboard-focusable, and canvas motion pauses
+while covered. The application, observations and Example processing continue. Settings and import
+use that same surface. Tabs, Close and editor actions remain reachable while fields scroll.
 Closing it does not recenter the camera or discard the selection.
 On narrow screens, choosing an outgoing connection temporarily clears the Inspector from the canvas
 so destinations and Cancel remain reachable. The Cancel control restores the same Inspector and output
-focus. Once a destination is submitted, destination-picking ends. The pending save cannot be cancelled
+focus. Insertion likewise reveals the canvas and returns to its initiating action on Cancel.
+Once a destination is submitted, destination-picking ends. The pending save cannot be cancelled
 through the connection controls.
 Undo/Redo use curved action arrows, not navigation arrows. Navigation and Example selection do not
 create history. Automated mutation checks use isolated projects, never the user's active preview.
@@ -709,8 +726,8 @@ sampled-time coloring, independently of Example selection. Each connection uses 
 sampled mean. A collapsed group uses its slowest measured member mean, not its sum or elapsed
 group latency. The group's world label uses that same measure without an `avg sum` suffix.
 The sum remains available in Group metrics. Straight runs, corners and bridges retain the same time color. A visible
-logarithmic scale compares the measured Steps and collapsed groups currently in view, excluding
-stations behind HUD panels. Turquoise marks the shorter sampled mean and blue the longer one.
+logarithmic scale compares the measured Steps and collapsed groups currently in the canvas viewport.
+Turquoise marks the shorter sampled mean and blue the longer one.
 Panning, zooming or entering a group updates the numeric range after the camera gesture settles,
 not continuously during a drag or flight. Equal measurements share one
 color and one numeric label. No measurement creates an artificial spread. The legend is read-only
@@ -751,7 +768,13 @@ belong behind Technical details. Small screens keep readable navigation and a fo
 Location and the active Example belong to the fixed workbench toolbar, not separate overlays
 covering the canvas. The toolbar identifies the current project and location, uses readable
 controls and wraps into explicit rows at narrow widths. Sound, music, Home, Overview and
-Settings keep their distinct functions. Starting with a stale or missing access key explains
+Settings keep their distinct functions. The current group remains visible beside a compact
+parent-area popover, which retains direct access to every enclosing area. Escape returns focus
+to its invoker, and choosing a parent returns keyboard control to the canvas. The popover stays
+anchored to its invoker rather than the bottom of the entire toolbar. On phones the
+Example caption and choice share one row, with its actions below rather than squeezing the
+selected name between icons. The existing select node remains connected during updates so
+progress feedback does not close an open native picker. Starting with a stale or missing access key explains
 how to open the current link printed by the running Creator. A transport failure offers an
 explicit retry. Neither case removes authentication or guesses credentials.
 
@@ -900,7 +923,7 @@ button activation. This applies the contextual controls and removal of duplicate
 [Factorio's GUI review](https://www.factorio.com/blog/post/fff-363), and the attribute/comparison/value
 structure of [Finder criteria](https://support.apple.com/en-gb/guide/mac-help/mh15155/mac), without
 introducing another saved model or a Choice-specific execution path.
-Choice comparisons place field, comparison and operand controls beside one another. Changing
+Choice comparisons place field, comparison and operand controls together, stacking them in narrow columns. Changing
 the comparison preserves compatible operands; optional calculations and longer chains expand
 on demand.
 The common matcher is directly visible, without an additional condition disclosure. Empty comparison
@@ -908,7 +931,8 @@ chains say `Value exists`, matching their actual behavior. Additional AND condit
 and comparisons open on demand, with bounded searchable lists. Optional JSON controls use one
 checkbox label rather than a duplicate heading. Path access remains in the field's tooltip.
 Configure and Data retain connection controls. Appearance and Grouping omit that unrelated row.
-Focus keeps Inspector open, including on narrow screens, and frames the selection beside it.
+Focus frames the selection beside the desktop Inspector. On phones it returns to the canvas
+to reveal the selected Step rather than framing it behind a full-screen editor.
 The world and label surfaces use non-scrollable clipping; browser focus scrolling must not move
 the diagram independently of the camera or displace its controls.
 Diagnostics and malformed route states appear on their owning node, outcome, or group.
@@ -964,6 +988,15 @@ The visual vocabulary follows the consistent-control and in-context-action princ
 
 The minimap reuses one coarse scene per revision, bins it into at most 32 by 20 CSS cells, and moves
 the existing camera. Its read has a five-second deadline and bounded retry, independent of traffic.
+Only the map content is a pointer navigation target, not its caption. Map clicks and arrow keys
+cancel an active camera flight before moving the view. Enter centers the overview. Returning
+to a visible browser tab retains the loaded overview and focus when its revision and scope are
+unchanged. Interrupted reads still retry through the existing bounded loading path.
+In short narrow viewports the timing scale wraps beside the radar, without hiding either surface
+or allowing them to overlap. A changed timing scale also updates return-control placement, so
+the Back action does not retain bounds from the previous scale layout.
+Timing membership follows the visible canvas bounds, not HUD occlusion. Showing the scale or
+moving the Back control cannot remove their underlying Steps from the same scale calculation.
 Machine centers and routed belt segments have distinct cell geometry. Current viewport observations
 and known diagnostics provide state overlays; unobserved areas remain neutral. Selection retains
 one world position/identity and colors its cell, without a second selection box or navigation history.

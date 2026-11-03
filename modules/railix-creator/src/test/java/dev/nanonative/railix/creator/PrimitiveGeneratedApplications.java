@@ -102,8 +102,8 @@ final class PrimitiveGeneratedApplications implements AutoCloseable {
         return required(key(Mode.PRESERVE_TARGET, List.of(primitive), primitive, config));
     }
 
-    Application branch(final String primitive, final String conditions) {
-        return required(key(Mode.BRANCH, List.of(primitive), primitive, conditions));
+    Application branch(final String groups) {
+        return required(key(Mode.BRANCH, List.of("railix.branch"), "railix.branch", groups));
     }
 
     Application linear(final String steps) {
@@ -311,28 +311,26 @@ final class PrimitiveGeneratedApplications implements AutoCloseable {
     }
 
     private static void controlScenarios(final Map<String, Scenario> scenarios) {
-        final String field = "[{\"option\":\"field\",\"inputs\":{"
+        final String field = "[[{\"option\":\"field\",\"inputs\":{"
                 + "\"field\":[\"context\",\"payload\",\"value\"]},"
                 + "\"when\":{\"transforms\":[],\"all\":[[{\"use\":\"value.equals\","
-                + "\"inputs\":{\"expected\":\"allow\"}}]]}}]";
-        add(scenarios, Mode.BRANCH, List.of("railix.filter"), "railix.filter", field);
-        add(scenarios, Mode.BRANCH, List.of("railix.choice"), "railix.choice", "[" + field + "]");
-        for (final String primitive : List.of("railix.filter", "railix.choice")) {
-            add(scenarios, Mode.BRANCH, List.of(primitive), primitive, "[]");
-        }
-        add(scenarios, Mode.BRANCH, List.of("railix.filter"), "railix.filter",
-                "[{\"option\":\"literal\",\"inputs\":{\"value\":\"constant\"}}]");
-        add(scenarios, Mode.BRANCH, List.of("railix.filter"), "railix.filter",
-                "[{\"option\":\"field\",\"inputs\":{\"field\":[\"context\",\"payload\",\"value\"]}}]");
-        add(scenarios, Mode.BRANCH, List.of("railix.filter"), "railix.filter",
-                "[{\"option\":\"field\",\"inputs\":{\"field\":[\"context\",\"payload\",\"missing\"]}}]");
-        add(scenarios, Mode.BRANCH, List.of("railix.filter"), "railix.filter",
-                "[{\"option\":\"literal\",\"inputs\":{\"value\":null}}]");
-        add(scenarios, Mode.BRANCH, List.of("railix.filter"), "railix.filter",
-                "[{\"option\":\"field\",\"inputs\":{\"field\":[\"context\",\"payload\",\"value\"]},"
+                + "\"inputs\":{\"expected\":\"allow\"}}]]}}]]";
+        final List<String> branch = List.of("railix.branch");
+        add(scenarios, Mode.BRANCH, branch, "railix.branch", field);
+        add(scenarios, Mode.BRANCH, branch, "railix.branch", "[]");
+        add(scenarios, Mode.BRANCH, branch, "railix.branch",
+                "[[{\"option\":\"literal\",\"inputs\":{\"value\":\"constant\"}}]]");
+        add(scenarios, Mode.BRANCH, branch, "railix.branch",
+                "[[{\"option\":\"field\",\"inputs\":{\"field\":[\"context\",\"payload\",\"value\"]}}]]");
+        add(scenarios, Mode.BRANCH, branch, "railix.branch",
+                "[[{\"option\":\"field\",\"inputs\":{\"field\":[\"context\",\"payload\",\"missing\"]}}]]");
+        add(scenarios, Mode.BRANCH, branch, "railix.branch",
+                "[[{\"option\":\"literal\",\"inputs\":{\"value\":null}}]]");
+        add(scenarios, Mode.BRANCH, branch, "railix.branch",
+                "[[{\"option\":\"field\",\"inputs\":{\"field\":[\"context\",\"payload\",\"value\"]},"
                         + "\"when\":{\"transforms\":[],\"all\":[[{\"use\":\"value.equals\","
-                        + "\"inputs\":{\"expected\":\"never\"}}]]}},"
-                        + "{\"option\":\"literal\",\"inputs\":{\"value\":\"fallback\"}}]");
+                        + "\"inputs\":{\"expected\":\"never\"}}]]}}],"
+                        + "[{\"option\":\"literal\",\"inputs\":{\"value\":\"fallback\"}}]]");
         add(scenarios, Mode.LINEAR, List.of(), "", "[]");
         add(scenarios, Mode.LINEAR, List.of(), "", "[{\"use\":\"text.to-number\",\"inputs\":{}}]");
         add(scenarios, Mode.CLI_DEFAULTS, List.of(), "", DEFAULT_CONFIG);
@@ -432,11 +430,11 @@ final class PrimitiveGeneratedApplications implements AutoCloseable {
 
     private static String dispatch(final int index, final String scenario) {
         final String expected = RailixJson.write(RailixValue.string(scenario));
-        return "{\"id\":\"dispatch-" + index + "\",\"use\":\"railix.choice\",\"inputs\":{"
-                + "\"conditions\":["
+        return "{\"id\":\"dispatch-" + index + "\",\"use\":\"railix.branch\",\"inputs\":{"
+                + "\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":["
                 + matcher("[\"context\",\"payload\",\"scenario\"]", expected) + ","
                 + matcher("[\"context\",\"payload\",\"arguments\",0]", expected)
-                + "]}}";
+                + "]}]}}";
     }
 
     private static String matcher(final String path, final String expected) {
@@ -492,13 +490,12 @@ final class PrimitiveGeneratedApplications implements AutoCloseable {
 
     private static Rendered branch(final Scenario scenario, final int nodeIndex) {
         final String base = scenario.id();
-        final String step = scenario.config().contains("\"expected\":\"allow\"")
-                ? scenario.configuredPrimitive().substring("railix.".length())
-                : base + "-branch";
+        final String step = scenario.config().contains("\"expected\":\"allow\"") ? "branch" : base + "-branch";
         return new Rendered(
                 List.of(
                         "{\"id\":\"" + step + "\",\"use\":\"" + scenario.configuredPrimitive()
-                                + "\",\"inputs\":{\"conditions\":" + scenario.config() + "}}",
+                                + "\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":"
+                                + scenario.config() + "}]}}",
                         literal(base + "-matched", "[\"context\",\"result\"]", "\"matched\""),
                         literal(base + "-otherwise", "[\"context\",\"result\"]", "\"otherwise\"")
                 ),
@@ -720,6 +717,7 @@ final class PrimitiveGeneratedApplications implements AutoCloseable {
                                 System.out.println("succeeded");
                                 System.out.print(RailixJson.write(value));
                             }
+                            case RunResult.Completed completed -> throw new AssertionError("Unary fixture unexpectedly started independent paths: " + completed);
                             case RunResult.Rejected rejected -> {
                                 System.out.println("rejected");
                                 System.out.print(RailixJson.write(diagnostics(rejected.diagnostics())));

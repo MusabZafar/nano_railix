@@ -18,7 +18,7 @@ public final class StepContractJson {
     private static final Set<String> CONTRACT_FIELDS = Set.of(
             "display_name", "example_target", "examples", "id", "inputs", "kind",
             "maximum_instances", "outcomes", "primary_outcome", "receives", "results",
-            "returns", "search_terms", "source", "version", "jdk_modules"
+            "returns", "search_terms", "source", "version", "jdk_modules", "continuations"
     );
 
     private StepContractJson() {
@@ -38,6 +38,7 @@ public final class StepContractJson {
         value.put("search_terms", strings(definition.searchTerms()));
         value.put("kind", RailixValue.string(definition.kind().name().toLowerCase(Locale.ROOT)));
         value.put("primary_outcome", RailixValue.string(definition.primaryOutcome()));
+        if (definition.continuations()) value.put("continuations", RailixValue.bool(true));
         value.put("maximum_instances", RailixValue.number(definition.maximumInstances()));
         definition.source().ifPresent(source -> value.put("source", RailixValue.object(Map.of(
                 "name", RailixValue.string(source.name()),
@@ -155,6 +156,7 @@ public final class StepContractJson {
                 .kind(kind)
                 .displayName(text(contract, "display_name", "contract"))
                 .maximumInstances(integer(contract, "maximum_instances", "contract"));
+        if (optionalBoolean(contract, "continuations", "contract").orElse(false)) builder.withContinuations();
         final List<String> terms = strings(contract, "search_terms", "contract");
         builder.searchTerms(terms.toArray(String[]::new));
         for (final StepDefinition.Port port : ports(contract, "receives", "contract")) {
@@ -293,6 +295,10 @@ public final class StepContractJson {
             case StepDefinition.MatcherGroupsInput groups -> {
                 value.put("type", RailixValue.string("matcher_groups"));
                 value.put("options", options(groups.options()));
+                if (groups.authoredOutcomes()) {
+                    value.put("authored_outcomes", RailixValue.bool(true));
+                    value.put("route_inputs", fields(groups.routeInputs()));
+                }
             }
             case StepDefinition.StepsInput steps -> {
                 value.put("type", RailixValue.string("steps"));
@@ -426,8 +432,11 @@ public final class StepContractJson {
                 );
             }
             case "matcher_groups" -> {
-                object(value, Set.of("name", "options", "type"), path, Set.of("name"));
-                yield new StepDefinition.MatcherGroupsInput(options(value, path));
+                object(value, Set.of("name", "options", "type", "authored_outcomes", "route_inputs"),
+                        path, Set.of("name", "authored_outcomes", "route_inputs"));
+                yield new StepDefinition.MatcherGroupsInput(options(value, path),
+                        optionalBoolean(value, "authored_outcomes", path).orElse(false),
+                        value.values().containsKey("route_inputs") ? fields(value, "route_inputs", path) : List.of());
             }
             case "steps" -> {
                 object(value, Set.of("name", "propagates_outcomes", "type", "value_source"),
@@ -635,7 +644,7 @@ public final class StepContractJson {
             final Set<String> fields,
             final String path
     ) {
-        object(value, fields, path, Set.of("example_target", "source", "jdk_modules"));
+        object(value, fields, path, Set.of("example_target", "source", "jdk_modules", "continuations"));
     }
 
     private static void object(

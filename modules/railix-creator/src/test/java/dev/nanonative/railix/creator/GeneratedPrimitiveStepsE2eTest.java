@@ -51,91 +51,70 @@ final class GeneratedPrimitiveStepsE2eTest {
     }
 
     @Test
-    void choiceTrueConditionExecutesOnlyTheMatchingBranch() {
-        final RunResult.Succeeded result = run(choiceApplication(choiceCondition()), "allow");
+    void branchTrueConditionExecutesOnlyTheMatchingRoute() {
+        final RunResult.Succeeded result = run(branchApplication(allowGroups()), "allow");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("matched"));
     }
 
     @Test
-    void choiceFalseConditionExecutesOnlyTheOtherwiseBranch() {
-        final RunResult.Succeeded result = run(choiceApplication(choiceCondition()), "deny");
+    void branchFalseConditionExecutesOnlyTheOtherwiseRoute() {
+        final RunResult.Succeeded result = run(branchApplication(allowGroups()), "deny");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("otherwise"));
     }
 
     @Test
-    void choiceWithoutMatcherGroupsExecutesTheOtherwiseBranch() {
-        final RunResult.Succeeded result = run(choiceApplication("[]"), "allow");
+    void branchRouteWithoutMatcherGroupsExecutesTheOtherwiseRoute() {
+        final RunResult.Succeeded result = run(branchApplication("[]"), "allow");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("otherwise"));
     }
 
     @Test
-    void filterMatchExecutesOnlyTheMatchingBranch() {
-        final RunResult.Succeeded result = run(filterApplication(filterCondition()), "allow");
-
-        assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("matched"));
-    }
-
-    @Test
-    void filterMismatchExecutesOnlyTheOtherwiseBranch() {
-        final RunResult.Succeeded result = run(filterApplication(filterCondition()), "deny");
-
-        assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("otherwise"));
-    }
-
-    @Test
-    void filterWithoutConditionsExecutesTheOtherwiseBranch() {
-        final RunResult.Succeeded result = run(filterApplication("[]"), "allow");
-
-        assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("otherwise"));
-    }
-
-    @Test
-    void filterLiteralCandidateMatchesWithoutReadingContext() {
-        final RunResult.Succeeded result = run(filterApplication("""
-                [{"option":"literal","inputs":{"value":"constant"}}]
+    void branchLiteralMatcherMatchesWithoutReadingContext() {
+        final RunResult.Succeeded result = run(branchApplication("""
+                [[{"option":"literal","inputs":{"value":"constant"}}]]
                 """), "deny");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("matched"));
     }
 
     @Test
-    void filterPresentFieldMatchesWithoutAPredicate() {
-        final RunResult.Succeeded result = run(filterApplication("""
-                [{"option":"field","inputs":{"field":["context","payload","value"]}}]
+    void branchPresentFieldMatchesWithoutAPredicate() {
+        final RunResult.Succeeded result = run(branchApplication("""
+                [[{"option":"field","inputs":{"field":["context","payload","value"]}}]]
                 """), "allow");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("matched"));
     }
 
     @Test
-    void filterMissingFieldUsesTheOtherwiseRoute() {
-        final RunResult.Succeeded result = run(filterApplication("""
-                [{"option":"field","inputs":{"field":["context","payload","missing"]}}]
+    void branchMissingFieldUsesTheOtherwiseRoute() {
+        final RunResult.Succeeded result = run(branchApplication("""
+                [[{"option":"field","inputs":{"field":["context","payload","missing"]}}]]
                 """), "allow");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("otherwise"));
     }
 
     @Test
-    void filterPresentJsonNullMatchesWithoutAPredicate() {
-        final RunResult.Succeeded result = run(filterApplication("""
-                [{"option":"literal","inputs":{"value":null}}]
+    void branchPresentJsonNullMatchesWithoutAPredicate() {
+        final RunResult.Succeeded result = run(branchApplication("""
+                [[{"option":"literal","inputs":{"value":null}}]]
                 """), "deny");
 
         assertThat(result.context().values().get("result")).isEqualTo(RailixValue.string("matched"));
     }
 
     @Test
-    void filterChecksTheNextCandidateWhenTheFirstPredicateRejects() {
-        final RunResult.Succeeded result = run(filterApplication("""
+    void branchChecksTheNextAlternativeWhenTheFirstPredicateRejects() {
+        final RunResult.Succeeded result = run(branchApplication("""
                 [
-                  {"option":"field","inputs":{"field":["context","payload","value"]},
+                  [{"option":"field","inputs":{"field":["context","payload","value"]},
                    "when":{"transforms":[],"all":[[
-                     {"use":"value.equals","inputs":{"expected":"never"}}]]}},
-                  {"option":"literal","inputs":{"value":"fallback"}}
+                     {"use":"value.equals","inputs":{"expected":"never"}}]]}}],
+                  [{"option":"literal","inputs":{"value":"fallback"}}]
                 ]
                 """), "allow");
 
@@ -143,8 +122,8 @@ final class GeneratedPrimitiveStepsE2eTest {
     }
 
     @Test
-    void repeatedFilterRunsRetainNoEarlierMatch() {
-        final PrimitiveGeneratedApplications.Application application = filterApplication(filterCondition());
+    void repeatedBranchRunsRetainNoEarlierMatch() {
+        final PrimitiveGeneratedApplications.Application application = branchApplication(allowGroups());
 
         assertThat(List.of(
                 run(application, "allow").context().values().get("result"),
@@ -1989,22 +1968,14 @@ final class GeneratedPrimitiveStepsE2eTest {
         return value;
     }
 
-    private String filterCondition() {
-        return "[{\"option\":\"field\",\"inputs\":{"
+    private String allowGroups() {
+        return "[[{\"option\":\"field\",\"inputs\":{"
                 + "\"field\":[\"context\",\"payload\",\"value\"]},"
                 + "\"when\":{\"transforms\":[],\"all\":[[{\"use\":\"value.equals\","
-                + "\"inputs\":{\"expected\":\"allow\"}}]]}}]";
+                + "\"inputs\":{\"expected\":\"allow\"}}]]}}]]";
     }
 
-    private String choiceCondition() {
-        return "[" + filterCondition() + "]";
-    }
-
-    private PrimitiveGeneratedApplications.Application filterApplication(final String conditions) {
-        return applications.branch("railix.filter", conditions);
-    }
-
-    private PrimitiveGeneratedApplications.Application choiceApplication(final String conditions) {
-        return applications.branch("railix.choice", conditions);
+    private PrimitiveGeneratedApplications.Application branchApplication(final String groups) {
+        return applications.branch(groups);
     }
 }

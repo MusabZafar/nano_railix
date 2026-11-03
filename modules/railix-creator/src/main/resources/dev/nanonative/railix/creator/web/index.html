@@ -14,7 +14,7 @@
   <header class="workbench-header">
     <button type="button" id="project-menu" class="workbench-brand" popovertarget="project-actions" aria-label="Project actions" title="Project actions" disabled><b aria-hidden="true">R</b><span>RAILIX</span></button>
     <nav id="project-actions" popover aria-label="Project actions"><button type="button" id="open-project-import" aria-controls="project-import-panel"><i class="hud-symbol" data-symbol="enter" aria-hidden="true"></i>Import project</button></nav>
-    <nav id="group-navigation" aria-label="Location"><div id="world-location"></div><button id="scope-overview" type="button" title="Fit this work area" aria-label="Overview">Overview</button><button id="leave-group" type="button" aria-label="Leave group" title="Leave group"><i class="hud-symbol" data-symbol="back" aria-hidden="true"></i></button></nav>
+    <nav id="group-navigation" aria-label="Location"><div id="world-location"></div><button id="scope-overview" type="button" title="Fit this work area" aria-label="Overview"><i class="hud-symbol" data-symbol="fit" aria-hidden="true"></i><span>Overview</span></button><button id="leave-group" type="button" aria-label="Leave group" title="Leave group"><i class="hud-symbol" data-symbol="back" aria-hidden="true"></i></button></nav>
     <div id="workbench-actions"></div>
     <nav id="example-session" aria-label="Visible Example" hidden></nav>
   </header>
@@ -24,12 +24,12 @@
         <div id="world-plane" aria-hidden="true"></div>
         <div id="world-labels"></div>
         <figure id="example-time-scale" data-world-overlay hidden aria-label="Visible sampled Step time scale" title="Outgoing belts show the previous Step's sampled average. Groups use their slowest measured Step. Colors compare the visible measured Steps and groups on a logarithmic scale. Gray means no current samples. Not CPU load or the selected Example's duration."></figure>
-        <button id="group-return" type="button" data-world-overlay hidden><i class="hud-symbol" data-symbol="back" aria-hidden="true"></i><span></span></button>
+        <button id="group-return" type="button" data-world-overlay hidden><i class="hud-symbol" data-symbol="back" aria-hidden="true"></i><span>Back</span></button>
         <i id="world-cursor" aria-hidden="true" hidden></i>
         <p id="world-error" role="alert" hidden></p>
         <section id="creator-startup" role="alert" hidden><h1 id="creator-startup-title"></h1><p id="creator-startup-detail"></p><button id="creator-retry" type="button" hidden>Retry connection</button></section>
         <section id="world-hud" data-world-overlay aria-label="World controls">
-        <button id="world-map" type="button" aria-label="World minimap. Click to travel; arrow keys to pan." title="World map: click to travel" hidden>
+        <button id="world-map" type="button" aria-label="World minimap. Click the map to travel; Enter to center; arrow keys to pan." title="World map: click to travel" hidden>
           <span class="map-content" aria-hidden="true"><span class="map-cells"></span><i class="map-camera"></i></span>
           <span class="map-title" aria-hidden="true"></span>
         </button>
@@ -110,9 +110,10 @@
         <i class="hud-symbol" data-symbol="close" aria-hidden="true"></i>
       </button>
       </header>
+      <div id="inspector-example"></div>
       <section id="inspector-connections" aria-label="Connections" hidden><span>Connect</span><nav class="world-ports" aria-label="Step outputs"></nav></section>
-      <div id="inspector-content"></div>
-      <footer id="inspector-footer"></footer>
+      <div id="inspector-content" role="tabpanel" tabindex="0"></div>
+      <footer id="inspector-footer"><nav id="inspector-history" aria-label="Editor actions"></nav><div id="inspector-deletion"></div></footer>
     </aside>
   </main>
   <footer class="status-rail" aria-label="Application status">
@@ -124,8 +125,10 @@
     <span id="status-observations" hidden role="status"></span>
     </div>
     <nav class="canvas-tools" aria-label="Canvas controls">
+      <span id="history-controls">
       <button type="button" id="editor-undo" aria-label="Undo" title="Undo (Ctrl/Cmd+Z)" disabled><i class="hud-symbol" data-symbol="undo" aria-hidden="true"></i></button>
       <button type="button" id="editor-redo" aria-label="Redo" title="Redo (Ctrl/Cmd+Shift+Z)" disabled><i class="hud-symbol" data-symbol="redo" aria-hidden="true"></i></button>
+      </span>
       <button type="button" id="zoom-out" aria-label="Zoom out" title="Zoom out (-)"><i class="hud-symbol" data-symbol="minus" aria-hidden="true"></i></button>
       <output id="zoom-level" aria-live="polite">100%</output>
       <button type="button" id="zoom-in" aria-label="Zoom in" title="Zoom in (+)"><i class="hud-symbol" data-symbol="plus" aria-hidden="true"></i></button>

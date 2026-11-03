@@ -1,16 +1,88 @@
 package dev.nanonative.railix.core.step;
 
 import dev.nanonative.railix.core.project.WorkflowRuntime;
+import dev.nanonative.railix.core.runtime.RunResult;
 import dev.nanonative.railix.core.value.RailixValue;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Future;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** Immutable named Step data, supplied separately as compiled configuration and invocation context. */
-public sealed class StepInput permits StepInput.ManagedInput {
+public sealed class StepInput permits StepInput.ManagedInput, StepInput.FlowInput {
+    /** Context ownership for an explicitly executed outgoing path. */
+    public enum ContextMode {
+        /** Share the split's context, with atomic Step writes. */
+        SHARED,
+        /** Start from the split snapshot and keep subsequent changes local. */
+        COPY
+    }
+
+    /** Result of evaluating a route condition without exception-based control flow. */
+    public sealed interface Match permits Match.Decision, Match.Stopped {
+        /** A completed Boolean decision. */
+        enum Decision implements Match { MATCHED, NOT_MATCHED }
+
+        /** A rejected, failed or cancelled condition, not a Boolean false. */
+        record Stopped(RunResult result) implements Match {
+            public Stopped {
+                java.util.Objects.requireNonNull(result, "Condition result cannot be Java null.");
+                if (result instanceof RunResult.Succeeded || result instanceof RunResult.Completed) {
+                    throw new IllegalArgumentException("Stopped conditions require a non-successful result.");
+                }
+            }
+        }
+    }
+
+    /** One authored route. Condition evaluation is lazy and belongs to the current PROCESS call. */
+    public interface Route {
+        /** Returns the declared, stable outgoing outcome. */
+        String outcome();
+
+        /** Returns immutable route settings declared by the Step definition. */
+        StepInput configuration();
+
+        /**
+         * Evaluates this route's OR-of-AND condition against the split input snapshot.
+         *
+         * @return explicit Boolean decision or stopped-condition result
+         * @throws IllegalStateException outside the owning PROCESS invocation/thread
+         */
+        Match match();
+    }
+
+    /** One compiled outgoing continuation, available only during its owning PROCESS call. */
+    public interface Continuation {
+        /**
+         * Runs this path synchronously. A path failure is returned and does not abort siblings.
+         *
+         * @param mode shared context or a copy of the split snapshot
+         * @return this path's complete result
+         * @throws IllegalStateException outside the owning PROCESS call/thread
+         */
+        RunResult run(ContextMode mode);
+
+        /**
+         * Starts lifecycle-owned asynchronous work. Completion/cancellation remains tracked until
+         * the worker actually terminates. PROCESS may return without joining the Future, but its
+         * invocation is not complete until its owned work finishes.
+         *
+         * @param mode shared context or a copy of the split snapshot
+         * @return Future for this path only, whose cancellation does not cancel siblings
+         * @throws IllegalStateException outside the owning PROCESS call/thread
+         */
+        Future<RunResult> start(ContextMode mode);
+    }
+
+    /** Runtime-owned lookup for the current Step's compiled outgoing continuations. */
+    @FunctionalInterface
+    public interface Continuations {
+        /** Returns a declared continuation, or rejects an unknown outcome. */
+        Continuation outcome(String outcome);
+    }
     /** Runtime-owned resource access; Step authors use the resource methods on their context. */
     public interface Resources {
         /** Returns a registered resource with its exact declared type; missing/closed resources fail explicitly. */
@@ -216,6 +288,46 @@ public sealed class StepInput permits StepInput.ManagedInput {
     }
 
     /**
+     * Creates an invocation carrying declared route conditions and optional continuation access.
+     * Ordinary invocations without these capabilities keep their existing representation.
+     *
+     * @param values resolved values
+     * @param options selected options
+     * @param programs invocation-scoped nested programs
+     * @param selected selected child inputs
+     * @param outcome primary outcome
+     * @param resources optional resource access, or Java null
+     * @param routes non-null map of declared route inputs
+     * @param continuations optional continuation access, or Java null
+     * @return immutable invocation data with only the declared capabilities
+     */
+    public static StepInput routedInvocation(final Map<String, RailixValue> values, final Map<String, String> options,
+                                             final Map<String, Program> programs, final Map<String, StepInput> selected,
+                                             final String outcome, final Resources resources,
+                                             final Map<String, List<Route>> routes, final Continuations continuations) {
+        return routes.isEmpty() && continuations == null
+                ? invocation(values, options, programs, selected, outcome, resources)
+                : new FlowInput(values, options, programs, selected, outcome, resources, routes, continuations);
+    }
+
+    /** Returns authored routes in declaration order, without evaluating their conditions. */
+    public List<Route> routes(final String name) {
+        throw new IllegalArgumentException("Route input is not declared: " + name);
+    }
+
+    /**
+     * Returns one compiled outgoing path when the definition enables continuations.
+     *
+     * @param outcome non-blank declared outgoing outcome
+     * @return invocation-scoped continuation
+     * @throws IllegalStateException when the definition has no continuation capability
+     * @throws IllegalArgumentException for an undeclared outcome
+     */
+    public Continuation continuation(final String outcome) {
+        throw new IllegalStateException("This Step does not declare continuation execution.");
+    }
+
+    /**
      * Registers a private resource once during this placement's PRE and returns it.
      * It remains available in PROCESS and POST. Railix attempts cleanup once, after admitted
      * work and POST, including partial startup failure. Do not close it manually or retain
@@ -314,6 +426,48 @@ public sealed class StepInput permits StepInput.ManagedInput {
         @Override
         Resources resources() {
             return resources == null ? super.resources() : resources;
+        }
+    }
+
+    private static final class FlowInput extends StepInput {
+        private final Resources resources;
+        private final Map<String, List<Route>> routes;
+        private final Continuations continuations;
+
+        private FlowInput(final Map<String, RailixValue> values, final Map<String, String> options,
+                          final Map<String, Program> programs, final Map<String, StepInput> selected,
+                          final String outcome, final Resources resources,
+                          final Map<String, List<Route>> routes, final Continuations continuations) {
+            super(values, options, programs, selected, outcome);
+            this.resources = resources;
+            this.routes = switch (routes.size()) {
+                case 0 -> Map.of();
+                case 1 -> {
+                    final var entry = routes.entrySet().iterator().next();
+                    yield Map.of(entry.getKey(), List.copyOf(entry.getValue()));
+                }
+                default -> {
+                    final Map<String, List<Route>> copied = new java.util.LinkedHashMap<>();
+                    routes.forEach((name, declared) -> copied.put(name, List.copyOf(declared)));
+                    yield Map.copyOf(copied);
+                }
+            };
+            this.continuations = continuations;
+        }
+
+        @Override
+        Resources resources() {
+            return resources == null ? super.resources() : resources;
+        }
+
+        @Override
+        public List<Route> routes(final String name) {
+            return routes.containsKey(name) ? routes.get(name) : super.routes(name);
+        }
+
+        @Override
+        public Continuation continuation(final String outcome) {
+            return continuations == null ? super.continuation(outcome) : continuations.outcome(outcome);
         }
     }
 

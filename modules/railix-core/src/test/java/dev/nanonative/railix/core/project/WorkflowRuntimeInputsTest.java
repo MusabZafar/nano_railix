@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 final class WorkflowRuntimeInputsTest {
     private static final WorkflowRuntime.StepPlan PLAN = new WorkflowRuntime.StepPlan(
             "step", "test.step", false, List.of(), List.of(), List.of("next", "skip"),
-            Map.of(), Map.of(), "nodes[0]", new StepInput(Map.of(), Map.of(), Map.of(), Map.of(), "next")
+            Map.of(), Map.of(), "nodes[0]", new StepInput(Map.of(), Map.of(), Map.of(), Map.of(), "next"), false, 0
     );
     private static final WorkflowRuntime.InputResolver RECEIVES =
             (execution, received, outcome) -> WorkflowRuntime.inputs(received, outcome);

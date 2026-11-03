@@ -377,7 +377,7 @@ final class CreatorSceneObservationsE2eTest extends CreatorServerE2eSupport {
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"one-arrival","payload":[],"context":{"payload":{}}}]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[]}},
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
                   {"id":"matched","use":"railix.field-manipulation","inputs":{}},
                   {"id":"otherwise","use":"railix.field-manipulation","inputs":{}},
                   {"id":"joined","use":"railix.field-manipulation","inputs":{}}

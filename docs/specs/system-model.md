@@ -244,7 +244,7 @@ third-party definitions:
 - readable, writable, or read/write workflow `PATH` values;
 - tagged `OPTIONS` with owned inputs;
 - ordered `CANDIDATES` with explicit value sources, conditions, and optional authored outcomes;
-- Boolean `MATCHER_GROUPS` containing ordered OR groups of ordered AND matchers;
+- `MATCHER_GROUPS` containing ordered OR groups of ordered AND matchers, optionally per authored route;
 - ordered nested `STEPS` bound to one earlier value source.
 
 Compiler, runtime, and Creator consume this grammar from definitions. They do not branch on a
@@ -378,36 +378,45 @@ Creator has no generic missing-value route or termination editor. Explicit contr
 branch selection, coordinated waiting and loops. Planned ordinary multi-input convergence needs
 no separate control Step. It follows SYS-008 below.
 
-## Filter
+## Branch
 
-Filter is one ordinary standard-library `STEP`, not a kind or compiler intrinsic. Its generic
-ordered `conditions` candidates select a workflow-context field or literal and optionally run a
-condition. A present source with no condition matches; otherwise every authored `all` program must
-finish BOOLEAN and pass. The first accepted candidate selects `match`; no accepted candidate selects
-`otherwise`.
+`railix.branch` is one ordinary standard-library `STEP`, not a kind or compiler intrinsic.
+It replaces the separate Filter, Choice and Switch catalog entries without aliases or migration.
+Those names, and Split, remain search terms for the same definition. Join and Loop are not modes.
 
-Both outcomes always have explicit links in `railix.project.json`. Creator materializes both links
-when Filter is added, renders declared outcomes in deterministic depth-first order with an explicit
-stack, and inserts later Steps into the route selected in the Inspector. Missing, duplicate source-port,
-or unknown links remain visible on their owning outcome and are never presented as End. Distinct
-outcomes may target the same Step and each arrival executes independently. Functional compilation rejects malformed links before a project enters a Creator workspace;
-insertion is also disabled for any malformed transient route. Runtime executes exactly one
-successor. Control Steps can be grouped and inserted inside groups without changing the flat graph.
+Its ordinary `selection` option is `first` (default), `matching` or `all`. The ordinary `execution`
+option is `sequential` (default) or `parallel`. Each authored route has a stable `outcome`, Boolean
+`groups`, and its own ordinary `inputs`. The built-in definition declares `own_context`, default
+false. Generic `MATCHER_GROUPS.withAuthoredOutcomes()` and `routeInput(...)` expose the same
+declaration grammar to installed Steps. Route configuration supports JSON, paths and options,
+not executable child inputs. A Step may declare only one top-level authored-outcome input.
 
-## Choice
+Every route owns one non-blank safe lowercase ID, unique within the node and not colliding with
+fixed outcomes. The project owns IDs and explicit flat links. Optional labels live in Creator
+metadata and do not control execution. Creator adds/removes/reorders routes through the contract.
+Deleting a connected route is blocked until its connection is resolved. Missing or duplicate links
+remain visible at their ports, never disguised as End. Groups do not change routing.
 
-Choice is one ordinary standard-library `STEP`, not a kind or compiler intrinsic. Its generic
-`conditions` input is an ordered outer list of OR groups. Every non-empty group is an ordered list
-of AND matchers. Each matcher reuses the field/literal source and optional condition grammar from
-candidates.
+For `first`, routes are checked in order until one matches. For `matching`, every route is checked
+against the split input before any selected path runs. For `all`, no condition is evaluated.
+No selected route uses the fixed `otherwise` link. Selected paths start in authored route order.
+Sequential execution finishes each path before starting the next, including after path failure.
+Parallel execution starts lifecycle-owned virtual-thread work and does not serialize PROCESS calls.
+
+Each route's `groups` is an ordered outer list of OR groups. Every non-empty group is an ordered
+list of AND matchers. Each matcher reuses the field/literal source and optional condition grammar
+from candidates. A singleton group with no condition is a presence check, covering Filter behavior.
+The literal source defaults to canonical JSON null, a present value. Adding that source produces a
+valid editable condition immediately rather than an absent required configuration field.
 
 A missing source is false and skips its condition. Canonical JSON `null`, false, zero,
 empty strings, and empty containers remain present. Groups and matchers short-circuit in authored
 order. An empty outer list resolves false; an empty inner group is rejected at compilation.
-Failures, rejections, cancellation, and interruption from matcher conditions propagate unchanged.
-True selects `match`; false selects `otherwise`, and both successors are explicit flat links.
+Failures, rejections, cancellation, and interruption from matcher conditions stop that Branch
+invocation. They are not false and do not start an arbitrary fallback path. A later condition after
+the first accepted route in `first` mode is not evaluated.
 
-Creator renders `MATCHER_GROUPS` from the catalog schema without inspecting the Choice Step ID. It
+Creator renders `MATCHER_GROUPS` from the catalog schema without inspecting the Branch Step ID. It
 adds, reorders, and removes OR groups and AND matchers, never authors an empty inner group, and
 persists the ordinary project JSON. Source suggestions come from real preceding Examples. Final
 Boolean and per-predicate stage previews come only from the rolling-built application.
@@ -420,12 +429,37 @@ apply to every generic Step search. Built-in equality, exact-number, and literal
 declare total defaults so inserting one never creates a missing-input diagnostic. Classification,
 compatibility, and defaulting use only Step contracts, never Step IDs.
 
-Choice itself owns only the fixed `match` and `otherwise` outcomes. It does not claim Merge, Split,
-or bounded Loop behavior; Switch owns authored outcomes through the generic contract below.
+Shared paths read a coherent context snapshot at each Step entry. A Step commits all outputs and
+writes atomically against the latest shared context. The last completed commit wins conflicts.
+Unrelated fields are preserved. A failed write commits nothing. Own-context paths start from the
+split snapshot even if an earlier sequential sibling has already written, and never merge back
+implicitly. Unrelated ingress invocations never share this context.
+
+### Public Continuations
+
+An ordinary Step opts into compiled outgoing work with `.withContinuations()`. Its PROCESS can
+inspect `input.routes(name)`, call `route.match()`, and execute a declared outcome through
+`input.continuation(outcome).run(mode)` or `.start(mode)`. The built-in Branch supplies its own
+selection and scheduling logic through these public methods. Compiler/runtime do not interpret
+option names such as `parallel`. Plain candidates and Boolean matcher groups keep their existing
+contracts for third-party Steps that have not opted into authored matcher routes.
+
+`StepResult.continued()` ends ordinary outcome routing after explicit continuations.
+`StepResult.stopped(result)` propagates a path-local rejection, failure or cancellation.
+Continuation handles and route evaluators belong to the active PROCESS thread and cannot be
+retained for later invocation. Child work gets a separate execution and abort state. All started
+workers must terminate before that invocation completes. Cancelling a Future is not proof that
+its worker stopped. Shutdown retains resources until actual admitted work drains.
+
+`RunResult.Completed` contains the parent context and independent `PathResult` entries, including
+isolated path contexts. It does not turn one failed path into a new application-wide failure.
+Source responses still use the original Trigger's mapped response slots. Development traces keep
+separate path timelines, Step states and errors. Example inventory can mark the Example as failed
+while successful Steps remain successful and the application remains running.
 
 ## Planned Merge And Join
 
-Status: **Accepted direction. Implementation and remaining decisions are separate.** Source:
+Status: **Branch implemented and locally checked. Join decisions and implementation remain separate.** Source:
 the user's 2026-09-27 specification. This refines SYS-008: ordinary convergence no longer requires
 a Merger or a mode selection. Waiting belongs to an explicit Join, not to an extra incoming belt.
 The section heading is retained for existing links, not as a requirement for a Merge-Step family.
@@ -442,17 +476,23 @@ thread. Its precise persisted identity is still open in the [Creator contract](c
 - **SYS-023:** Branch selection MUST distinguish one route, multiple matching routes and all
   routes from the separate choice to execute selected work sequentially or independently.
   Adding connections MUST NOT silently enable independent execution or waiting. A proposal in
-  Creator becomes functional behavior only through an explicit authored choice.
+  Creator becomes functional behavior only through an explicit authored choice. The standard
+  library MUST expose Filter, Choice, Switch and Split behavior through one configurable
+  branching Step rather than require users to choose between separate Step concepts. Its
+  capabilities MUST use the same public declarations and results as installed third-party Steps.
 - **SYS-024:** A Join MUST support related branches and independently received related messages,
   wait for its defined required results and merge their contexts before continuation. For conflicting
   values, the value from the latest contributing arrival at that Join MUST win, as selected by the
   user on 2026-09-27. Participating input flows alone do not define which arrivals to combine when
   several jobs overlap. Independent-message scope was requested. Its pairing rule is awaiting
   clarification in FC-4, together with merge granularity and completion rules.
-- **SYS-025:** Join and Limiter behavior MUST be implementable by installed third-party Steps
-  through public Step contracts, without privileged built-in IDs in compiler, runtime or Creator.
-  Extend existing declarations, inputs and results before proposing an additional API. Any new
-  execution capability must have a current use and installed-bundle proof.
+- **SYS-025:** Branch selection, synchronous/asynchronous execution, Join and Limiter behavior
+  MUST be implementable by installed third-party Steps through public Step contracts, without
+  privileged built-in IDs in compiler, runtime or Creator. Definitions MUST declare available
+  settings and required capabilities. Implementations MUST supply their behavior through the
+  same public execution/result capabilities used by the standard library. Extend existing
+  declarations, inputs and results before proposing an additional API. Any new execution
+  capability must have a current use and installed-bundle proof.
 - **SYS-026:** Unused coordination capabilities MUST NOT add capability-specific queues, polling,
   timers or per-invocation tracking to ordinary synchronous flows. No speculative global listener
   or interception system is introduced. Measure the ordinary path under SYS-006 rather than
@@ -463,21 +503,112 @@ thread. Its precise persisted identity is still open in the [Creator contract](c
 
 Simple convergence preserves the arriving context. It does not create a context merge policy.
 Independent jobs remain isolated until an explicit Join combines their related contexts. Using
-the same building or Step does not do so. Context merging at Join is accepted. Whether related
-branches can observe live shared mutations before that point remains open below.
+the same building or Step does not do so. Context merging at Join is accepted. The user's
+2026-10-31 clarification selects shared context by default for branches of one split, with an
+own-context setting per output. An own context starts with a snapshot of the data at that split
+and keeps later writes isolated. This does not share data between unrelated jobs. The user also
+accepted atomic Step commits with the last completed write winning on 2026-10-31.
 Two arrivals mean two executions, including side effects. Convergence is not an exactly-once
 delivery mechanism. A delayed or unselected branch is not a Boolean false result.
 
+### Unified Branching Increment
+
+On 2026-10-31 the user requested implementation and reaffirmed the common branching Step.
+The increment must support an explicit user choice between sequential and parallel execution,
+independent downstream paths and per-output context ownership. Parallel execution is part of
+this requested behavior, not a deferred replacement for the user's choice. Join, Loop and
+Limiter remain later slices, not hidden modes enabled by adding connections. Resolve each
+remaining execution detail at its owning public contract, not by inventing an application-wide
+failure policy.
+
+One configurable Step must cover selecting the first matching route, every matching route,
+or every route. Existing Filter presence checks, Choice OR-of-AND conditions and Switch case
+order/fallback must remain expressible without losing missing/null distinctions or existing
+short-circuit behavior. Names such as Choice and Switch may help discovery, but must not
+require different runtime engines or a built-in Step-ID check in Creator or the compiler.
+
+Accepted decisions from the user's 2026-10-31 clarification:
+
+- **No branching compatibility layer:** the user superseded the earlier migration approval.
+  Replace the old built-in definitions with the common Step and update repository examples and
+  tests directly. Add no old-ID aliases, automatic project conversion or legacy execution path.
+  Unsupported definitions fail through the ordinary unknown-Step diagnostic.
+- **Per-output context:** selected downstream paths share their job's context by default.
+  Each output can request its own context with a checkbox. It starts with the data snapshot at
+  the split. Its later writes remain local and are not implicitly merged back. This copies data,
+  not external side effects, Step lifecycle or resources.
+- **Independent failures:** a failed path stops only itself. Other selected paths still run.
+  Shared context does not imply rollback of earlier writes or cancellation of another path.
+  Application shutdown and an explicit whole-job cancellation retain their lifecycle meaning.
+- **Execution choice:** the user explicitly selects sequential or parallel execution. Neither
+  context sharing nor the number of connections selects this mode implicitly. Both modes
+  retain independent path failures and the selected context policy per output.
+- **Definition-driven extensibility:** configuration options, available execution modes and
+  their behavior use public Step contracts. Creator derives the controls from the installed
+  definition, not from a fixed built-in branching menu. Third-party implementations may add
+  execution logic, including synchronous or asynchronous work, through the same capabilities.
+  No new built-in-ID condition, compiler patch or custom Inspector is needed to use them.
+- **Step/path-local results:** the user clarified that errors belong to the affected Step and
+  path. A declared result follows its connected outcome. An implementation fault remains on
+  that Step and stops that path, without cancelling siblings or making successful paths fail.
+  Do not impose a new application-wide success/failure decision on the user for every split.
+  Existing Trigger response slots remain the source Step's contract, not a compiler-selected
+  combination of branch outcomes. An isolated context is not implicitly copied into those slots.
+
+Context ownership, route selection and execution scheduling remain separate settings.
+No implicit Join or waiting policy follows from choosing a shared context.
+
+Extensibility does not require a second runtime interpreter. Installed definitions are resolved
+at authoring/build time and may compile to direct calls. At execution time, an implementation
+may make permitted decisions from its configuration and declared inputs, using public results
+and lifecycle-owned work. A literal option named `async` is not a privileged runtime command.
+Custom execution logic must preserve completion, cancellation, resource cleanup and shutdown
+accounting under SYS-027. Declaring asynchronous work must not permit an unowned background task
+or reuse of a thread-confined Step invocation after its lifetime ends. The exact public Java
+capabilities are defined under [Public continuations](#public-continuations). Local checks are
+recorded in the [2026-10-31 checkpoint](../verification.md#unified-branching-2026-10-31). This does
+not implement Join correlation or deferred work after PROCESS.
+
+Execution rules and remaining verification for this increment:
+
+- **Selection (FC-1):** the common definition defaults to first matching, with an explicit
+  `otherwise` fallback. Matching is evaluated at the split before selected work starts. First
+  matching short-circuits. All routes skips conditions. Order comes from the authored route list,
+  never from screen placement or wire count.
+- **Concurrent context (FC-3):** coherent Step-entry reads and atomic whole-Step writes are accepted.
+  Concurrent writes to separate fields must not silently discard each other. Own-context copies
+  start at the split snapshot, including when an earlier sequential path has already written.
+- **Result and lifetime ownership (FC-2/5):** retain separate path results rather than one
+  shared aborted flag. Creator must retain each path's actual success/failure. All started work
+  remains owned until completion or confirmed cancellation, even if its source response has
+  already been handled. Preserve response ownership and lifecycle accounting without an
+  implicit Join, error aggregation rule or transport-specific compiler behavior.
+
+The ordinary convergence rule remains unchanged. If two selected routes reach the same Step,
+that Step executes for each arrival. Sequential execution must not invent an implicit Join or
+deduplicate side effects. A successful route outcome is not an execution failure merely because
+its name is `invalid` or `otherwise`.
+
+Acceptance before calling the increment complete:
+
+| Boundary | Required evidence |
+| --- | --- |
+| Catalog and Creator | One discoverable branching Step with selection settings, explicit sequential/parallel execution and per-output own-context checkboxes. Route order and conditions are editable through generic contracts. Changing settings preserves connections or shows affected connections before accepting the change. |
+| Repository examples and prior rules | Express Filter missing/present behavior, Choice nested AND/OR and short circuits, and Switch case order/fallback including a case named `match` with the common definition. Update repository projects and tests directly. Save/reopen and generated execution retain the intended results. There is no old-ID alias or project migration path. |
+| Generated application | Exercise first/multiple/all selection, zero matches, nested branching, repeated arrivals at a common destination, shared writes and isolated context snapshots in sequential and parallel modes. Use held real work to prove parallel progress and a deterministic sequence to prove ordered execution. A failed path does not prevent a successful sibling. Verify explicit non-primary outcomes, cancellation, draining and the caller result under the agreed completion policy. In first-match mode, a failing condition after an accepted case remains unexecuted. Development evidence must match the production result. |
+| Installed bundle | Independently declare settings, route/context policies and synchronous/asynchronous execution behavior using public APIs, without editing compiler, runtime or Creator. Discover and configure those options in the ordinary Creator Inspector, then run the generated artifact with Creator absent. Preserve the existing first-match candidate contract for definitions that have not opted into multiple selection. Reject malformed route declarations before generation, reject unknown/stale continuation calls, and prove asynchronous work remains accounted for through failure/cancellation/shutdown. |
+| Runtime cost | Compare the existing single-route path with the increment on the same workload. Keep capability-specific scheduling state absent when unused. No new polling, worker threads or global interception layer is required for sequential execution. |
+
 ### Current Contract And Missing Capabilities
 
-Repository inspection on 2026-10-17 establishes the following baseline:
+Current implementation, under verification on 2026-10-31:
 
 | Boundary | Present implementation | Gap for this direction |
 | --- | --- | --- |
 | [ProjectCompiler](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/project/ProjectCompiler.java), [ApplicationPlan](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/project/ApplicationPlan.java) | Ordinary Steps accept multiple arrivals. Triggers still require one App connection. Every ordinary outcome has one destination, and the graph is acyclic. There is no exclusive Trigger owner on a Step plan. | Multiple selected outputs, waiting and cycles remain separate contracts. |
-| [StepDefinition](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/step/StepDefinition.java), [StepResult](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/step/StepResult.java) | Generic options, authored outcomes, validation and one returned outcome with outputs/writes. | No declared multi-route result, branch activation/correlation or deferred continuation result. No exact replacement Java API is selected here. |
-| [StepInput](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/step/StepInput.java) | PRE/POST and private/keyed-shared resources can own counters or queues. Nested programs are synchronous, valid only on the owning thread before PROCESS returns. | State storage alone does not expose downstream completion, a transferable continuation, or Join membership. A Step can already do local admission and return overload. It cannot thereby limit arbitrary downstream work. |
-| [WorkflowRuntime](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/project/WorkflowRuntime.java), [ApplicationGenerator](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/project/ApplicationGenerator.java) | One selected integer-routed continuation. Shared destinations have one generated route body and one placement lifecycle. Each invocation retains its own context and original source response. | Independent branches and suspended work need completion/cancellation ownership beyond the current calling thread. No existing context or nested program may simply be retained and resumed elsewhere. |
+| [StepDefinition](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/step/StepDefinition.java), [StepResult](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/step/StepResult.java) | Generic options, authored routes, continuation capability and explicit continued/stopped results. | Join correlation and work suspended beyond PROCESS remain undefined. |
+| [StepInput](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/step/StepInput.java) | PRE/POST and private/keyed-shared resources. Thread-confined route evaluation and synchronous/asynchronous continuations owned by PROCESS. | No transferable Join arrival, whole-job permit or deferred admission contract. |
+| [WorkflowRuntime](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/project/WorkflowRuntime.java), [ApplicationGenerator](../../modules/railix-core/src/main/java/dev/nanonative/railix/core/project/ApplicationGenerator.java) | Direct compiled calls and integer routing, independent execution/abort states, atomic shared commits, split snapshots and lifecycle-owned workers. Ordinary convergence retains one placement lifecycle. | Join pairing, bounded waiting and persistent coordination remain later work. Nested programs cannot be retained or resumed on another thread. |
 | [CreatorEditor](../../modules/railix-creator/src/main/java/dev/nanonative/railix/creator/CreatorEditor.java), [browser editor](../../modules/railix-creator/src/main/resources/dev/nanonative/railix/creator/web/app.js) | The bounded neighborhood lists all reaching Example sources. Connection edits address one source port. Step deletion bypasses that Step for all arrivals, unless another connected output prevents deletion. | Compound placement of a reused group with several external entrances remains unimplemented. The current compiler rejects disconnected intermediate drafts. |
 
 Existing compiler rejection and generated Step-contract tests verify the remaining restrictions,
@@ -492,17 +623,20 @@ These questions block only their dependent slices, not ordinary non-waiting conv
 
 | ID / timing | Plain-language question | Decision still needed |
 | --- | --- | --- |
-| FC-1, before multi-route selection | Two shipping rules match. Run the first, both, or every route? What if none matches? | Selection order, empty selection/fallback, persisted configuration and migration. Link count is not a default. |
-| FC-2, before sequential multi-route execution | Price calculation runs before invoice creation. Does invoice creation see the new price, and does a failed first route prevent the second? | Branch boundaries, order, context visibility, failure propagation and response/completion rules. |
-| FC-3, before independent branches | Price and stock checks run at once. Both write `status`. Which changes can each see before reaching a Join? | Shared-context versus branch-result ownership and write visibility remain open. The accepted last-arrival-wins rule applies when Join combines contexts. It does not select live concurrent mutation rules. Repeated writes can also be deliberate and valid. |
+| FC-1, multi-route selection | Two shipping rules match. Run the first, both, or every route? What if none matches? | Defined under Branch: first by default, ordered matching/all choices, explicit otherwise fallback. The user excluded old-definition migration and aliases. Link count does not select scheduling. |
+| FC-2, before multi-route execution | An invoice path fails while a notification path succeeds. Each path keeps its own result. | Shared context by default, optional snapshot copies, independent path failures and user-selected sequential/parallel execution are accepted. Extend execution/result ownership so one path's failure cannot abort siblings. Source response slots remain owned by the Trigger contract, not a new application-wide failure policy. |
+| FC-3, before independent branches | Price and stock checks run at once. Both write `status`. Which writes are visible, and which context does each output use? | Accepted 2026-10-31: coherent reads at Step entry, atomic whole-Step commits, last completed commit wins. Separate fields survive. Isolated contexts start at the split snapshot, with results retained per path and no implicit merge. Repeated writes can be deliberate and valid. |
 | FC-4, before Join | Flow A delivers orders 1 then 2. Flow B delivers 2 then 1. Pair by order identity or simply take the next arrival from each input? | Context merging and last-arrival-wins for conflicting values are accepted. Independent-message scope was requested, but the user expects identification through joined flows. Clarify keyed pairing, next-arrival pairing or only branches of one original job. Then define required/activated inputs, repeated pairings, duplicates/late results and completion. Merge details still include arrival ordering for concurrent deliveries, nested fields, arrays, absent versus null and reserved runtime data. |
-| FC-5, before waiting or independent execution | A stock check fails or never returns. Does the price check stop, and what happens to the waiting order? | Explicit failure/cancellation/timeout outcomes, sibling policy, finite waiting limits, cleanup and lifecycle accounting. Numeric budgets and any retry policy remain unselected. |
+| FC-5, before deferred waiting | A stock check fails or never returns. What happens to its caller and any waiting work? | Branch failures stay local. Future cancellation targets one path. Parent interruption requests cancellation of owned workers and waits for actual termination. Existing graceful-drain rules retain resources while work remains. Join/Limiter timeouts, finite waiting limits and retries still need their own contracts. |
 | FC-6, before Join and whole-job limits interact | A one-place Limiter admits invoice A, which waits for payment B at a Join. B needs the same occupied place. What can complete? | Detect/report provable circular waits. Define admission topology, ownership after joining jobs, response delivery to original callers and transfer/release of every held permit. Never silently release A early, admit B beyond the limit, or treat Join arrival as job completion. |
 
 ### Flow-Control Acceptance
 
 `ConvergingFlowE2eTest` covers ordinary convergence through generated production and development
-artifacts, independent contexts and shared placement resources. The branching, Join and Limiter
+artifacts, independent contexts and shared placement resources. Its production-JAR regression
+also checks that a rejected ingress invocation cannot fail another invocation at the same Step.
+This is evidence for separate arrivals, not for new split contexts or parallel branches.
+The branching, Join and Limiter
 checks below remain planned unless explicitly listed as implemented. Existing synchronous
 behavior must remain unchanged.
 
@@ -562,27 +696,6 @@ lane under sustained load, full/expired waiting, cancellation/shutdown, and no l
 released places. Repeat with an installed third-party Limiter and without Creator/metrics.
 Verify no persistence files and bounded retained memory. Exact expected ordering/counts await
 LM-1 to LM-4. This is not an already usable Step or an approved scheduling implementation.
-
-## Switch
-
-Switch is one ordinary standard-library `STEP`, not a kind or compiler intrinsic. Its top-level
-`cases` input is a generic `CandidatesInput` enabled through `.withAuthoredOutcomes()`. Every
-configured candidate owns one non-blank safe lowercase route ID that is unique within the node and
-does not collide with a fixed Step outcome. Cases resolve in authored order. The first present
-candidate accepted by its condition selects that candidate's route; no accepted candidate selects
-the primary `otherwise` route. Every route has one explicit flat project link.
-
-Authored outcomes are a third-party Step capability. One ordinary Step may declare one such
-top-level candidates input; it cannot also declare a default candidate. Nested programs reject
-Steps with authored outcomes because a nested invocation has no graph destination for those
-routes. Creator derives availability and editing from the contract and excludes such Steps from
-nested Transform and Matcher searches; neither compiler nor Creator branches on `railix.switch`.
-
-The functional project owns stable route IDs and links. Optional human labels live only in the
-owning Step's Creator presentation and merely reference those IDs. Visual grouping neither aligns
-nor copies routes. Compilation adds the configured routes to that node's immutable outcome plan.
-Generated applications initialize the node-specific candidate routes once, while each invocation
-holds only its own selected outcome.
 
 ## CLI Trigger
 

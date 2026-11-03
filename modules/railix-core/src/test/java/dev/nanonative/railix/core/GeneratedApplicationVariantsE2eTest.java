@@ -301,14 +301,13 @@ final class GeneratedApplicationVariantsE2eTest {
     @Test
     void normalDevelopmentExecutorDoesNotEnterTheTraceRuntime() {
         final String source = compiled().developmentApplicationSource();
-        final String executor = source.substring(
-                source.indexOf("private static RunResult execute_1"),
-                source.indexOf("private static RunResult traceExecute_1")
-        );
+        final int start = source.indexOf("private static RunResult execute_1");
+        final String executor = source.substring(start, source.indexOf("\n    }\n", start));
 
         assertThat(executor)
                 .contains("dispatch_1(execution, current, calls)")
                 .doesNotContain("DevelopmentRuntime.Trace", "TRACE_CALLS");
+        assertThat(source).doesNotContain("traceExecute_");
     }
 
     @Test

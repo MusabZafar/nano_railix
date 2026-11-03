@@ -167,8 +167,10 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Inspect Example: invalid-name").setExact(true)).click();
         page.waitForFunction("() => state.world.navigation.length === 2 && document.querySelector('#graph').dataset.cameraMoving === 'false'");
+        page.locator("#close-inspector").click();
         assertThat(page.locator("#group-navigation").boundingBox().height).isLessThanOrEqualTo(52);
-        assertThat(page.locator("#status-coverage").innerText()).endsWith("coverage");
+        assertThat(page.locator("#status-coverage").getAttribute("aria-label")).endsWith("coverage");
+        assertThat(page.locator("#status-coverage").innerText()).matches("\\d+%");
         assertThat(((Number) page.locator("#status-coverage").evaluate(
                 "element => parseFloat(getComputedStyle(element).fontSize)")).doubleValue()).isGreaterThanOrEqualTo(10);
         assertThat(pageErrors).isEmpty();
@@ -308,9 +310,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
                 {"format":1,"id":"choice-arrivals","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{"name":"route","payload":[]}]},
-                  {"id":"choice","use":"railix.switch","inputs":{"cases":[
-                    {"outcome":"match","option":"literal","inputs":{"value":1},"when":{"transforms":[],"all":[]}},
-                    {"outcome":"extra","option":"literal","inputs":{"value":2},"when":{"transforms":[],"all":[]}}]}},
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[{"option":"literal","inputs":{"value":1},"when":{"transforms":[],"all":[]}}]]},{"outcome":"extra","inputs":{},"groups":[[{"option":"literal","inputs":{"value":2},"when":{"transforms":[],"all":[]}}]]}]}},
                   {"id":"shared","use":"railix.field-manipulation","inputs":{}},
                   {"id":"elsewhere","use":"railix.field-manipulation","inputs":{}}
                 ],"links":[{"from":"app.start","to":"command"},{"from":"command.next","to":"choice"},
@@ -373,8 +373,9 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         page.unroute("**/api/scene?**");
         held.forEach(Route::resume);
         page.waitForFunction("() => document.querySelector('#graph').dataset.cameraMoving==='false' && document.querySelector('#zoom-level').textContent==='50%'");
-        assertThat(page.locator("[data-select-node='one']").isVisible()).isTrue();
         assertThat(page.locator("#inspector").isVisible()).isTrue();
+        if (width <= 650) { page.locator("#close-inspector").click(); awaitScene(); }
+        assertThat(page.locator("[data-select-node='one']").isVisible()).isTrue();
         assertThat(pageErrors).isEmpty();
     }
 
@@ -592,7 +593,8 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         assertArrivalChooserClearsHud();
         for (final int width : List.of(640,320)) {
             page.setViewportSize(width,360);
-            awaitScene();
+            // The picker can cover every station label in this short viewport.
+            awaitScene(false);
             for (final Locator control : page.locator(".arrival-palette button").all()) {
                 control.scrollIntoViewIfNeeded();
                 page.screenshot(new Page.ScreenshotOptions().setPath(output.resolve("arrival-" + width + ".png")));
@@ -1520,6 +1522,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.locator(".build-indicator strong").evaluate("element => element.scrollWidth <= element.clientWidth")).isEqualTo(true);
 
         home.click();
+        awaitScene();
         page.waitForFunction("() => document.querySelector('#zoom-level').textContent === '50%'");
         page.locator("#zoom-in").press("Enter");
         page.waitForFunction("() => document.querySelector('#zoom-level').textContent === '70%'");
@@ -2758,7 +2761,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         openInspectorTab("overview");
         final Response response = page.waitForResponse(CreatorWorldBrowserIT::viewportResponse,
                 () -> page.locator("#dock-focus").click());
-        assertThat(page.locator("#inspector").isVisible()).isTrue();
+        assertThat(page.locator("#inspector").isVisible()).isEqualTo(page.viewportSize().width > 650);
         finishScene(response);
         awaitScene();
         final BoundingBox body = stationBounds("command");
@@ -3660,9 +3663,9 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"sample","payload":[],"context":{"payload":{}}}]},
-                  {"id":"gate","use":"railix.choice","inputs":{}},
-                  {"id":"left","use":"railix.choice","inputs":{}},
-                  {"id":"right","use":"railix.choice","inputs":{}},
+                  {"id":"gate","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
+                  {"id":"left","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
+                  {"id":"right","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
                   {"id":"merge-left","use":"railix.field-manipulation","inputs":{}},
                   {"id":"merge-right","use":"railix.field-manipulation","inputs":{}}
                 """);
@@ -3688,7 +3691,8 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
                         .append("\"}");
             }
             final String choice = "audit-" + lane;
-            nodes.append(",{\"id\":\"").append(choice).append("\",\"use\":\"railix.choice\",\"inputs\":{}}");
+            nodes.append(",{\"id\":\"").append(choice).append("\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":"
+                    + "[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}}");
             names.append(",\"").append(choice).append("\":{\"name\":\"Audit path ")
                     .append(lane + 1).append("\"}");
             for (int index = 0; index < 30; index++) {
@@ -3775,8 +3779,8 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
                 project.getAsJsonArray("links").add(link);
             }
             if (!area.equals("support")) cases.add(JsonParser.parseString("""
-                    {"outcome":"%s","option":"field","inputs":{"field":["context","job","area"]},
-                     "when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":"%s"}}]]}}
+                    {"outcome":"%s","inputs":{},"groups":[[{"option":"field","inputs":{"field":["context","job","area"]},
+                     "when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":"%s"}}]]}}]]}
                     """.formatted(area, area)));
             project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"dispatch." + (area.equals("support") ? "otherwise" : area) + "\",\"to\":\"" + area + "-command\"}"));
             for (final var value : style.getAsJsonArray("groups")) {
@@ -3810,7 +3814,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"command\",\"use\":\"railix.trigger.cli\",\"inputs\":{},\"examples\":" + examples + "}"));
         project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"api\",\"use\":\"railix.trigger.http\",\"inputs\":{\"port\":0},\"examples\":" + httpExamples + "}"));
         project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"request-body\",\"use\":\"railix.field-manipulation\",\"inputs\":{\"field\":[\"context\",\"job\"],\"value\":[{\"option\":\"field\",\"inputs\":{\"source\":[\"context\",\"payload\",\"request\",\"body\"]}}],\"steps\":[]}}"));
-        project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"dispatch\",\"use\":\"railix.switch\",\"inputs\":{\"cases\":" + cases + "}}"));
+        project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"dispatch\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":" + cases + "}}"));
         project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"default-job\",\"use\":\"railix.field-manipulation\",\"inputs\":{\"field\":[\"context\",\"job\"],\"value\":[{\"option\":\"field\",\"inputs\":{\"source\":[\"context\",\"job\"]}},{\"option\":\"literal\",\"inputs\":{\"literal\":"
                 + examples.get(0).getAsJsonObject().getAsJsonObject("context").get("job") + "}}],\"steps\":[]}}"));
         for (final String link : List.of("{\"from\":\"app.start\",\"to\":\"command\"}", "{\"from\":\"app.start\",\"to\":\"api\"}",
@@ -3836,12 +3840,12 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
                          {"name":"priority-order","payload":[],"context":{"job":{"region":"standard","priority":"urgent","audit":true,"name":"  GRACE HOPPER  ","city":" NEW YORK ","postalCode":" 10001 ","country":" US ","currency":" USD ","channel":" API ","locale":" EN ","reference":" R-2 ","source":" PARTNER "}}},
                          {"name":"special-order","payload":[],"context":{"job":{"region":"special","priority":"normal","audit":false,"name":"  KATHERINE JOHNSON  ","city":" HAMPTON ","postalCode":" 23666 ","country":" US ","currency":" USD ","channel":" CLI ","locale":" EN ","reference":" R-3 ","source":" OFFICE "}}}]
                         """));
-            } else if (operation.get("use").getAsString().equals("railix.choice")) {
+            } else if (operation.get("use").getAsString().equals("railix.branch") && !id.equals("dispatch")) {
                 final String field = id.equals("gate") ? "region" : id.startsWith("audit-") ? "audit" : "priority";
                 final String expected = id.equals("gate") ? "\"standard\"" : id.startsWith("audit-") ? "true" : "\"normal\"";
                 operation.add("inputs", JsonParser.parseString("""
-                        {"conditions":[[{"option":"field","inputs":{"field":["context","job","%s"]},
-                        "when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":%s}}]]}}]]}
+                        {"routes":[{"outcome":"match","inputs":{},"groups":[[{"option":"field","inputs":{"field":["context","job","%s"]},
+                        "when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":%s}}]]}}]]}]}
                         """.formatted(field, expected)));
             } else if (id.startsWith("lane-")) {
                 final int index = Integer.parseInt(id.substring(id.lastIndexOf('-') + 1));

@@ -19,19 +19,19 @@
       {"name": "unknown-route", "payload": {"method": "POST", "path": "/missing", "query": "", "headers": {}, "body": {"text": "hello"}}},
       {"name": "wrong-method", "payload": {"method": "GET", "path": "/normalize", "query": "", "headers": {}, "body": null}}
     ]},
-    {"id": "route", "use": "railix.choice", "inputs": {"conditions": [[
+    {"id":"route","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[
       {"option": "field", "inputs": {"field": ["context", "payload", "request", "path"]},
        "when": {"transforms": [], "all": [[{"use": "value.equals", "inputs": {"expected": "/normalize"}}]]}},
       {"option": "field", "inputs": {"field": ["context", "payload", "request", "method"]},
        "when": {"transforms": [], "all": [[{"use": "value.equals", "inputs": {"expected": "POST"}}]]}}
-    ]]}},
-    {"id": "valid-text", "use": "railix.choice", "inputs": {"conditions": [[
+    ]]}]}},
+    {"id":"valid-text","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[
       {"option": "field", "inputs": {"field": ["context", "payload", "request", "body", "text"]},
        "when": {"transforms": [], "all": [[{"use": "value.is-type", "inputs": {"type": {"option": "string", "inputs": {}}}}]]}},
       {"option": "field", "inputs": {"field": ["context", "payload", "request", "body", "text"]},
        "when": {"transforms": [{"use": "text.normalize-space", "inputs": {}}, {"use": "text.length", "inputs": {}}],
                 "all": [[{"use": "number.greater-than", "inputs": {"than": 0}}]]}}
-    ]]}},
+    ]]}]}},
     {"id": "normalize", "use": "railix.field-manipulation", "inputs": {
       "field": ["context", "payload", "normalized", "text"],
       "value": [{"option": "field", "inputs": {"source": ["context", "payload", "request", "body", "text"]}}],

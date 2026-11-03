@@ -29,6 +29,7 @@ import java.util.function.Supplier;
  */
 public final class WorkflowRuntime {
     private static final int ABORTED = -1;
+    static final int CONTINUED = -2;
     private static final int WRITE_OK = 0;
     private static final int WRITE_CONFLICT = 1;
     private static final int WRITE_SPARSE = 2;
@@ -183,6 +184,12 @@ public final class WorkflowRuntime {
                 admitted.put(thread, remaining);
             }
             return this;
+        }
+
+        synchronized boolean enterChild(final Thread owner) {
+            if (!admitted.containsKey(owner) || shutdown != null) return false;
+            admitted.merge(Thread.currentThread(), 1, Integer::sum);
+            return true;
         }
 
         /** Runs POST in reverse initialization order, continuing cleanup after an ordinary hook failure. */
@@ -517,6 +524,9 @@ public final class WorkflowRuntime {
         private RunResult aborted;
         private final List<ResultPlan> results;
         private final Lifecycle lifecycle;
+        private SharedContext shared;
+        private FlowRunner runner;
+        private List<RunResult.PathResult> paths;
 
         Execution(
                 final List<ResultPlan> results,
@@ -541,12 +551,47 @@ public final class WorkflowRuntime {
             frame = new EventFrame(context);
         }
 
+        Execution(final Execution parent, final StepInput.ContextMode mode,
+                  final RailixValue.ObjectValue snapshot) {
+            results = List.of();
+            lifecycle = parent.lifecycle;
+            runner = parent.runner;
+            if (mode == StepInput.ContextMode.SHARED) {
+                shared = parent.shared;
+            }
+            frame = new EventFrame(new LinkedHashMap<>(snapshot.values()));
+        }
+
+        Execution runner(final FlowRunner runner) {
+            this.runner = Objects.requireNonNull(runner);
+            return this;
+        }
+
+        Execution child(final StepInput.ContextMode mode, final RailixValue.ObjectValue snapshot) {
+            return new Execution(this, mode, snapshot);
+        }
+
+        int call(final StepPlan plan, final StepCall implementation, final Map<String, RailixValue> received,
+                 final InputResolver resolver, final FlowRunner runner) {
+            runner(runner);
+            return call(plan, implementation, received, resolver);
+        }
+
         int call(
                 final StepPlan plan,
                 final StepCall implementation,
                 final Map<String, RailixValue> received,
                 final InputResolver resolver
         ) {
+            if (shared != null) {
+                frame = new EventFrame(new LinkedHashMap<>(shared.snapshot().values()));
+                frozenContext = null;
+            }
+            return process(plan, implementation, received, resolver);
+        }
+
+        int process(final StepPlan plan, final StepCall implementation, final Map<String, RailixValue> received,
+                    final InputResolver resolver) {
             if (Thread.currentThread().isInterrupted()) {
                 return abort(new RunResult.Cancelled());
             }
@@ -584,7 +629,14 @@ public final class WorkflowRuntime {
                 resolvedReceives = mapped;
             }
             final Inputs resolved = resolver.resolve(this, resolvedReceives, plan.primaryOutcome());
-            return WorkflowRuntime.call(plan, implementation, this, resolved);
+            if (!plan.continuations()) return WorkflowRuntime.call(plan, implementation, this, resolved);
+            final FlowScope scope = new FlowScope(this, plan);
+            resolved.continuations = scope;
+            try {
+                return WorkflowRuntime.call(plan, implementation, this, resolved);
+            } finally {
+                scope.finish();
+            }
         }
 
         int abort(final RunResult result) {
@@ -626,7 +678,8 @@ public final class WorkflowRuntime {
                     );
                 }
             }
-            return new RunResult.Succeeded(context);
+            return paths == null || paths.isEmpty() ? new RunResult.Succeeded(context)
+                    : new RunResult.Completed(context, paths);
         }
 
         Map<String, RailixValue> responses(final Map<String, String> slots) {
@@ -643,6 +696,11 @@ public final class WorkflowRuntime {
         }
 
         RailixValue.ObjectValue context() {
+            if (shared != null) return shared.snapshot();
+            return localContext();
+        }
+
+        RailixValue.ObjectValue localContext() {
             if (frozenContext == null) {
                 frozenContext = frame.snapshot();
             }
@@ -655,9 +713,189 @@ public final class WorkflowRuntime {
 
         private StepInput input(final StepPlan plan, final Inputs inputs) {
             final Lifecycle.ResourceScope scope = lifecycle == null ? null : lifecycle.scopes.get(plan);
-            return scope == null || scope.resources.isEmpty() ? inputs.input()
-                    : StepInput.invocation(inputs.values, inputs.options, inputs.programs, inputs.selected,
-                            inputs.primaryOutcome, scope);
+            return StepInput.routedInvocation(inputs.values, inputs.options, inputs.programs, inputs.selected,
+                    inputs.primaryOutcome, scope == null || scope.resources.isEmpty() ? null : scope,
+                    inputs.routes, inputs.continuations);
+        }
+
+        int commit(final StepPlan plan, final StepResult result, final Inputs resolution,
+                   final boolean primary, final int outcome) {
+            if (shared != null) {
+                synchronized (shared) {
+                    frame = shared.frame;
+                    frozenContext = null;
+                    final int selected = commitLocal(plan, result, resolution, primary, outcome);
+                    shared.frame = frame;
+                    shared.cached = null;
+                    return selected;
+                }
+            }
+            return commitLocal(plan, result, resolution, primary, outcome);
+        }
+
+        int commitLocal(final StepPlan plan, final StepResult result, final Inputs resolution,
+                        final boolean primary, final int outcome) {
+            final int mutations = (primary ? plan.returns().size() : 0) + result.writes().size();
+            final EventFrame next = mutations > 1 ? frame.fork() : frame;
+            if (primary) {
+                for (final Port port : plan.returns()) {
+                    final int status = next.write(plan.returnPaths().get(port.name()), result.outputs().get(port.name()));
+                    if (status != WRITE_OK) return abort(writeFailure(status, plan.path() + ".returns." + port.name()));
+                }
+            }
+            for (final Map.Entry<String, PathBinding> path : resolution.paths.entrySet()) {
+                final RailixValue write = result.writes().get(path.getKey());
+                if (write == null) continue;
+                final int status = next.write(path.getValue().path(), write);
+                if (status != WRITE_OK) return abort(writeFailure(status, plan.path() + ".inputs." + path.getKey()));
+            }
+            frame = next;
+            frozenContext = null;
+            return outcome;
+        }
+    }
+
+    /** Shared only by paths explicitly started from the same continuation scope. */
+    static final class SharedContext {
+        private EventFrame frame;
+        private RailixValue.ObjectValue cached;
+
+        SharedContext(final EventFrame frame) {
+            this.frame = frame;
+        }
+
+        synchronized RailixValue.ObjectValue snapshot() {
+            if (cached == null) cached = frame.snapshot();
+            return cached;
+        }
+    }
+
+    @FunctionalInterface
+    interface FlowRunner {
+        RunResult run(Execution execution, int outcome);
+    }
+
+    /** Owns outgoing work for one PROCESS call; failures stay in each path's Execution. */
+    static final class FlowScope implements StepInput.Continuations {
+        private Execution parent;
+        private final StepPlan plan;
+        private Thread owner = Thread.currentThread();
+        private RailixValue.ObjectValue snapshot;
+        private List<Thread> workers;
+        private List<RunResult.PathResult> results;
+        private boolean open = true;
+        private Error fatal;
+
+        FlowScope(final Execution parent, final StepPlan plan) {
+            this.parent = parent;
+            this.plan = plan;
+        }
+
+        @Override
+        public StepInput.Continuation outcome(final String outcome) {
+            if (!open || Thread.currentThread() != owner) {
+                throw new IllegalStateException("Continuations belong to the active PROCESS invocation.");
+            }
+            if (!plan.outcomes().contains(outcome)) {
+                throw new IllegalArgumentException("Continuation outcome is not declared: " + outcome);
+            }
+            return new StepInput.Continuation() {
+                @Override
+                public RunResult run(final StepInput.ContextMode mode) {
+                    requireActive(mode);
+                    return execute(outcome, mode, false);
+                }
+
+                @Override
+                public java.util.concurrent.Future<RunResult> start(final StepInput.ContextMode mode) {
+                    requireActive(mode);
+                    final var ran = new java.util.concurrent.atomic.AtomicBoolean();
+                    final var future = new java.util.concurrent.FutureTask<RunResult>(() -> {
+                        ran.set(true);
+                        return execute(outcome, mode, true);
+                    });
+                    final Thread thread = Thread.ofVirtual().unstarted(() -> {
+                        future.run();
+                        if (future.isCancelled() && !ran.get()) {
+                            synchronized (FlowScope.this) {
+                                results.add(new RunResult.PathResult(plan.id(), outcome, new RunResult.Cancelled()));
+                            }
+                        }
+                    });
+                    if (workers == null) workers = new ArrayList<>();
+                    workers.add(thread);
+                    thread.start();
+                    return future;
+                }
+
+                void requireActive(final StepInput.ContextMode mode) {
+                    Objects.requireNonNull(mode, "Continuation context mode cannot be Java null.");
+                    if (!open || Thread.currentThread() != owner) {
+                        throw new IllegalStateException("Continuation belongs to its active PROCESS invocation.");
+                    }
+                    if (snapshot == null) snapshot = parent.localContext();
+                    if (results == null) results = new ArrayList<>();
+                    if (mode == StepInput.ContextMode.SHARED && parent.shared == null) {
+                        parent.shared = new SharedContext(parent.frame.fork());
+                    }
+                }
+            };
+        }
+
+        RunResult execute(final String outcome, final StepInput.ContextMode mode, final boolean asynchronous) {
+            final Lifecycle lifecycle = parent.lifecycle;
+            final boolean admitted = !asynchronous || lifecycle == null || lifecycle.enterChild(owner);
+            RunResult result;
+            try {
+                result = !admitted || Thread.currentThread().isInterrupted() ? new RunResult.Cancelled()
+                        : parent.runner.run(parent.child(mode, snapshot), plan.outcomes().indexOf(outcome));
+            } catch (final RuntimeException failure) {
+                result = failed("CONTINUATION_IMPLEMENTATION_FAULT",
+                        "Compiled continuation failed unexpectedly.", plan.id());
+            } catch (final Error error) {
+                synchronized (this) { if (fatal == null) fatal = error; }
+                throw error;
+            } finally {
+                if (asynchronous && lifecycle != null && admitted) lifecycle.leave();
+            }
+            synchronized (this) {
+                if (result instanceof RunResult.Completed completed) {
+                    results.add(new RunResult.PathResult(plan.id(), outcome, new RunResult.Succeeded(completed.context())));
+                    results.addAll(completed.paths());
+                } else results.add(new RunResult.PathResult(plan.id(), outcome, result));
+            }
+            return result;
+        }
+
+        void finish() {
+            open = false;
+            boolean interrupted = Thread.interrupted();
+            if (workers != null) {
+                if (interrupted) workers.forEach(Thread::interrupt);
+                for (final Thread worker : workers) {
+                    while (worker.isAlive()) {
+                        try {
+                            worker.join();
+                        } catch (final InterruptedException cancellation) {
+                            interrupted = true;
+                            workers.forEach(Thread::interrupt);
+                        }
+                    }
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+            if (results != null && !results.isEmpty()) {
+                if (parent.paths == null) parent.paths = new ArrayList<>();
+                parent.paths.addAll(results);
+            }
+            final Error error = fatal;
+            parent = null;
+            owner = null;
+            snapshot = null;
+            results = null;
+            workers = null;
+            fatal = null;
+            if (error != null) throw error;
         }
     }
 
@@ -667,7 +905,6 @@ public final class WorkflowRuntime {
             final Execution execution,
             final Inputs resolution
     ) {
-        final EventFrame frame = execution.frame;
         if (resolution.failure != null) {
             resolution.closePrograms();
             return execution.abort(resolution.failure);
@@ -698,6 +935,11 @@ public final class WorkflowRuntime {
                     "Step implementation returned Java null.",
                     plan.id()
             ));
+        }
+        if (result.stopped().isPresent()) return execution.abort(result.stopped().orElseThrow());
+        if (result.isContinued()) {
+            return plan.continuations() ? CONTINUED : execution.abort(failed(
+                    "STEP_CONTINUATION_UNDECLARED", "Step completed continuations without declaring the capability.", plan.id()));
         }
         final int outcome = plan.outcomes().indexOf(result.outcome());
         if (outcome < 0) {
@@ -759,35 +1001,7 @@ public final class WorkflowRuntime {
                 ));
             }
         }
-        final int mutations = (primary ? plan.returns().size() : 0) + result.writes().size();
-        final EventFrame next = mutations > 1 ? frame.fork() : frame;
-        if (primary) {
-            for (final Port port : plan.returns()) {
-                final int status = next.write(plan.returnPaths().get(port.name()), result.outputs().get(port.name()));
-                if (status != WRITE_OK) {
-                    return execution.abort(writeFailure(
-                            status,
-                            plan.path() + ".returns." + port.name()
-                    ));
-                }
-            }
-        }
-        for (final Map.Entry<String, PathBinding> path : resolution.paths.entrySet()) {
-            final RailixValue write = result.writes().get(path.getKey());
-            if (write == null) {
-                continue;
-            }
-            final int status = next.write(path.getValue().path(), write);
-            if (status != WRITE_OK) {
-                return execution.abort(writeFailure(
-                        status,
-                        plan.path() + ".inputs." + path.getKey()
-                ));
-            }
-        }
-        execution.frame = next;
-        execution.frozenContext = null;
-        return outcome;
+        return execution.commit(plan, result, resolution, primary, outcome);
     }
 
     static final class Inputs {
@@ -796,6 +1010,8 @@ public final class WorkflowRuntime {
         private Map<String, StepInput.Program> programs = Map.of();
         private Map<String, StepInput> selected = Map.of();
         private Map<String, PathBinding> paths = Map.of();
+        private Map<String, List<StepInput.Route>> routes = Map.of();
+        private StepInput.Continuations continuations;
         private final String primaryOutcome;
         private List<ProgramScope> programScopes;
         private RunResult failure;
@@ -893,33 +1109,26 @@ public final class WorkflowRuntime {
                 final List<List<CandidatePlan>> groups,
                 final Execution execution
         ) {
-            if (failure != null) {
-                return;
+            if (failure != null) return;
+            final StepInput.Match match = matchGroups(groups, values, execution, primaryOutcome);
+            if (match instanceof StepInput.Match.Stopped stopped) fail(stopped.result());
+            else values = put(values, name, RailixValue.bool(match == StepInput.Match.Decision.MATCHED));
+        }
+
+        void routes(final String name, final List<RoutePlan> plans, final Execution execution) {
+            if (failure != null) return;
+            final Map<String, RailixValue> parentValues = Map.copyOf(values);
+            final List<StepInput.Route> declared = new ArrayList<>(plans.size());
+            for (final RoutePlan plan : plans) {
+                declared.add(new RouteEvaluation(plan, execution, parentValues, primaryOutcome));
             }
-            boolean matched = false;
-            groupLoop:
-            for (final List<CandidatePlan> group : groups) {
-                for (final CandidatePlan candidate : group) {
-                    final MatcherEvaluation evaluation = evaluate(
-                            candidate,
-                            values,
-                            execution,
-                            primaryOutcome
-                    );
-                    if (evaluation.failure() != null) {
-                        evaluation.children().closePrograms();
-                        fail(evaluation.failure());
-                        return;
-                    }
-                    evaluation.children().closePrograms();
-                    if (!evaluation.matched()) {
-                        continue groupLoop;
-                    }
+            if (routes.isEmpty()) routes = Map.of(name, List.copyOf(declared));
+            else {
+                if (!(routes instanceof LinkedHashMap<String, List<StepInput.Route>>)) {
+                    routes = new LinkedHashMap<>(routes);
                 }
-                matched = true;
-                break;
+                routes.put(name, List.copyOf(declared));
             }
-            values = put(values, name, RailixValue.bool(matched));
         }
 
         void program(
@@ -985,6 +1194,9 @@ public final class WorkflowRuntime {
         }
 
         private void closePrograms() {
+            for (final List<StepInput.Route> declared : routes.values()) {
+                for (final StepInput.Route route : declared) ((RouteEvaluation) route).close();
+            }
             if (programScopes != null) {
                 for (final ProgramScope program : programScopes) {
                     program.close();
@@ -992,6 +1204,64 @@ public final class WorkflowRuntime {
                 programScopes = null;
             }
         }
+    }
+
+    static final class RouteEvaluation implements StepInput.Route {
+        private final RoutePlan plan;
+        private Execution execution;
+        private Map<String, RailixValue> values;
+        private final String primary;
+        private Thread owner = Thread.currentThread();
+        private boolean active = true;
+        private StepInput.Match result;
+
+        RouteEvaluation(final RoutePlan plan, final Execution execution,
+                        final Map<String, RailixValue> values,
+                        final String primary) {
+            this.plan = plan;
+            this.execution = execution;
+            this.values = values;
+            this.primary = primary;
+        }
+
+        @Override public String outcome() { return plan.outcome(); }
+        @Override public StepInput configuration() { return plan.configuration(); }
+
+        void close() {
+            active = false;
+            execution = null;
+            values = null;
+            owner = null;
+            result = null;
+        }
+
+        @Override
+        public StepInput.Match match() {
+            if (!active || Thread.currentThread() != owner) {
+                throw new IllegalStateException("Route conditions belong to their active PROCESS invocation.");
+            }
+            if (result == null) {
+                // PROCESS retains its entry frame. Nested matcher programs cannot write it.
+                result = matchGroups(plan.groups(), values, execution, primary);
+            }
+            return result;
+        }
+    }
+
+    static StepInput.Match matchGroups(final List<List<CandidatePlan>> groups,
+                                      final Map<String, RailixValue> values,
+                                      final Execution execution, final String primaryOutcome) {
+        groupLoop:
+        for (final List<CandidatePlan> group : groups) {
+            for (final CandidatePlan candidate : group) {
+                final MatcherEvaluation evaluation = evaluate(candidate, values, execution, primaryOutcome);
+                evaluation.children().closePrograms();
+                if (evaluation.failure() != null) return new StepInput.Match.Stopped(evaluation.failure());
+                if (!evaluation.matched()) continue groupLoop;
+            }
+            return StepInput.Match.Decision.MATCHED;
+        }
+        return StepInput.Match.Decision.NOT_MATCHED;
     }
 
     private static MatcherEvaluation evaluate(
@@ -1581,7 +1851,9 @@ public final class WorkflowRuntime {
             Map<String, Path> receivePaths,
             Map<String, Path> returnPaths,
             String path,
-            StepInput configuration
+            StepInput configuration,
+            boolean continuations,
+            int node
     ) {
         String primaryOutcome() {
             return outcomes.getFirst();
@@ -1607,6 +1879,9 @@ public final class WorkflowRuntime {
             NestedProgram transforms,
             List<NestedProgram> predicates
     ) {
+    }
+
+    record RoutePlan(String outcome, StepInput configuration, List<List<CandidatePlan>> groups) {
     }
 
     record NestedProgram(List<NestedStep> steps) {

@@ -191,6 +191,7 @@ async function boot() {
         ({id:item.id+'.'+outcome,name:outcomeLabel(node(item.id),outcome)})) : [],
       connect: (from,to) => { void editorAction({kind:'connect',from,to}).then(result => { if (!result) state.world.connection(null); }); },
       insert: openBeltPicker,
+      onConnection: syncInspectorLayout,
       deselect: clearSelection,
       selectGroup: selectWorldGroup,
       appearance: worldAppearance,
@@ -290,6 +291,7 @@ function render() {
     ? document.activeElement : null;
   const draft = active?.id ? {id:active.id, value:active.value, start:active.selectionStart,
     end:active.selectionEnd, direction:active.selectionDirection, scroll:active.scrollTop} : null;
+  const focusedTab = document.activeElement.closest('#inspector-nav [data-inspector-mode]')?.dataset.inspectorMode;
   state.iconController?.abort();
   content.innerHTML = inspector();
   if (content.dataset.context !== context) content.scrollTop = 0;
@@ -298,6 +300,7 @@ function render() {
   const tabs = document.querySelector('#inspector-nav');
   if (navigation && tabs.firstElementChild?.outerHTML === navigation.outerHTML) navigation.remove();
   else tabs.replaceChildren(...(navigation ? [navigation] : []));
+  if (focusedTab) document.querySelector(`#inspector-tab-${focusedTab}`)?.focus({preventScroll:true});
   inspectorElement.dataset.selection = state.regionSelection?.id || state.selection.id;
   renderPreview();
   openDetails.forEach(id => {
@@ -324,6 +327,7 @@ function render() {
     else void state.world.refresh();
   }
   renderWorldStatus();
+  syncInspectorLayout();
 }
 
 function updateWorldMarks(scene) {
@@ -375,8 +379,8 @@ function renderDock() {
     ? region.group ? `data-delete-region="${html(region.group)}"` : ''
     : `id="delete-step" ${trigger || removableStep(operation) ? '' : 'disabled'}`;
   const footer = document.querySelector('#inspector-footer');
-  renderDockMarkup(footer, deletion ? `<button type="button" ${deletion} class="danger" title="Delete ${html(name)}" aria-label="Delete ${html(name)}"><i class="hud-symbol" data-symbol="trash" aria-hidden="true"></i><span>Delete</span></button>` : '');
-  footer.hidden = !deletion;
+  renderDockMarkup(document.querySelector('#inspector-deletion'), deletion ? `<button type="button" ${deletion} class="danger" title="Delete ${html(name)}" aria-label="Delete ${html(name)}"><i class="hud-symbol" data-symbol="trash" aria-hidden="true"></i><span>Delete</span></button>` : '');
+  footer.hidden = !deletion && !phoneInspector.matches;
   const type = region ? 'Group' : app ? 'Application' : trigger ? 'Trigger'
     : definition.outcomes?.length > 1 ? stepName(definition) : 'Step';
   const identity = document.querySelector('#inspector-identity');
@@ -445,7 +449,7 @@ function renderExampleContext() {
     ${readError ? '<button type="button" data-retry-example aria-label="Retry Example values" title="Retry Example values">Retry</button>' : ''}
     ${failure ? `<button type="button" data-evidence-step="${html(failure.node)}" class="example-failure" aria-label="Show failing Step" title="${html(failure.message)}"><strong aria-hidden="true">!</strong></button>` : ''}
     ${id ? `<button type="button" data-locate-trigger="${html(state.exampleTrigger)}" aria-label="Locate Example trigger" title="Locate Example trigger"><i class="hud-symbol" data-symbol="locate" aria-hidden="true"></i></button>
-    <button type="button" data-clear-example aria-label="Clear Example" title="Clear Example"><i class="hud-symbol" data-symbol="close" aria-hidden="true"></i></button>` : ''}`);
+    <button type="button" data-clear-example aria-label="Clear Example" title="Clear Example"><i class="hud-symbol" data-symbol="close" aria-hidden="true"></i><span class="example-clear-label">Clear</span></button>` : ''}`);
   const output = host.querySelector('.example-context-state');
   output.title = readError;
   output.dataset.status = example?.status || '';
@@ -568,9 +572,10 @@ function renderDockObservation() {
   } else if (example && !region && state.selection.type !== "app" && definitionFor(operation)?.kind !== 'trigger') {
     const observed = observedExampleContext(operation);
     const failed = failedRunStates.has(state.traceStep?.status);
-    const outcome=state.traceStep?.id===operation.id ? state.traceStep.outcome : '';
-    const route=!observed.status && !failed && outcome && displayOutcomes(operation).length>1
-      ? `<nav class="observed-route" aria-label="Observed route" data-observed-outcome="${html(outcome)}"><strong>${html(outcomeLabel(operation,outcome))}</strong>${stepDestination(outcomeConnection(operation,outcome))}</nav>` : '';
+    const outcomes=state.traceStep?.id===operation.id
+      ? state.traceStep.outcomes || (state.traceStep.outcome ? [state.traceStep.outcome] : []) : [];
+    const route=!observed.status && !failed && displayOutcomes(operation).length>1
+      ? outcomes.map(outcome => `<nav class="observed-route" aria-label="Observed route" data-observed-outcome="${html(outcome)}"><strong>${html(outcomeLabel(operation,outcome))}</strong>${stepDestination(outcomeConnection(operation,outcome))}</nav>`).join('') : '';
     values = selectionEvidence(example, observed.status ? null : failed ? {before:observed.root.context} : state.traceChanges,
       observed.status ? observed : {kind:failed ? 'failed' : 'succeeded',status:failed ? 'Stopped here' : 'Observed changes'}, failed
         ? `<div class="evidence-failure">${nodeIssues(operation.id).length ? issueList(operation.id,false)
@@ -616,7 +621,7 @@ function renderDockObservation() {
   }
 }
 
-function contextChanges(before, after) {
+function contextChanges(before, after, ownChanges) {
   const changed = new Map(), branches = new Set(), pending = [{path: [], before, after}];
   while (pending.length) {
     const item = pending.pop(), a = item.before, b = item.after;
@@ -636,7 +641,18 @@ function contextChanges(before, after) {
     changed.set(JSON.stringify(item.path), a === undefined ? 'Added' : b === undefined ? 'Removed' : 'Changed');
     for (let length = 0; length < item.path.length; length++) branches.add(JSON.stringify(item.path.slice(0, length)));
   }
-  return {before, after, changed, branches, count:changed.size};
+  const own = new Map();
+  if (Array.isArray(ownChanges)) {
+    changed.clear();
+    branches.clear();
+    for (const change of ownChanges) {
+      const token = JSON.stringify(change.path);
+      own.set(token, change);
+      changed.set(token, !Object.hasOwn(change,'before') ? 'Added' : !Object.hasOwn(change,'after') ? 'Removed' : 'Changed');
+      for (let length=0; length<change.path.length; length++) branches.add(JSON.stringify(change.path.slice(0,length)));
+    }
+  }
+  return {before, after, changed, branches, own, count:changed.size};
 }
 
 function contextValue(value, path, budget, side = 'after') {
@@ -670,7 +686,8 @@ function contextRows(delta, path = [],
   while (index < keys.length && index < limit && budget.left > 0) {
     budget.left--;
     const key = keys[index++], locator = [...path,key], token = JSON.stringify(locator);
-    const before = valueAt(a,[key]), after = valueAt(b,[key]), value = after === undefined ? before : after;
+    const commit = !snapshot && delta.own?.get(token);
+    const before = commit ? commit.before : valueAt(a,[key]), after = commit ? commit.after : valueAt(b,[key]), value = after === undefined ? before : after;
     const kind = snapshot ? '' : delta.changed.get(token) || (inherited
       ? before === undefined ? 'Added' : after === undefined ? 'Removed' : 'Changed' : '');
     const changed = Boolean(kind || !snapshot && delta.branches.has(token));
@@ -745,7 +762,7 @@ function renderBuildStatus() {
   document.querySelector('#open-settings').disabled=state.actionPending;
   const selecting = Boolean(state.editorController && !state.editorController.signal.aborted
     && state.editorController.node && state.editorController.node !== (state.regionSelection ? 'app' : state.selection.id));
-  document.querySelector('#inspector').setAttribute('aria-busy',String(selecting));
+  document.querySelector('#inspector').setAttribute('aria-busy',String(selecting || state.inspectorMode === 'groups' && Boolean(state.editorController)));
   for (const selector of ['#inspector-content','#inspector-nav','#inspector-navigation','#inspector-connections','#inspector-footer']) {
     document.querySelector(selector).inert = selecting;
   }
@@ -758,13 +775,15 @@ function renderWorldNavigation() {
   host.hidden = false;
   document.querySelector('#leave-group').hidden = !locations.length;
   const path = [{name:state.project?.id || 'Application'}, ...locations];
-  renderDockMarkup(document.querySelector('#world-location'), `<ol aria-label="Location">${path.map((item,index) => {
-    const parent = path[index-1]?.name;
-    const name = parent && item.name.startsWith(parent+': ') ? item.name.slice(parent.length+2) : item.name;
-    return `<li>${index < locations.length ? `<button type="button" data-world-level="${index}" title="${html(item.name)}" aria-label="Back to ${html(item.name)}">${html(name)}</button>`
-      : index ? `<button type="button" data-inspect-region="${html(item.id)}" aria-current="location" title="Inspect ${html(item.name)}" aria-label="Inspect ${html(name)}">${html(name)} <small>(${count(item.count,'Step')})</small></button>`
-        : `<span aria-current="location" title="${html(item.name)}">${html(name)}</span>`}</li>`;
-  }).join('')}</ol>`);
+  const item = path.at(-1), parent = path.at(-2)?.name;
+  const name = parent && item.name.startsWith(parent+': ') ? item.name.slice(parent.length+2) : item.name;
+  renderDockMarkup(document.querySelector('#world-location'), `<ol aria-label="Location">${locations.length ? `
+    <li class="location-history"><button id="open-location-parents" type="button" popovertarget="location-parents"
+      aria-label="Parent areas" title="Parent areas">...</button>
+      <nav id="location-parents" popover aria-label="Parent areas">${path.slice(0,-1).map((item,index) =>
+        `<button type="button" data-world-level="${index}" title="${html(item.name)}" aria-label="Back to ${html(item.name)}">${html(item.name)}</button>`).join('')}</nav></li>` : ''}
+    <li>${locations.length ? `<button type="button" data-inspect-region="${html(item.id)}" aria-current="location" title="Inspect ${html(item.name)}" aria-label="Inspect ${html(name)}">${html(name)} <small>(${count(item.count,'Step')})</small></button>`
+      : `<span aria-current="location" title="${html(item.name)}">${html(name)}</span>`}</li></ol>`);
 }
 
 function attentionItems() {
@@ -827,9 +846,10 @@ function inspectorTabs(modes) {
   const issues=nodeIssues(state.selection.id), failures=selectionFailures();
   const otherIssues=(state.worldIssues.get(state.selection.id)||[]).filter(issue=>issue.exampleId&&issue.exampleId!==selectedExampleId());
   const symbols={inspect:'configure',overview:'data',appearance:'appearance',groups:'groups'};
-  return `<nav class="inspector-tabs" aria-label="Inspector mode" style="--tab-count:${modes.length}">${modes.map(([mode,label])=>{
+  const selected = modes.some(([mode]) => state.inspectorMode === mode);
+  return `<nav class="inspector-tabs" role="tablist" aria-label="Inspector mode" style="--tab-count:${modes.length}">${modes.map(([mode,label],index)=>{
     const count=mode==='inspect' ? issues.length+otherIssues.length : mode==='overview' ? failures.length : 0;
-    return `<button type="button" data-inspector-mode="${mode}" aria-label="${label}" title="${label}${count ? `: ${count} issue${count===1?'':'s'}` : ''}"
+    return `<button type="button" role="tab" id="inspector-tab-${mode}" aria-controls="inspector-content" aria-selected="${state.inspectorMode===mode}" tabindex="${state.inspectorMode===mode || !selected && index===0?0:-1}" data-inspector-mode="${mode}" aria-label="${label}" title="${label}${count ? `: ${count} issue${count===1?'':'s'}` : ''}"
       data-has-error="${count>0}" class="${state.inspectorMode===mode?'active':''}"><i class="hud-symbol" data-symbol="${symbols[mode]}" aria-hidden="true"></i><span>${label}</span>${count?`<small class="tab-issue" aria-hidden="true">${count}</small>`:''}</button>`;
   }).join('')}</nav>`;
 }
@@ -1429,7 +1449,8 @@ function renderWorldStatus() {
   const coverage = document.querySelector("#status-coverage");
   coverage.hidden = !measurable || total === 0;
   coverage.dataset.percent = `${Math.round(covered / Math.max(1, total) * 100)}%`;
-  coverage.textContent = `${coverage.dataset.percent} coverage`;
+  renderDockMarkup(coverage, `${coverage.dataset.percent}<span> coverage</span>`);
+  coverage.setAttribute('aria-label',`${coverage.dataset.percent} coverage`);
   coverage.title = `${covered} of ${total} executable Steps reached by completed Examples`;
   renderDock();
 }
@@ -1549,7 +1570,11 @@ function configuredSummary(operation, inputs, base) {
         summary.steps.push(...conditionSteps(candidate.when).map(step => stepName(definitionOf(step.use))));
       });
     } else if (input.type === "matcher_groups") {
-      (value || []).forEach((group, groupIndex) => group.forEach((matcher, matcherIndex) => {
+      const groups = input.authored_outcomes
+        ? (value || []).flatMap((route, routeIndex) => (Array.isArray(route?.groups) ? route.groups : [])
+          .map((group, groupIndex) => [group, [...locator, routeIndex, "groups", groupIndex]]))
+        : (value || []).map((group, groupIndex) => [group, [...locator, groupIndex]]);
+      groups.forEach(([group, groupLocator]) => group.forEach((matcher, matcherIndex) => {
         const option = input.options.find(available => available.name === matcher.option);
         if (!option) {
           return;
@@ -1558,7 +1583,7 @@ function configuredSummary(operation, inputs, base) {
         mergeSummary(summary, configuredSummary(
           operation,
           option.inputs,
-          [...locator, groupIndex, matcherIndex, "inputs"]
+          [...groupLocator, matcherIndex, "inputs"]
         ));
         summary.steps.push(...conditionSteps(matcher.when).map(step => stepName(definitionOf(step.use))));
       }));
@@ -1652,7 +1677,7 @@ function appearanceInspector() {
         stepPresentation(operation.id),
         { name: stepName(definition) },
         "step:" + operation.id
-      )}${definition.kind === "step" ? groupAssignment(operation) : ""}`
+      )}`
     : appInspector(issueList("app"));
 }
 
@@ -1757,6 +1782,7 @@ function selectSettingsTab(tab) {
   for (const name of ['appearance', 'sound', 'music']) {
     const selected = name === tab;
     document.querySelector(`#settings-${name}-tab`).setAttribute('aria-selected', String(selected));
+    document.querySelector(`#settings-${name}-tab`).tabIndex = selected ? 0 : -1;
     document.querySelector(`#settings-${name}`).hidden = !selected;
   }
   if (tab === 'sound' || tab === 'music') state.audio?.setEditorKind(tab);
@@ -1904,6 +1930,10 @@ function themeStatus(message, error = true) {
 }
 
 function manageGroupsInspector() {
+  if (state.editorController) return '<div class="panel-loading" role="status" aria-label="Loading groups"></div>';
+  if (state.localDiagnostics.some(issue => issue.code === 'CREATOR_EDITOR_UNAVAILABLE' && issue.node === state.selection.id)) {
+    return `${issueList(state.selection.id)}<button type="button" data-inspector-mode="groups">Retry</button>`;
+  }
   const query = state.groupQuery.trim().toLowerCase();
   const available = state.creator.groups.filter(group => groupName(group).toLowerCase().includes(query));
   const inventory = groupInventory();
@@ -1914,9 +1944,12 @@ function manageGroupsInspector() {
   }
   const members = selected ? inventory.get(selected.id) || 0 : 0;
   const regions = Number(state.editor.groups[selected?.id]?.regions || 0);
+  const assignment = !state.regionSelection && selectedOperation() && definitionFor(selectedOperation())?.kind === 'step'
+    ? selectedOperation() : null;
+  const named = selected && (state.regionSelection?.group === selected.id || assignment && groupForStep(assignment.id)?.id === selected.id);
   return `
-    ${!state.regionSelection && selectedOperation() && definitionFor(selectedOperation())?.kind === 'step' ? groupAssignment(selectedOperation()) : ''}
-    ${selected ? `<header class="manager-heading">${inspectorHeader("Group", groupName(selected), "")}</header>` : ''}
+    ${assignment ? groupAssignment(assignment) : ''}
+    ${selected && !named ? `<header class="manager-heading">${inspectorHeader("Group", groupName(selected), "")}</header>` : ''}
     <details class="inspector-section" id="group-library" ${selected || state.selection.type !== 'app' && !state.regionSelection ? "" : "open"}>
       <summary>Browse groups (${state.editor.group_count})</summary>
       <input id="group-search" type="search" value="${html(state.groupQuery)}"
@@ -2067,8 +2100,11 @@ function diagnosticHint(diagnostic, operation) {
   const values=previewInputs(operation);
   const actual=input && values.has(input) ? previewValue(values.get(input)) : '';
   const mismatch=expected && expected!=='any' && input && values.has(input) && valueShape(values.get(input))!==expected;
+  const reportedMismatch=/^RUN_(NESTED_INPUT|STEP_RECEIVE)_INCOMPATIBLE$/.test(diagnostic.code)
+    && / requires ([a-z]+) but receives ([a-z]+)\.$/.exec(diagnostic.message || '');
   return {expected, input:mismatch ? input : undefined, text:diagnostic.code==='RUN_STEP_RECEIVE_REQUIRED' ? 'Missing field'
     : mismatch ? `${actual ? actual+' (expected ' : 'Expected '}${inputLabel(expected)}${actual?')':''}`
+      : reportedMismatch ? `${reportedMismatch[2]==='null' ? 'null' : inputLabel(reportedMismatch[2])} (expected ${inputLabel(reportedMismatch[1])})`
       : diagnosticMessage(diagnostic)};
 }
 
@@ -2277,7 +2313,8 @@ function closeProjectImport(restore=true) {
   document.querySelector('#inspector').setAttribute('aria-label','Inspector');
   if(restore){
     showInspector(panel.dataset.returnInspector==='true');
-    document.querySelector('#project-menu').focus({preventScroll:true});
+    document.querySelector(phoneInspector.matches && !document.querySelector('#inspector').hidden
+      ? '#close-inspector' : '#project-menu').focus({preventScroll:true});
   }
   renderBuildStatus();
 }
@@ -2299,13 +2336,13 @@ function renderProjectImport() {
   renderDockMarkup(document.querySelector('#project-import-target'),`<small>Replaces ${html(state.project.id)}</small><code>${html(state.workspace.project_path)}</code><small>Cannot undo.</small>`);
 }
 
-function projectImportStatus(message, severity = '', diagnostics = []) {
+function projectImportStatus(message, severity = '', diagnostics = [], invalidField = '') {
   const status=document.querySelector('#project-import-status');
   status.textContent=message;
   if(severity)status.dataset.severity=severity;else delete status.dataset.severity;
   for(const id of ['project-import-source','project-import-file']) {
     const input=document.getElementById(id);
-    if(severity==='error')input.setAttribute('aria-invalid','true');else input.removeAttribute('aria-invalid');
+    if(id===invalidField)input.setAttribute('aria-invalid','true');else input.removeAttribute('aria-invalid');
   }
   const details=document.querySelector('#project-import-diagnostics');
   details.hidden=!diagnostics.length;
@@ -2326,19 +2363,20 @@ function clearProjectImport() {
 
 function updateProjectImportPreview() {
   const source=document.querySelector('#project-import-source').value;
+  const field=document.querySelector('#project-import-file').files.length ? 'project-import-file' : 'project-import-source';
   state.projectImport.preview=null;
   projectImportStatus('');
   if(source.trim()) {
     if(source.length > Number(state.workspace.source_limit_bytes)
         || new TextEncoder().encode(source).length > Number(state.workspace.source_limit_bytes)) {
-      projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error');
+      projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error', [], field);
     } else {
       let project;
-      try{project=parseExact(source);}catch{projectImportStatus('Invalid JSON.', 'error');}
+      try{project=parseExact(source);}catch{projectImportStatus('Invalid JSON.', 'error', [], field);}
       if(project!==undefined) {
         if(!plainObject(project) || typeof project.id!=='string' || !project.id.trim()
             || !Array.isArray(project.nodes) || !Array.isArray(project.links)) {
-          projectImportStatus('Expected a project with a name, Steps and connections.', 'error');
+          projectImportStatus('Expected a project with a name, Steps and connections.', 'error', [], field);
         } else state.projectImport.preview={id:project.id,steps:project.nodes.length,
           flows:project.nodes.filter(operation=>definitionOf(operation?.use)?.kind==='trigger').length};
       }
@@ -2357,7 +2395,7 @@ function readProjectImportFile(input) {
   state.projectImport.preview=null;
   projectImportStatus('');
   if(file.size > Number(state.workspace.source_limit_bytes)) {
-    projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error');
+    projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error', [], 'project-import-file');
     renderProjectImport();return;
   }
   const reader=state.projectImport.reader=new FileReader();
@@ -2367,14 +2405,14 @@ function readProjectImportFile(input) {
     try {
       document.querySelector('#project-import-source').value=new TextDecoder('utf-8',{fatal:true}).decode(reader.result);
     } catch {
-      projectImportStatus('File must contain UTF-8 JSON.', 'error');renderProjectImport();return;
+      projectImportStatus('File must contain UTF-8 JSON.', 'error', [], 'project-import-file');renderProjectImport();return;
     }
     updateProjectImportPreview();
   };
   reader.onerror=()=>{
     if(state.projectImport.reader!==reader)return;
     state.projectImport.reader=null;
-    projectImportStatus('Could not read this file.', 'error');renderProjectImport();
+    projectImportStatus('Could not read this file.', 'error', [], 'project-import-file');renderProjectImport();
   };
   renderProjectImport();
   reader.readAsArrayBuffer(file);
@@ -2798,11 +2836,12 @@ function candidatesInput(operation, input, locator, candidates, scopeInputs, sco
 }
 
 function matcherGroupsInput(operation, input, locator, groups, scopeInputs, scopeBase) {
+  if (input.authored_outcomes) return routesInput(operation, input, locator, groups, scopeInputs, scopeBase);
   const queryLocator = [...locator, "new-group"];
   const token = locatorToken(locator);
   return `
     <section class="inspector-section matcher-groups" data-input-name="${html(input.name)}">
-      <div class="section-heading"><strong>${html(inputLabel(input.name))}</strong></div>
+      <div class="section-heading"><strong>${html(input.label || inputLabel(input.name))}</strong></div>
       <div class="matcher-group-list">
         ${groups.map((group, index) => matcherGroupEditor(
           operation,
@@ -2813,10 +2852,10 @@ function matcherGroupsInput(operation, input, locator, groups, scopeInputs, scop
           groups.length,
           scopeInputs,
           scopeBase
-        )).join("") || '<p class="empty-options">No condition group configured.</p>'}
+        )).join("")}
       </div>
-      <details class="matcher-group-add" id="${html(inputId(locator))}-alternative" ${groups.length?'':'open'}>
-        <summary>Add alternative (OR)</summary>
+      <details class="matcher-group-add" id="${html(inputId(locator))}-alternative">
+        <summary>${groups.length ? 'Add alternative (OR)' : 'Add condition'}</summary>
         <input type="search" value="${html(queryAt(state.candidateQueries, queryLocator))}"
                data-matcher-group-query="${token}" data-input-meta="${metaToken(input)}"
                placeholder="Search value sources" autocomplete="off">
@@ -2864,6 +2903,36 @@ function matcherGroupEditor(operation, input, locator, group, index, size, scope
       </div>
       </details>
     </article>`;
+}
+
+function routesInput(operation, input, locator, routes, scopeInputs, scopeBase) {
+  return `<section class="inspector-section candidate-input route-input" data-input-name="${html(input.name)}">
+    ${routes.length === 1 ? '' : `<div class="section-heading"><strong>${html(inputLabel(input.name))}</strong></div>`}
+    <div class="candidate-list">${routes.map((route, index) => {
+      const routeLocator = [...locator, index];
+      const id = inputId(routeLocator);
+      const conditions = { ...input, name: input.name + "[" + index + "].groups", label: "Conditions",
+        authored_outcomes: false, route_inputs: undefined };
+      const removable = Boolean(route?.outcome) && outcomeTarget(operation, route.outcome) === "end";
+      const heading = `<div class="candidate-heading route-heading">
+          <input id="${html(id)}-label" type="text" value="${html(outcomeLabel(operation, route?.outcome, ''))}"
+            aria-label="Route ${index + 1} label" placeholder="Route ${index + 1}"
+            data-candidate-label="${locatorToken(locator)}" data-candidate-index="${index}" autocomplete="off">
+          ${orderedActions('candidate', index, routes.length,
+            `data-candidate-locator="${locatorToken(locator)}" data-input-meta="${metaToken(input)}"`, removable)}</div>
+        `;
+      return `<article class="candidate route" data-candidate-index="${index}" data-route-outcome="${html(route?.outcome || '')}"
+        data-setting-path="${html(inputDiagnosticPath(operation.id, routeLocator))}" tabindex="-1">
+        ${routes.length > 1 ? heading : ''}
+        ${matcherGroupsInput(operation, conditions, [...routeLocator, "groups"],
+          Array.isArray(route?.groups) ? route.groups : [], scopeInputs, scopeBase)}
+        ${routes.length === 1 ? heading : ''}
+        ${inputFields(operation, input.route_inputs || [], [...routeLocator, "inputs"])}
+      </article>`;
+    }).join("")}</div>
+    <div class="inspector-actions"><button type="button" class="button" data-add-route="${locatorToken(locator)}"
+      data-input-meta="${metaToken(input)}">Add route</button></div>
+  </section>`;
 }
 
 function candidateEditor(
@@ -3130,12 +3199,22 @@ function matcherGroupOptions(input, locator) {
 
 function jsonInput(operation, input, locator, value) {
   const present = hasAt(operation, locator);
+  const optional = !input.required && (input.inherited || !Object.hasOwn(input, "default"));
+  const resettable = !input.inherited && Object.hasOwn(input, "default") && (present
+    || state.jsonDraft?.node === operation.id && samePath(state.jsonDraft.locator, locator));
   const id = inputId(locator);
   const path = inputDiagnosticPath(operation.id, locator);
   const issues = allDiagnostics().filter(issue => issue.path === path && diagnosticOwner(issue) === operation.id);
   const feedback = issues.length ? `<p id="${html(id)}-error" class="input-error" role="alert">${
     issues.map(issue => html(issue.message)).join(" ")}</p>` : "";
-  if (!input.required && !present) {
+  if (input.shape === 'boolean' && typeof input.default === 'boolean' && !input.inherited) {
+    return `<section class="inspector-section compact" data-input-name="${html(input.name)}">
+      <label class="check-line" for="${html(id)}-value"><input id="${html(id)}-value" type="checkbox"
+        data-input-json="${locatorToken(locator)}" data-input-meta="${metaToken(input)}"
+        ${(value ?? input.default) ? 'checked' : ''}${issues.length ? ` aria-invalid="true" aria-describedby="${html(id)}-error"` : ''}>
+        <span>${html(input.label || inputLabel(input.name))}</span></label>${feedback}</section>`;
+  }
+  if (optional && !present) {
     return `
       <section class="inspector-section compact" data-input-name="${html(input.name)}">
         <label class="check-line">
@@ -3146,14 +3225,14 @@ function jsonInput(operation, input, locator, value) {
         ${feedback}
       </section>`;
   }
-  const optional = !input.required ? `
+  const toggle = optional ? `
     <label class="check-line" id="${html(id)}-label">
       <input id="${html(id)}-present" type="checkbox" checked
              data-toggle-input="${locatorToken(locator)}" data-input-meta="${metaToken(input)}" aria-label="Use ${html(inputLabel(input.name).toLowerCase())}">
       <span>${html(inputLabel(input.name))}</span>
     </label>` : "";
   const attributes = `id="${html(id)}-value" ${input.required ? 'aria-required="true"' : ''} data-input-json="${locatorToken(locator)}"
-                      data-input-meta="${metaToken(input)}"${!input.required?` aria-labelledby="${html(id)}-label"`:''}${issues.length
+                      data-input-meta="${metaToken(input)}"${optional?` aria-labelledby="${html(id)}-label"`:''}${issues.length
     ? ` aria-invalid="true" aria-describedby="${html(id)}-error"` : ""}`;
   let control;
   if (input.shape === "string") {
@@ -3172,15 +3251,18 @@ function jsonInput(operation, input, locator, value) {
       <option value="false" ${value === false ? "selected" : ""}>false</option>
     </select>`;
   } else {
-    control = `<textarea rows="${input.shape === "any" ? 4 : 3}" spellcheck="false" ${attributes}>${html(
-      value === undefined ? "" : jsonEditorValue(locator, value)
-    )}</textarea>`;
+    const scalar = value !== undefined && (value === null || typeof value !== 'object' || exactNumber(value));
+    const source = value === undefined ? '' : jsonEditorValue(locator, value);
+    control = scalar && source.length <= 120 ? `<input type="text" spellcheck="false" ${attributes} value="${html(source)}">`
+      : `<textarea rows="${input.shape === 'any' ? 4 : 3}" spellcheck="false" ${attributes}>${html(source)}</textarea>`;
   }
   return `
-    <section class="inspector-section${input.required ? "" : " compact"}"
+    <section class="inspector-section${optional ? " compact" : ""}"
              data-input-name="${html(input.name)}">
-      ${optional}
-      ${input.required?`<label for="${html(id)}-value">${html(input.label || inputLabel(input.name))}</label>`:''}
+      ${toggle}
+      ${!optional?`<div class="section-heading input-heading"><label for="${html(id)}-value">${html(input.label || inputLabel(input.name))}</label>
+        ${resettable ? `<button type="button" class="input-reset" data-reset-input="${locatorToken(locator)}"
+          data-input-meta="${metaToken(input)}" title="Use default value">Reset</button>` : ''}</div>`:''}
       ${control}
       ${feedback}
       ${input.required && input.shape === "string" && !present ? `
@@ -3403,7 +3485,7 @@ function pathBrowser(input, operation, locator) {
         </div>
         <div class="path-actions" role="group" aria-label="${html(inputLabel(input.name))} actions">
           <div class="path-action-buttons">
-            ${resettable ? `<button class="path-reset" type="button" data-reset-path="${locatorToken(locator)}" data-input-meta="${metaToken(input)}">Reset</button>` : ''}
+            ${resettable ? `<button class="input-reset" type="button" data-reset-input="${locatorToken(locator)}" data-input-meta="${metaToken(input)}">Reset</button>` : ''}
             <button class="path-cancel" id="cancel-path" type="button">Cancel</button>
             <button id="apply-path" type="button" ${usable ? "" : "disabled"}>Use this path</button>
           </div>
@@ -4012,7 +4094,7 @@ function cancelPath() {
   render();
 }
 
-function resetPath(locator, input) {
+function resetInput(locator, input) {
   const fallback = defaultInput(input);
   if (fallback === undefined) {
     return;
@@ -4022,6 +4104,8 @@ function resetPath(locator, input) {
   } else {
     deleteAt(editableOperation(locator), locator);
   }
+  state.jsonDraft = null;
+  state.localDiagnostics = [];
   closePathPicker();
   dirty();
 }
@@ -4141,10 +4225,25 @@ function authoredCandidate(option, input = {}) {
   };
 }
 
-function nextCaseLabel(operation) {
+function addRoute(locator, input) {
+  const operation = editableOperation(locator);
+  let routes = valueAt(operation, locator);
+  if (!Array.isArray(routes)) {
+    routes = [];
+    setAt(operation, locator, routes);
+  }
+  const route = { outcome: opaqueId("route"), groups: [], inputs: defaultInputs(input.route_inputs || []) };
+  const label = nextCaseLabel(operation, "Route");
+  routes.push(route);
+  state.project.links.push({ from: operation.id + "." + route.outcome, to: "end" });
+  setOutcomeLabel(operation.id, route.outcome, label);
+  dirty();
+}
+
+function nextCaseLabel(operation, prefix = "Case") {
   const labels = new Set(Object.values(stepPresentation(operation.id).outcomes || {}));
   for (let index = 1; ; index++) {
-    const label = "Case " + index;
+    const label = prefix + " " + index;
     if (!labels.has(label)) {
       return label;
     }
@@ -4713,7 +4812,7 @@ function configuredInputShape(operation, input, locator, scopeInputs, scopeBase)
     return shapes.size === 1 ? [...shapes][0] : shapes.size ? "mixed" : "";
   }
   if (input.type === "matcher_groups") {
-    return "boolean";
+    return input.authored_outcomes ? "" : "boolean";
   }
   return "";
 }
@@ -4758,7 +4857,7 @@ function configuredInputValues(operation, input, locator, scopeInputs, scopeBase
     });
     return resolved;
   }
-  if (input.type === "matcher_groups") {
+  if (input.type === "matcher_groups" && !input.authored_outcomes) {
     const previews = state.previewCases.filter(preview => preview.step === operation.id);
     return previews.length === count
       ? previews.map(preview => Object.hasOwn(preview.inputs || {}, input.name)
@@ -5501,7 +5600,7 @@ async function requestSelectedTrace() {
       ? selected.projection
       : null;
     state.traceChanges = state.traceStep && plainObject(state.traceStep.input_context) && plainObject(state.traceStep.context)
-      ? contextChanges(state.traceStep.input_context, state.traceStep.context) : null;
+      ? contextChanges(state.traceStep.input_context, state.traceStep.context, state.traceStep.own_changes) : null;
     state.previewCases = matchesBuilt && observation.context === "input"
       ? state.traceCases.flatMap(candidate => plainObject(candidate.projection)
       ? [{
@@ -5783,6 +5882,21 @@ function refreshCandidateSelection() {
     if (status) {
       status.textContent = (selected ? "Selected, " : "")
         + status.dataset.candidateDefaultStatus;
+    }
+  });
+  const operation = selectedOperation();
+  const preview = state.preview?.step === operation?.id ? state.preview : null;
+  const outcomes = preview && !failedRunStates.has(preview.status) && !observedExampleContext(operation).status
+    ? preview.outcomes || (preview.outcome ? [preview.outcome] : []) : [];
+  document.querySelectorAll('.route[data-route-outcome]').forEach(route => {
+    const selected = outcomes.includes(route.dataset.routeOutcome);
+    route.classList.toggle('selected-candidate', selected);
+    if (selected) {
+      route.dataset.observedOutcome = route.dataset.routeOutcome;
+      route.setAttribute('aria-description', 'Observed route');
+    } else {
+      delete route.dataset.observedOutcome;
+      route.removeAttribute('aria-description');
     }
   });
 }
@@ -6331,7 +6445,7 @@ function authoredOutcomes(candidate) {
 
 function authoredOutcomeInput(definition) {
   return (definition?.inputs || [])
-    .find(field => field.type === "candidates" && field.authored_outcomes);
+    .find(field => field.authored_outcomes);
 }
 
 function outcomeLabel(candidate, outcome, fallback = inputLabel(outcome)) {
@@ -6471,9 +6585,11 @@ async function openGroupManager(id = "") {
   state.groupQuery = "";
   state.groupPicker = null;
   state.inspectorMode = "groups";
-  if (await loadEditor(state.selection.id, state.managedGroup, "") !== "loaded") return;
+  const pending = loadEditor(state.selection.id, state.managedGroup, "");
   showInspector(true);
   render();
+  if (await pending === 'loaded') state.localDiagnostics = state.localDiagnostics.filter(issue => issue.code !== 'CREATOR_EDITOR_UNAVAILABLE');
+  if (state.inspectorMode === 'groups') render();
 }
 
 function createGroup() {
@@ -6573,7 +6689,8 @@ function editableOperation(locator) {
       }
       inputSlot = false;
     } else if (part === 'inputs') {
-      fields = definitionOf(cursor.use)?.inputs || input?.options?.find(option => option.name === cursor.option)?.inputs;
+      fields = definitionOf(cursor.use)?.inputs || input?.options?.find(option => option.name === cursor.option)?.inputs
+        || (input?.type === 'matcher_groups' && input.authored_outcomes ? input.route_inputs : undefined);
       if (fields && !Object.hasOwn(cursor,part)) cursor[part] = {};
       inputSlot = true;
     } else if (cursor === operation && ['receives','returns'].includes(part) && !Object.hasOwn(cursor,part)) {
@@ -6793,9 +6910,48 @@ function html(value) {
     .replaceAll("'", "&#039;");
 }
 
+const phoneInspector = window.matchMedia('(max-width: 650px)');
+
+// Responsive editing reuses the same controls, drafts and event owners.
+function syncInspectorLayout() {
+  const inspector = document.querySelector('#inspector');
+  const suspended = phoneInspector.matches && !inspector.hidden && Boolean(state.picker || document.querySelector('.connection-status:not([hidden])'));
+  const full = phoneInspector.matches && !inspector.hidden && !suspended;
+  const canvas = document.querySelector('.canvas-panel');
+  const changed = canvas.inert !== full;
+  const example = document.querySelector('#example-session');
+  const exampleHost = document.querySelector(full ? '#inspector-example' : '.workbench-header');
+  if (example.parentElement !== exampleHost) exampleHost.append(example);
+  const history = document.querySelector('#history-controls');
+  const historyHost = document.querySelector(full ? '#inspector-history' : '.canvas-tools');
+  if (history.parentElement !== historyHost) historyHost.prepend(history);
+  const settings = document.querySelector('#open-settings');
+  const settingsHost = document.querySelector(full ? '#inspector-history' : '#workbench-actions .topbar');
+  if (settings.parentElement !== settingsHost) {
+    if (full) settingsHost.append(settings); else settingsHost.prepend(settings);
+  }
+  for (const surface of document.querySelectorAll('.workbench-header,.canvas-panel,.status-rail')) surface.inert = full;
+  document.body.classList.toggle('inspector-full', full);
+  document.body.classList.toggle('inspector-suspended', suspended);
+  if (changed) state.world?.repaint();
+  if (full) { inspector.setAttribute('role','dialog'); inspector.setAttribute('aria-modal','true'); }
+  else { inspector.removeAttribute('role'); inspector.removeAttribute('aria-modal'); }
+  document.querySelector('#inspector-footer').hidden = !phoneInspector.matches && !document.querySelector('#inspector-deletion').childElementCount;
+  const tab = document.querySelector('#inspector-nav [aria-selected=true]');
+  const content = document.querySelector('#inspector-content');
+  if (tab) { content.setAttribute('aria-labelledby', tab.id); content.removeAttribute('aria-label'); }
+  else { content.removeAttribute('aria-labelledby'); content.setAttribute('aria-label',state.inspectorMode === 'examples' ? 'Examples' : 'Inspector content'); }
+  if (full && !inspector.contains(document.activeElement) && !document.querySelector('#overlay > *')) {
+    document.querySelector(!document.querySelector('#audio-panel').hidden ? '#close-settings'
+      : !document.querySelector('#project-import-panel').hidden ? '#close-project-import' : '#close-inspector').focus({preventScroll:true});
+  }
+}
+phoneInspector.addEventListener('change', syncInspectorLayout);
+
 function showInspector(open) {
   if(!open){closeSettings(false);closeProjectImport(false);}
   document.querySelector("#inspector").hidden = !open;
+  syncInspectorLayout();
   if (!open) {
     state.iconController?.abort();
     document.querySelector("#graph").focus({ preventScroll: true });
@@ -6999,10 +7155,14 @@ document.addEventListener("click", event => {
   const exampleTrigger = target.closest("[data-locate-trigger]");
   if (exampleTrigger) {
     const id = exampleTrigger.dataset.locateTrigger;
-    void selectWorldNode(id).then(selected => { if (selected) state.world.focus(id,.5); });
+    void selectWorldNode(id).then(selected => { if (selected) {
+      if (phoneInspector.matches) showInspector(false);
+      state.world.focus(id,.5);
+    } });
     return;
   }
   if (target.closest("#dock-focus")) {
+    if (phoneInspector.matches) showInspector(false);
     state.world?.focus(state.regionSelection?.id || state.selection.id, state.regionSelection ? .5 : undefined);
     return;
   }
@@ -7150,11 +7310,11 @@ document.addEventListener("click", event => {
     openPathPicker(openPath.dataset.openPath, openPath.dataset.inputMeta);
     return;
   }
-  const resetPathButton = target.closest("[data-reset-path]");
-  if (resetPathButton) {
-    resetPath(
-      parseToken(resetPathButton.dataset.resetPath),
-      parseToken(resetPathButton.dataset.inputMeta)
+  const resetInputButton = target.closest("[data-reset-input]");
+  if (resetInputButton) {
+    resetInput(
+      parseToken(resetInputButton.dataset.resetInput),
+      parseToken(resetInputButton.dataset.inputMeta)
     );
     return;
   }
@@ -7165,6 +7325,11 @@ document.addEventListener("click", event => {
       parseToken(emptyJson.dataset.inputMeta),
       ""
     );
+    return;
+  }
+  const addRouteButton = target.closest("[data-add-route]");
+  if (addRouteButton) {
+    addRoute(parseToken(addRouteButton.dataset.addRoute), parseToken(addRouteButton.dataset.inputMeta));
     return;
   }
   const addCandidateButton = target.closest("[data-add-candidate]");
@@ -7398,7 +7563,7 @@ document.addEventListener("change", event => {
     setJsonValue(
       parseToken(target.dataset.inputJson),
       parseToken(target.dataset.inputMeta),
-      target.value
+      target.type === 'checkbox' ? String(target.checked) : target.value
     );
   } else if (target.matches("[data-toggle-input]")) {
     toggleInput(
@@ -7474,6 +7639,20 @@ document.addEventListener("keydown", event => {
     return;
   }
   if (event.ctrlKey || event.metaKey) return;
+  if (event.target.matches('#inspector-nav [role=tab]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
+    const tabs = [...document.querySelectorAll('#inspector-nav [role=tab]')];
+    const current = tabs.indexOf(event.target);
+    const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+      : (current + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+    event.preventDefault(); tabs[index].focus(); tabs[index].click(); return;
+  }
+  if (event.key === 'Tab' && document.body.classList.contains('inspector-full') && !state.groupPicker && !state.picker) {
+    const fields = [...document.querySelectorAll('#inspector button:not(:disabled),#inspector input:not(:disabled),#inspector select:not(:disabled),#inspector textarea:not(:disabled),#inspector summary,#inspector [tabindex="0"]')]
+      .filter(field => field.tabIndex >= 0 && field.getClientRects().length);
+    if (event.target === (event.shiftKey ? fields[0] : fields.at(-1))) {
+      event.preventDefault(); (event.shiftKey ? fields.at(-1) : fields[0])?.focus(); return;
+    }
+  }
   if (event.key === 'Tab' && state.groupPicker) {
     const fields = [...document.querySelectorAll('#group-dialog button:not(:disabled),#group-dialog input:not(:disabled)')]
       .filter(field => field.getClientRects().length);

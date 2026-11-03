@@ -116,75 +116,58 @@ class PrimitiveStepsCreatorProjectE2eTest {
     }
 
     @Test
-    void filterDeclaresAnOrdinaryStepWithGenericConditions() {
+    void branchDeclaresAnOrdinaryStepWithGenericRoutesAndExecutionSettings() {
         final StepDefinition definition = StandardLibrary.catalog()
-                .find("railix.filter")
+                .find("railix.branch")
                 .orElseThrow();
 
         assertThat(definition.kind()).isEqualTo(StepDefinition.Kind.STEP);
         assertThat(definition.receives()).isEmpty();
         assertThat(definition.returns()).isEmpty();
+        assertThat(definition.continuations()).isTrue();
         assertThat(definition.inputs()).extracting(StepDefinition.Field::name)
-                .containsExactly("conditions");
-        assertThat(definition.inputs().getFirst().input())
-                .isInstanceOfSatisfying(StepDefinition.CandidatesInput.class, candidates ->
-                        assertThat(candidates.options().get(1).inputs().getFirst().input())
-                                .isInstanceOfSatisfying(StepDefinition.JsonInput.class, literal ->
-                                        assertThat(literal.defaultValue()).isEmpty()));
-        assertThat(definition.outcomes()).containsExactly("match", "otherwise");
-    }
-
-    @Test
-    void choiceDeclaresAnOrdinaryStepWithGenericMatcherGroups() {
-        final StepDefinition definition = StandardLibrary.catalog()
-                .find("railix.choice")
-                .orElseThrow();
-
-        assertThat(definition.kind()).isEqualTo(StepDefinition.Kind.STEP);
-        assertThat(definition.receives()).isEmpty();
-        assertThat(definition.returns()).isEmpty();
-        assertThat(definition.inputs()).extracting(StepDefinition.Field::name)
-                .containsExactly("conditions");
-        assertThat(definition.inputs().getFirst().input())
-                .isInstanceOfSatisfying(StepDefinition.MatcherGroupsInput.class, groups ->
-                        assertThat(groups.options().get(1).inputs().getFirst().input())
-                                .isInstanceOfSatisfying(StepDefinition.JsonInput.class, literal ->
-                                        assertThat(literal.defaultValue()).isEmpty()));
-        assertThat(definition.outcomes()).containsExactly("match", "otherwise");
-    }
-
-    @Test
-    void switchDeclaresAnOrdinaryStepWithGenericCasesAndOtherwisePrimary() {
-        final StepDefinition definition = StandardLibrary.catalog()
-                .find("railix.switch")
-                .orElseThrow();
-
-        assertThat(definition.kind()).isEqualTo(StepDefinition.Kind.STEP);
-        assertThat(definition.receives()).isEmpty();
-        assertThat(definition.returns()).isEmpty();
-        assertThat(definition.inputs()).extracting(StepDefinition.Field::name)
-                .containsExactly("cases");
-        assertThat(definition.inputs().getFirst().input())
-                .isInstanceOfSatisfying(StepDefinition.CandidatesInput.class, cases -> {
-                    assertThat(cases.authoredOutcomes()).isTrue();
-                    assertThat(cases.options().get(1).inputs().getFirst().input())
+                .containsExactly("routes", "selection", "execution");
+        assertThat(definition.inputs().get(1).input())
+                .isInstanceOfSatisfying(StepDefinition.OptionsInput.class, selection -> {
+                    assertThat(selection.options()).extracting(StepDefinition.Option::name)
+                            .containsExactly("first", "matching", "all");
+                    assertThat(selection.defaultOption()).contains("first");
+                });
+        assertThat(definition.inputs().get(2).input())
+                .isInstanceOfSatisfying(StepDefinition.OptionsInput.class, execution -> {
+                    assertThat(execution.options()).extracting(StepDefinition.Option::name)
+                            .containsExactly("sequential", "parallel");
+                    assertThat(execution.defaultOption()).contains("sequential");
+                });
+        assertThat(definition.inputs().get(0).input())
+                .isInstanceOfSatisfying(StepDefinition.MatcherGroupsInput.class, routes -> {
+                    assertThat(routes.authoredOutcomes()).isTrue();
+                    assertThat(routes.options().get(1).inputs().getFirst().input())
                             .isInstanceOfSatisfying(StepDefinition.JsonInput.class, literal ->
                                     assertThat(literal.defaultValue()).contains(RailixValue.nullValue()));
+                    assertThat(routes.routeInputs()).singleElement().satisfies(field -> {
+                        assertThat(field.name()).isEqualTo("own_context");
+                        assertThat(field.input()).isInstanceOfSatisfying(StepDefinition.JsonInput.class, json ->
+                                assertThat(json.defaultValue()).contains(RailixValue.bool(false)));
+                    });
                 });
         assertThat(definition.outcomes()).containsExactly("otherwise");
+        for (final String retired : List.of("railix.filter", "railix.choice", "railix.switch")) {
+            assertThat(StandardLibrary.catalog().find(retired)).isEmpty();
+        }
     }
 
     @Test
-    void filterRejectsANonBooleanPredicateBeforeExecution() {
-        final CompileResult compiled = ProjectCompiler.compileApplication(filterProject("""
-                [{"option":"literal","inputs":{"value":"HELLO"},
-                  "when":{"transforms":[],"all":[[{"use":"text.lowercase","inputs":{}}]]}}]
+    void branchRejectsANonBooleanRoutePredicateBeforeExecution() {
+        final CompileResult compiled = ProjectCompiler.compileApplication(branchProject("""
+                [[{"option":"literal","inputs":{"value":"HELLO"},
+                  "when":{"transforms":[],"all":[[{"use":"text.lowercase","inputs":{}}]]}}]]
                 """), StandardLibrary.catalog());
 
         assertThat(compiled).isEqualTo(new CompileResult.Rejected(List.of(Diagnostic.atPath(
-                "PROJECT_CANDIDATE_PREDICATE_RESULT_INVALID",
-                "Candidate predicate program must return boolean.",
-                "nodes[2].inputs.conditions[0].when.all[0][0].use"
+                "PROJECT_MATCHER_PREDICATE_RESULT_INVALID",
+                "Matcher predicate program must return boolean.",
+                "nodes[2].inputs.routes[0].groups[0][0].when.all[0][0].use"
         ))));
     }
 
@@ -892,27 +875,20 @@ class PrimitiveStepsCreatorProjectE2eTest {
         );
     }
 
-    private static String filterProject(final String conditions) {
-        return branchProject("filter-proof", "filter", "railix.filter", conditions);
-    }
-
-    private static String branchProject(
-            final String projectId,
-            final String branchId,
-            final String branchStep,
-            final String conditions
-    ) {
+    private static String branchProject(final String groups) {
         return """
                 {
                   "format":1,
-                  "id":"%s",
+                  "id":"branch-proof",
                   "nodes":[
                     {"id":"app","use":"railix.app","inputs":{}},
                     {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                       {"name":"match","payload":[],"context":{"payload":{"value":"allow"}}},
                       {"name":"otherwise","payload":[],"context":{"payload":{"value":"deny"}}}
                     ]},
-                    {"id":"%s","use":"%s","inputs":{"conditions":%s}},
+                    {"id":"branch","use":"railix.branch","inputs":{"routes":[
+                      {"outcome":"match","inputs":{},"groups":%s}
+                    ]}},
                     {"id":"matched","use":"railix.field-manipulation","inputs":{
                       "field":["context","result"],
                       "value":[{"option":"literal","inputs":{"literal":"matched"}}],
@@ -926,22 +902,14 @@ class PrimitiveStepsCreatorProjectE2eTest {
                   ],
                   "links":[
                     {"from":"app.start","to":"command"},
-                    {"from":"command.next","to":"%s"},
-                    {"from":"%s.match","to":"matched"},
-                    {"from":"%s.otherwise","to":"otherwise"},
+                    {"from":"command.next","to":"branch"},
+                    {"from":"branch.match","to":"matched"},
+                    {"from":"branch.otherwise","to":"otherwise"},
                     {"from":"matched.next","to":"end"},
                     {"from":"otherwise.next","to":"end"}
                   ]
                 }
-                """.formatted(
-                        projectId,
-                        branchId,
-                        branchStep,
-                        conditions,
-                        branchId,
-                        branchId,
-                        branchId
-                );
+                """.formatted(groups);
     }
 
     private static String cliOnlyProject() {

@@ -1759,22 +1759,22 @@ final class GeneratedApplicationE2eTest {
 
     private static String switchCases(final String firstExpected, final String secondExpected) {
         return """
-                [{"outcome":"case-first","option":"field","inputs":{
+                [{"outcome":"case-first","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}},
-                 {"outcome":"case-second","option":"field","inputs":{
+                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}}]]},
+                 {"outcome":"case-second","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}}]
+                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}}]]}]
                 """.formatted(firstExpected, secondExpected);
     }
 
-    private static String switchProject(final String cases) {
+    private static String switchProject(final String routes) {
         return """
                 {"format":1,"id":"switch-generated","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"route","payload":["go"]}]},
-                  {"id":"switch","use":"railix.switch","inputs":{"cases":%s}},
+                  {"id":"switch","use":"railix.branch","inputs":{"routes":%s}},
                   {"id":"first","use":"railix.field-manipulation","inputs":{
                     "field":["context","result"],"value":[{"option":"literal","inputs":{
                     "literal":"first"},"when":{"transforms":[],"all":[]}}],"steps":[]}},
@@ -1794,7 +1794,7 @@ final class GeneratedApplicationE2eTest {
                   {"from":"second.next","to":"end"},
                   {"from":"fallback.next","to":"end"}
                 ]}
-                """.formatted(cases);
+                """.formatted(routes);
     }
 
     private static String nodeLocalSwitchProject() {
@@ -1803,14 +1803,12 @@ final class GeneratedApplicationE2eTest {
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"route","payload":["go"]}]},
-                  {"id":"switch-one","use":"railix.switch","inputs":{"cases":[{
-                    "outcome":"case-one","option":"field","inputs":{
+                  {"id":"switch-one","use":"railix.branch","inputs":{"routes":[{"outcome":"case-one","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]}},
-                  {"id":"switch-two","use":"railix.switch","inputs":{"cases":[{
-                    "outcome":"case-two","option":"field","inputs":{
+                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]]}]}},
+                  {"id":"switch-two","use":"railix.branch","inputs":{"routes":[{"outcome":"case-two","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]}},
+                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]]}]}},
                   {"id":"success","use":"railix.field-manipulation","inputs":{
                     "field":["context","result"],"value":[{"option":"literal","inputs":{
                     "literal":"both"},"when":{"transforms":[],"all":[]}}],"steps":[]}},

@@ -614,7 +614,7 @@ public final class StepDefinition {
     }
 
     /**
-     * One Boolean-producing input whose project value is an ordered OR of ordered AND matchers.
+     * Ordered OR-of-AND matcher groups, optionally owned by separately authored routes.
      *
      * <p>Every matcher uses the same candidate condition structure documented by
      * {@link CandidatesInput}. A missing source is false. A present source without a condition is
@@ -622,8 +622,16 @@ public final class StepDefinition {
      * list while propagating nested Step failures and cancellation unchanged.</p>
      *
      * @param options available matcher source alternatives
+     * @param authoredOutcomes whether entries declare routes with their own OR-of-AND groups
+     * @param routeInputs ordinary configuration fields owned by each authored route
      */
-    public record MatcherGroupsInput(List<Option> options) implements Input {
+    public record MatcherGroupsInput(List<Option> options, boolean authoredOutcomes,
+                                     List<Field> routeInputs) implements Input {
+        /** Declares ordinary Boolean-producing groups without authored routes. */
+        public MatcherGroupsInput(final List<Option> options) {
+            this(options, false, List.of());
+        }
+
         /** Validates direct canonical construction; prefer {@link Input#matcherGroups(Option...)}. */
         public MatcherGroupsInput {
             if (options == null || options.isEmpty()) {
@@ -634,6 +642,46 @@ public final class StepDefinition {
             if (options.stream().anyMatch(option -> option.valueSource().isEmpty())) {
                 throw new IllegalArgumentException("Every matcher group option must declare one value source.");
             }
+            routeInputs = List.copyOf(routeInputs);
+            distinct(routeInputs.stream().map(Field::name).toList(), "Route input names");
+            if (!authoredOutcomes && !routeInputs.isEmpty()) {
+                throw new IllegalArgumentException("Route inputs require authored outcomes.");
+            }
+            validateReferences(routeInputs);
+            final var configuration = new java.util.ArrayDeque<Input>();
+            routeInputs.forEach(field -> configuration.add(field.input()));
+            while (!configuration.isEmpty()) {
+                final Input input = configuration.removeFirst();
+                if (input instanceof OptionsInput choices) {
+                    choices.options().forEach(option -> option.inputs().forEach(field -> configuration.add(field.input())));
+                } else if (!(input instanceof JsonInput) && !(input instanceof PathInput)) {
+                    throw new IllegalArgumentException("Route configuration supports JSON, paths and options, not executable inputs.");
+                }
+            }
+        }
+
+        /**
+         * Declares an ordered list of named routes, each with its own matcher groups.
+         * Conditions are evaluated explicitly by the implementation through its invocation input.
+         *
+         * @return routed declaration with no change to the available matcher sources
+         */
+        public MatcherGroupsInput withAuthoredOutcomes() {
+            return new MatcherGroupsInput(options, true, routeInputs);
+        }
+
+        /**
+         * Adds configuration to each route, rendered and validated through ordinary input contracts.
+         *
+         * @param name non-blank field name, unique within the route
+         * @param input non-null JSON, path or options configuration, without executable child inputs
+         * @return declaration including the field
+         * @throws IllegalArgumentException without authored outcomes or for duplicate names
+         */
+        public MatcherGroupsInput routeInput(final String name, final Input input) {
+            final List<Field> fields = new ArrayList<>(routeInputs);
+            fields.add(new Field(name, input));
+            return new MatcherGroupsInput(options, authoredOutcomes, fields);
         }
     }
 
@@ -883,6 +931,7 @@ public final class StepDefinition {
     private final int maximumInstances;
     private final Source source;
     private final ImplementationAddress implementation;
+    private final boolean continuations;
 
     private StepDefinition(
             final Builder builder,
@@ -905,6 +954,10 @@ public final class StepDefinition {
                 ? null
                 : new Source(builder.sourceName, builder.responses);
         this.implementation = implementation;
+        continuations = builder.continuations;
+        if (continuations && kind != Kind.STEP) {
+            throw new IllegalArgumentException("Only ordinary Steps may execute continuations.");
+        }
         distinct(receives.stream().map(Port::name).toList(), "Received value names");
         distinct(returns.stream().map(Port::name).toList(), "Returned value names");
         distinct(inputs.stream().map(Field::name).toList(), "Input names");
@@ -956,6 +1009,11 @@ public final class StepDefinition {
      */
     public static Builder named(final String id, final String version) {
         return new Builder(id, version);
+    }
+
+    /** Returns whether PROCESS can explicitly execute its compiled outgoing continuations. */
+    public boolean continuations() {
+        return continuations;
     }
 
     /**
@@ -1218,10 +1276,22 @@ public final class StepDefinition {
         private String primaryOutcome;
         private String sourceName;
         private String exampleTarget;
+        private boolean continuations;
 
         private Builder(final String id, final String version) {
             this.id = id;
             this.version = version;
+        }
+
+        /**
+         * Enables lifecycle-owned execution of declared outgoing routes from PROCESS.
+         * The implementation chooses synchronous or asynchronous execution through the public input API.
+         *
+         * @return this builder
+         */
+        public Builder withContinuations() {
+            continuations = true;
+            return this;
         }
 
         /**
@@ -1596,6 +1666,7 @@ public final class StepDefinition {
                 validateOptionReferences(candidates.options(), declared);
             } else if (field.input() instanceof MatcherGroupsInput matcherGroups) {
                 validateOptionReferences(matcherGroups.options(), declared);
+                validateReferences(matcherGroups.routeInputs());
             }
             if (field.input() instanceof StepsInput steps) {
                 final ValueSource source = steps.valueSource();
@@ -1608,9 +1679,8 @@ public final class StepDefinition {
     private static void validateAuthoredOutcomes(final List<Field> fields, final Kind kind) {
         final long direct = fields.stream()
                 .map(Field::input)
-                .filter(CandidatesInput.class::isInstance)
-                .map(CandidatesInput.class::cast)
-                .filter(CandidatesInput::authoredOutcomes)
+                .filter(input -> input instanceof CandidatesInput candidates && candidates.authoredOutcomes()
+                        || input instanceof MatcherGroupsInput groups && groups.authoredOutcomes())
                 .count();
         if (direct > 1) {
             throw new IllegalArgumentException("A Step may declare only one authored-outcome candidates input.");
@@ -1632,8 +1702,12 @@ public final class StepDefinition {
         };
         return options.stream().flatMap(option -> option.inputs().stream()).anyMatch(field ->
                 field.input() instanceof CandidatesInput candidates && candidates.authoredOutcomes()
+                        || field.input() instanceof MatcherGroupsInput groups && groups.authoredOutcomes()
                         || hasNestedAuthoredOutcomes(field.input())
-        );
+        ) || input instanceof MatcherGroupsInput groups && groups.routeInputs().stream().anyMatch(field ->
+                field.input() instanceof CandidatesInput candidates && candidates.authoredOutcomes()
+                        || field.input() instanceof MatcherGroupsInput nested && nested.authoredOutcomes()
+                        || hasNestedAuthoredOutcomes(field.input()));
     }
 
     private static void validateOptionReferences(

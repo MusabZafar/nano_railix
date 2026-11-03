@@ -130,6 +130,29 @@ final class StepContractJsonE2eTest {
     }
 
     @Test
+    void authoredMatcherRoutesAndContinuationCapabilityRoundTripWithoutLoadingImplementation() {
+        final var definition = StepDefinition.named("codec.branch", "1")
+                .input("routes", Input.matcherGroups(Input.option("literal")
+                        .input("value", Input.json(ValueShape.ANY)).fromOwned("value"))
+                        .withAuthoredOutcomes()
+                        .routeInput("isolated", Input.json(ValueShape.BOOLEAN).defaultValue(RailixValue.bool(false))))
+                .withContinuations().implementation(CodecHandler.class);
+        assertRoundTrip(definition);
+        assertThat(StepContractJson.write(definition)).contains("\"continuations\":true", "\"route_inputs\"");
+        assertThat(StepContractJson.write(StepDefinition.named("codec.plain", "1").implementation(CodecHandler.class)))
+                .doesNotContain("continuations", "route_inputs");
+    }
+
+    @Test
+    void routeConfigurationRejectsExecutableInputsRatherThanDroppingThemFromConfiguration() {
+        assertThatThrownBy(() -> Input.matcherGroups(Input.option("literal")
+                .input("value", Input.json(ValueShape.ANY)).fromOwned("value"))
+                .withAuthoredOutcomes().routeInput("hidden", Input.candidates(Input.option("literal")
+                        .input("value", Input.json(ValueShape.ANY)).fromOwned("value"))))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("configuration");
+    }
+
+    @Test
     void nestedStepsInputRoundTripsMissingAndPropagatedOutcomes() {
         assertRoundTrip(StepDefinition.named("codec.steps", "1")
                 .input("value", Input.path(StepDefinition.PathAccess.READ).optional())

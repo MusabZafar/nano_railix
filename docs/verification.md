@@ -1046,3 +1046,195 @@ Latest scenery-atlas evidence: `railix-scenery-retina-package-smoke.log` and
 the current descriptor choices; it no longer runs the removed Standard variants.
 The original captured sprite strips can be reproduced separately with `railix.sprite.export=true`;
 no screenshot converter runs in the shipped Creator.
+
+## Unified Branching, 2026-10-31
+
+The local reactor `./mvnw test` passed 871 core, 77 standard-library and 1,787 Creator tests.
+The final lazy-allocation adjustment was rechecked with `StepContractJsonE2eTest`,
+`PrimitiveStepsCreatorProjectE2eTest` and `BranchingFlowE2eTest`: 134 tests passed.
+The branching regressions exercise generated production JARs, installed implementations and
+validators, independent failures, atomic writes and rollback, split snapshots, nested-program
+entry snapshots, retained-handle rejection, per-path traces and physical worker drain.
+
+Thirteen selected desktop/narrow browser scenarios passed through the existing JUnit/Playwright
+stack. They cover Branch settings, route/condition edits, save/reopen, Undo/Redo, previews,
+connected-route deletion protection, the 167-node authoring fixture, the 155-node grouped fixture
+and the 1,237-node system with live ingress, Examples and reuse. Narrow navigation was checked at
+430 and 320 pixels. Screenshot captures are local ignored build evidence, not source assets.
+`./mvnw -DskipTests package` built the Creator app image. Its CLI ran a real parallel Branch
+application and printed `"BRANCH_OK"` with exit status zero, without Node.js.
+The complete `clean verify` browser/package/soak matrix and remote CI were not run for this checkpoint.
+
+A production-JAR probe compared baseline `b22fc6c09bca5c97fce669c60cfb2f50be02caf6` with this
+increment through `RuntimeApplication.runSource`. The workload is CLI arguments -> Lowercase ->
+result, with an optional literal-true first-match Choice/Branch before Lowercase. Every response
+is checked. Same local Java 25.0.1 JVM, `-Xms128m -Xmx128m`, one caller, 100,000 warmup calls and
+seven 100,000-call rounds. Values below are medians of the final five rounds. Allocation uses
+the calling thread's JDK allocation counter. Timing is advisory, not a throughput guarantee.
+
+| Workload | Time per call | Allocated bytes per call |
+| --- | --- | --- |
+| Baseline ordinary flow | 0.989 us | 4,272 |
+| New ordinary flow | 1.008 us | 4,304 |
+| Baseline first-match Choice | 1.157 us | 4,968 |
+| Unified first-match Branch | 1.480 us | 6,872 |
+
+The ordinary path adds 32 allocated bytes, not a scheduler or worker. Unified Branch still costs
+more than the old single-purpose Choice. Removing unused snapshot preparation and stream-based
+route copying reduced its probe from 1.743 us / 8,000 bytes to 1.480 us / 6,872 bytes. Parallel,
+large-payload, sustained-load and multi-host costs are not established by this small probe.
+
+### Branch Performance Follow-Up
+
+The first-match path no longer prepares worker/result lists before a continuation is actually
+started. Route matching shares the ordinary matcher-group evaluator without a temporary Boolean
+result map. Route-map copying and the first-match handler avoid unused intermediate collections.
+The public continuation API, atomic commits, copy snapshots and worker ownership are unchanged.
+
+The same production-JAR probe was repeated with five fresh JVMs per version and workload,
+interleaving the versions. Each JVM used the warmup and seven measured rounds described above.
+The table reports the median of the five per-JVM medians of the final five rounds.
+
+| Workload | Before | After | Allocated bytes before / after |
+| --- | --- | --- | --- |
+| First-match Branch | 1.471 us | 1.385 us | 6,872 / 6,144 |
+| Installed Step with eight value inputs | 1.260 us | 1.282 us | 4,816 / 4,816 |
+
+Branch saves 728 bytes per call, about 11%, with about 6% lower measured latency. The multi-input
+control has overlapping timing ranges and unchanged allocation. These are local probes, not a
+general throughput claim. Branch remains more expensive than the earlier single-purpose Choice.
+An attempted generic singleton-map optimization was rejected after a five-JVM control showed
+about 5% higher latency for the multi-input Step without saving allocations. Ordinary input-map
+construction is unchanged. The retained singleton-map optimization applies only to route inputs.
+
+The full browser run exposed narrow-layout and feedback defects missed by the earlier selected
+scenarios. The condition source is now visible without scrolling on 320/390-pixel screens.
+Recorded outcomes mark the actual routes in Configure and Data, including multiple outcomes.
+Type conflicts remain readable when recorded values cannot be loaded. Declared JSON defaults
+are directly editable, scalar JSON uses one row, and explicit Reset restores omission without
+treating empty strings as missing. Reset also clears an invalid unsaved draft consistently with
+other edit actions. Public browser regressions reproduced the feedback/reset defects before fixes.
+
+Local ignored probes and review evidence are under `.railix/branch-performance-evidence/`.
+
+The final `./mvnw clean verify` passed on 2026-10-31 in 25 minutes 38 seconds, without command-line
+test exclusions or fork overrides. It ran in an identical source snapshot under
+`.railix/branch-clean-verify/` so cleaning did not remove pre-existing active previews. All source
+files matched the working tree at that checkpoint. The later Inspector/HUD changes are verified
+separately below.
+
+| Verification layer | Discovered | Failures / errors | Skipped |
+| --- | --- | --- | --- |
+| Core Java | 871 | 0 / 0 | 0 |
+| Standard-library Java | 77 | 0 / 0 | 0 |
+| Creator Java | 1,790 | 0 / 0 | 0 |
+| Desktop browser | 792 | 0 / 0 | 1 |
+| Package and runtime soak | 43 | 0 / 0 | 0 |
+| Narrow browser | 81 | 0 / 0 | 0 |
+
+The single skip is the explicitly opt-in renderer comparison, gated by
+`railix.renderer.comparison`. The normal scene, animation, navigation and browser performance
+scenarios ran. A separate final app-image CLI check executed the parallel Branch fixture and
+printed `"BRANCH_OK"` with exit status zero. Review findings were fixed and rechecked. Owned test
+and helper processes finished. Remote CI and publication have not run for this working tree.
+
+### Inspector And HUD Review
+
+The 2026-11-02 review applied Apple's guidance on
+[toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
+[sheets](https://developer.apple.com/design/human-interface-guidelines/sheets) and
+[accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility)
+to the existing web interface, not a new renderer or native UI stack.
+
+Phone editing now occupies the screen. The same Example, history and Settings controls move
+with it. Covered canvas motion pauses, while the application and observations continue.
+Grouping owns assignment and has immediate loading feedback, explicit retry and no late tab,
+focus or reopen side effects. Empty condition catalogs stay collapsed. Scalar JSON controls,
+source/operand alignment, symbol disclosure, import error ownership and narrow footer labels
+were corrected without changing Step execution or adding dependencies or saved preferences.
+
+Ten new public browser journeys cover the changes. The complete responsive selection passed
+all 90 cases, including touch, short landscape layouts, keyboard, examples, errors, connections,
+insertion, groups, settings, import and undo/redo. The 320-pixel condition form keeps its complete
+Expected field above the footer. A real DOM measurement found a 51-pixel spacing defect caused
+by stacked padding/margins and baseline alignment; the corrected gap is 22 pixels.
+
+Manual in-app-browser checks used a saved 1,238-node application with successful and failing
+Examples. The automatic viewport/heap scenario also exercised 6,003 nodes. Independent visual
+and source review findings were corrected and rechecked. Evidence is in the ignored
+`.railix/ui-ux-audit/` directory, with screenshots under `target/screenshots/inspector-*`.
+
+The final `./mvnw verify` passed on 2026-11-02 in 24 minutes 16 seconds, without test
+exclusions or fork overrides. Earlier runs exposed obsolete split-panel/group-entry journeys
+and a zoom test that continued on a rounded percentage before the Home flight finished.
+The journeys now follow the visible controls and wait for the settled camera, retaining their
+execution, data, focus and exact zoom assertions.
+
+| Verification layer | Discovered | Failures / errors | Skipped |
+| --- | --- | --- | --- |
+| Core Java | 871 | 0 / 0 | 0 |
+| Standard-library Java | 77 | 0 / 0 | 0 |
+| Creator Java | 1,790 | 0 / 0 | 0 |
+| Desktop browser | 802 | 0 / 0 | 1 |
+| Package and runtime soak | 43 | 0 / 0 | 0 |
+| Narrow browser | 90 | 0 / 0 | 0 |
+
+The skip is the same opt-in renderer comparison described above. The full log is
+`.railix/ui-ux-audit/verify-confirmed.log`. Current reactor screenshots are in
+`modules/railix-creator/target/screenshots/inspector-*`. Relative to the preceding Branch
+checkpoint, the production browser changes add 167 lines and remove 55, a net addition of 112
+across four existing files. Ten new browser journeys and updated existing journeys cover the
+new behavior. There is no new dependency, persisted mode or duplicate control owner.
+
+This is not Apple certification or proof of every possible interface state. Real-device Safari,
+iOS and VoiceOver were not tested. No new graphics family or audio composition is part of this
+follow-up. The split phone layout and duplicated membership entry point were removed rather
+than retained as alternative modes.
+
+### Radar And Navigation Follow-Up
+
+The follow-up reproduced caption clicks moving the camera into empty space, ignored radar
+input during a camera flight, focus loss after tab visibility changes, overlapping nested
+breadcrumbs and a failing Example name compressed to 91 pixels. The fixes retain the same
+select and action controls, keep every ancestor reachable through one native popover, cancel
+camera flights on radar input and reuse a current overview after returning to the tab.
+
+Further review found detached popovers, overflow with a valid 61-character project id and
+overlapping radar/timing controls in 320/390 by 360-pixel viewports. Native CSS positioning
+anchors the parent popover without a JavaScript positioning loop, following the
+[WebKit anchor-positioning guidance](https://webkit.org/blog/17240/a-gentle-introduction-to-anchor-positioning/).
+The short layout wraps the timing scale beside the radar. Return placement is refreshed after
+the scale changes. Timing membership uses the canvas bounds rather than HUD occlusion, removing
+the legend's show/hide feedback dependency. No extra redraw loop is retained.
+
+Seven new browser scenarios add thirteen parameterized cases per viewport. Their regressions
+include controlled camera time, tab visibility changes, keyboard return, repeated settled
+refreshes, combined Example/read failures and Retry recovery. The selected responsive run at
+390 pixels passed all 103 cases, also exercising explicitly selected 320, 823 and 1280-pixel
+layouts. Manual checks used the saved 1,238-node application with nested groups, failing Examples,
+all four Inspector tabs and the radar. Screenshots are ignored build evidence, not theme assets.
+The packaged Creator JAR was checked separately with that saved application and an isolated
+home directory. Desktop and phone navigation, the failing Example and the parent popover
+worked without browser errors. Task-owned preview servers and browser tabs were then closed.
+
+The final targeted Inspector/HUD run passed all 23 cases. Full-run testing also exposed
+regression-harness defects: a text assertion compared layout newlines rather than the accessible
+measurement label, and a one-millisecond virtual-clock pause point could be overtaken under
+parallel browser load. The assertions retain the visible scale and stable measurement checks.
+The pause point now leaves virtual time for the protocol round-trip, without a real-time sleep
+or a production behavior change. The short arrival-picker test no longer requires station labels
+behind its open panel to be visible. It still checks insertion, undo, route selection, button
+bounds and hit targets. Two existing navigation journeys now open the parent menu before
+choosing an ancestor, retaining the camera-restoration, selected-Example and delayed-focus checks.
+
+The final plain `./mvnw verify` passed on 2026-11-02 in 24 minutes 28 seconds, with no test
+exclusions or fork overrides. Of 3,699 discovered cases, 3,698 passed and the opt-in renderer
+comparison was skipped. Core Java ran 871 cases, the standard library 77, Creator Java 1,790,
+desktop browsers 815, package/runtime checks 43 and narrow browsers 103. There were no failures
+or errors. The complete log is `.railix/ui-ux-audit/radar-verify-final-state.log`.
+
+The combined Inspector/HUD production diff against the preceding Branch checkpoint now adds
+221 lines and removes 82, a net addition of 139 across four existing browser files. No runtime
+dependency, persisted mode, duplicate control owner or second graph model was introduced.
+Evidence and review logs are under `.railix/ui-ux-audit/radar-*`. Real Safari/iOS and VoiceOver
+remain unverified. Browser checks do not establish Apple certification or exhaustive state coverage.

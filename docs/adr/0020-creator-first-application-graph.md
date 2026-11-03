@@ -7,6 +7,12 @@ optional Creator metadata, remove compiler-expanded reusable flows, and add gene
 flow-control inputs, continuous semantic zoom, and explicit Creator/compiler/generated-application
 ownership.
 
+Amended on 2026-10-31: one configurable Branch replaces separate Filter/Choice/Switch entries.
+The user selected sequential or parallel independent paths, shared context by default, per-output
+split-snapshot copies, independent path failures and atomic whole-Step commits with last-completed
+write winning. The public continuation contract below implements that direction without adding a
+second graph or a built-in-only execution mechanism.
+
 Amended on 2026-09-19 following the user's specification-workshop clarification: independent
 copying and linked sharing are planned Creator features, not rejected product directions.
 The compiler remains group-unaware. Artifact capability changes require rebuilding; the first
@@ -62,6 +68,20 @@ Functional routing, correlation and budget identities cannot depend on optional 
 Simply connecting more incoming belts processes each arrival separately. Waiting and context
 combination belong to an explicitly configured Join. This keeps convenience in Creator without
 making a visual change secretly schedule work or combine requests.
+
+Ordinary Steps may declare `.withContinuations()` and execute compiled outgoing routes from their
+PROCESS through `StepInput`. Definitions own available settings. Implementations own selection and
+scheduling, including third-party implementations. Core does not assign behavior to option names or
+standard-library IDs. Returned single outcomes remain the allocation-light ordinary path.
+
+A continuation invocation owns its workers until real termination, even when its Future is already
+cancelled. The [JDK Future contract](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/Future.html)
+allows `isDone()` after cancellation and describes interruption as an attempt to stop work.
+Therefore shutdown accounting follows worker lifetime, not Future state. Shared context commits
+are synchronized for the commit only, never for the whole PROCESS. Copy contexts use the split
+snapshot and do not write back. Separate path results preserve errors without redefining Trigger
+responses or declaring the entire application broken. The [Branch contract](../specs/system-model.md#branch)
+owns exact behavior. Join pairing and deferred work beyond PROCESS remain separate decisions.
 
 Interaction references support this direction. [Node-RED wiring](https://nodered.org/docs/user-guide/editor/workspace/wires)
 demonstrates insertion feedback and direct connection operations. [Factorio remote view](https://www.factorio.com/blog/post/fff-380)

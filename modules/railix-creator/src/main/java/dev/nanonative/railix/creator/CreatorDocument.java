@@ -975,7 +975,9 @@ final class CreatorDocument {
     ) {
         final Optional<StepDefinition.Field> authored = definition.inputs().stream()
                 .filter(field -> field.input() instanceof StepDefinition.CandidatesInput candidates
-                        && candidates.authoredOutcomes())
+                        && candidates.authoredOutcomes()
+                        || field.input() instanceof StepDefinition.MatcherGroupsInput routes
+                        && routes.authoredOutcomes())
                 .findFirst();
         final RailixValue inputs = node.values().get("inputs");
         if (authored.isEmpty() || !(inputs instanceof RailixValue.ObjectValue configured)

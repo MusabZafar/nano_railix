@@ -119,9 +119,10 @@ final class DevelopmentMetricsContractTest {
     }
 
     @Test
-    void negativeStepOutcomeCountsAnError() {
+    void rejectedStepOutcomeCountsAnError() {
         final DevelopmentRuntime.Metrics metrics = metrics();
-        metrics.finishStep(1, metrics.startStep(1), -1, succeeded());
+        metrics.finishStep(1, metrics.startStep(1), -1, new RunResult.Rejected(List.of(
+                Diagnostic.atPath("INVALID", "Invalid value.", "input"))));
 
         assertThat(metric(step(metrics, "enabled"))).containsAllEntriesOf(Map.of(
                 "executions", 1L,
