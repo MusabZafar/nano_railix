@@ -142,6 +142,23 @@ public final class StepCatalog {
         } catch (final IOException exception) {
             throw failure("DEPENDENCY_LOCK_REQUIRED", "Dependency lock cannot be read: " + lock + ".", exception);
         }
+        return installSource(source, store);
+    }
+
+    /**
+     * Adds installed bundles from one captured dependency-lock document using the normal resolver.
+     *
+     * @param source canonical lock JSON, captured before a build or package operation
+     * @param store directory containing the immutable content-addressed bundle artifacts
+     * @return a new catalog containing the installed contracts and implementation ownership
+     * @throws IllegalArgumentException when either argument is Java {@code null}
+     * @throws DependencyException when the lock, manifest, ownership or artifact integrity is invalid
+     */
+    public StepCatalog installSource(final String source, final Path store) throws DependencyException {
+        if (source == null || store == null)
+            throw new IllegalArgumentException("Dependency lock and store cannot be Java null.");
+        if (source.getBytes(StandardCharsets.UTF_8).length > LOCK_LIMIT)
+            throw failure("DEPENDENCY_LOCK_NON_CANONICAL", "Dependency lock exceeds " + LOCK_LIMIT + " bytes.");
         final RailixValue.ObjectValue root = parseCanonical(
                 source,
                 "DEPENDENCY_LOCK_NON_CANONICAL",

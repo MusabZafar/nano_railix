@@ -3,6 +3,7 @@ package dev.nanonative.railix.stdlib;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepDefinition;
 import dev.nanonative.railix.core.step.StepDefinition.Input;
+import dev.nanonative.railix.core.runtime.MetricDefinition;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueShape;
 
@@ -70,16 +71,19 @@ public final class StandardLibrary {
     }
 
     private static StepDefinition http() {
-        return StepDefinition.named("railix.trigger.http", "1")
+        return StepDefinition.named("railix.trigger.http", "2")
                 .kind(StepDefinition.Kind.TRIGGER)
                 .displayName("HTTP")
                 .maximumInstances(1)
                 .source("application.http")
+                .metric(MetricDefinition.gauge("preferred_port", "Preferred port", "port"))
+                .metric(MetricDefinition.gauge("active_port", "Active port", "port"))
                 .receive("request", ValueShape.OBJECT)
                 .input("host", Input.json(ValueShape.STRING).defaultValue(RailixValue.string("127.0.0.1")))
                 .input("port", Input.json(ValueShape.NUMBER).between(RailixValue.number(0), RailixValue.number(65535))
                         .defaultValue(RailixValue.number(8080))
                         .validation(Integer.class, port -> java.util.Optional.empty()))
+                .input("next_free_port", Input.json(ValueShape.BOOLEAN).defaultValue(RailixValue.bool(true)))
                 .input("target", Input.path(WRITE)
                         .defaultPath("context", "payload", "request"))
                 .exampleTarget("target")

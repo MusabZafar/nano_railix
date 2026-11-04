@@ -3049,7 +3049,7 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
     }
 
     @Test
-    void persistenceFailureStopsCandidateAndRestartsPreviousApplication() throws Exception {
+    void unreadableProjectPreventsReplacementWithoutRestartingApplication() throws Exception {
         final Path project = directory.resolve("project.json");
         try (CreatorServer creator = start(project)) {
             final RailixValue.ObjectValue before = application(creator.baseUri());
@@ -3063,11 +3063,10 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
                     CreatorProjects.empty("quiet-byte")
             );
 
-            assertThat(response.statusCode()).isEqualTo(500);
-            assertThat(response.body()).contains("Project could not be persisted.", "\"recovery\":\"restarted\"");
+            assertThat(response.statusCode()).isEqualTo(409);
+            assertThat(response.body()).contains("Project files cannot be read.");
             final RailixValue.ObjectValue after = application(creator.baseUri());
-            assertThat(number(after, "pid")).isNotEqualTo(number(before, "pid"));
-            assertThat(awaitExit(number(before, "pid"))).isTrue();
+            assertThat(number(after, "pid")).isEqualTo(number(before, "pid"));
             assertThat(string(after, "state")).isEqualTo("running");
             assertThat(string(after, "fingerprint")).isEqualTo(string(before, "fingerprint"));
             assertThat(string(after, "build_path")).isEqualTo(string(before, "build_path"));
@@ -3101,7 +3100,7 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
         try (CreatorServer creator = start(directory.resolve("project.json"))) {
             final HttpResponse<String> response = request(
                     creator.baseUri(),
-                    "POST",
+                    "PUT",
                     "/api/application",
                     ""
             );

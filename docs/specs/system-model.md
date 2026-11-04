@@ -459,6 +459,11 @@ while successful Steps remain successful and the application remains running.
 
 ## Planned Merge And Join
 
+First delivery clarification on 2026-11-03: joining connections means ordinary convergence.
+Each arrival continues independently. It neither waits for another arrival nor merges contexts.
+The existing multi-input graph contract implements this behavior without a compulsory connector
+Step. Correlation, coordinated waiting and context combination are deferred, separate work.
+
 Status: **Branch implemented and locally checked. Join decisions and implementation remain separate.** Source:
 the user's 2026-09-27 specification. This refines SYS-008: ordinary convergence no longer requires
 a Merger or a mode selection. Waiting belongs to an explicit Join, not to an extra incoming belt.
@@ -626,7 +631,7 @@ These questions block only their dependent slices, not ordinary non-waiting conv
 | FC-1, multi-route selection | Two shipping rules match. Run the first, both, or every route? What if none matches? | Defined under Branch: first by default, ordered matching/all choices, explicit otherwise fallback. The user excluded old-definition migration and aliases. Link count does not select scheduling. |
 | FC-2, before multi-route execution | An invoice path fails while a notification path succeeds. Each path keeps its own result. | Shared context by default, optional snapshot copies, independent path failures and user-selected sequential/parallel execution are accepted. Extend execution/result ownership so one path's failure cannot abort siblings. Source response slots remain owned by the Trigger contract, not a new application-wide failure policy. |
 | FC-3, before independent branches | Price and stock checks run at once. Both write `status`. Which writes are visible, and which context does each output use? | Accepted 2026-10-31: coherent reads at Step entry, atomic whole-Step commits, last completed commit wins. Separate fields survive. Isolated contexts start at the split snapshot, with results retained per path and no implicit merge. Repeated writes can be deliberate and valid. |
-| FC-4, before Join | Flow A delivers orders 1 then 2. Flow B delivers 2 then 1. Pair by order identity or simply take the next arrival from each input? | Context merging and last-arrival-wins for conflicting values are accepted. Independent-message scope was requested, but the user expects identification through joined flows. Clarify keyed pairing, next-arrival pairing or only branches of one original job. Then define required/activated inputs, repeated pairings, duplicates/late results and completion. Merge details still include arrival ordering for concurrent deliveries, nested fields, arrays, absent versus null and reserved runtime data. |
+| FC-4, before coordinated Join | Flow A delivers orders 1 then 2. Flow B delivers 2 then 1. Which arrivals belong together? | Deferred by the user on 2026-11-03. The first delivery only joins connections and processes arrivals independently, without waiting or merging contexts. Before later coordination, define pairing, required inputs, repeated pairings, duplicates, late results and completion. Previously accepted last-arrival-wins applies only to that future context merge. Its nested-field, array, absent/null and reserved-data rules remain open. |
 | FC-5, before deferred waiting | A stock check fails or never returns. What happens to its caller and any waiting work? | Branch failures stay local. Future cancellation targets one path. Parent interruption requests cancellation of owned workers and waits for actual termination. Existing graceful-drain rules retain resources while work remains. Join/Limiter timeouts, finite waiting limits and retries still need their own contracts. |
 | FC-6, before Join and whole-job limits interact | A one-place Limiter admits invoice A, which waits for payment B at a Join. B needs the same occupied place. What can complete? | Detect/report provable circular waits. Define admission topology, ownership after joining jobs, response delivery to original callers and transfer/release of every held permit. Never silently release A early, admit B beyond the limit, or treat Join arrival as job completion. |
 
@@ -900,6 +905,9 @@ generated calls may preserve the functional composition without per-request stre
   thread for every Trigger. Embedded applications do not own their host process; Creator's
   development management lifetime is separate from business Trigger lifetime. Creator control
   arguments must never become CLI payload. Scheduler implementation is not added to this slice.
+  Activation failures identify the owning graph Step. Once shutdown cleanup has completed a
+  source, a late completion callback is harmless and cannot replace its final status. Before
+  that terminal shutdown state, conflicting completion reports remain invalid.
 
 For `HTTP -> transform -> persistence`, PRE prepares persistence before HTTP accepts work.
 During shutdown HTTP stops admitting work, admitted requests finish using the still-open
@@ -972,14 +980,14 @@ multipart and streaming remain deferred. Real Example I/O remains permitted unde
 ## Planned Environment Builds
 
 Final environment applications will derive direct Step calls, dependencies, JDK modules, `jlink`,
-and `jpackage` output from the complete flat project. Current production JARs physically omit the
-complete development runtime, Example manifest, traces, metrics, and management routes. Splitting
+and `jpackage` output from the complete flat project. Builds without Examples omit their
+manifest, value traces and execution endpoints, not operational metrics. Splitting
 project/build metadata, Example projection, live error, queue, and metrics into independently
 selectable environment capabilities remains planned. Every omitted capability must contribute no
 capability-specific route, class, dependency, or JDK module. Shared dependencies still required
 by included capabilities are retained. SYS-002 owns the rebuild boundary.
 
-Remote attachment, time-window/custom metrics, queue control, permissions, sharding, and production
+Remote attachment, retained metric time windows, queue control, permissions, sharding, and production
 debugging remain roadmap work. Current examples never sample production traffic.
 
 ## Compilation And Lifecycle

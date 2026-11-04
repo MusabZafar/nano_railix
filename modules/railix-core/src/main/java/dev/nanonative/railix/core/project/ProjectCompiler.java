@@ -28,7 +28,7 @@ public final class ProjectCompiler {
     private static final Set<String> NODE_FIELDS = Set.of(
             "id", "use", "inputs", "receives", "returns", "examples", "metrics"
     );
-    private static final Set<String> EXAMPLE_FIELDS = Set.of("name", "payload", "context");
+    private static final Set<String> EXAMPLE_FIELDS = Set.of("id", "name", "payload", "context");
     private static final Set<String> LINK_FIELDS = Set.of("from", "to");
     private static final Set<String> OPTION_FIELDS = Set.of("option", "inputs");
     private static final Set<String> CANDIDATE_FIELDS = Set.of("option", "inputs", "when");
@@ -138,6 +138,7 @@ public final class ProjectCompiler {
                 .toList();
         final List<ApplicationPlan.TriggerPlan> triggers = new ArrayList<>();
         final List<ApplicationPlan.ExamplePlan> examples = new ArrayList<>();
+        final Set<String> exampleIds = new LinkedHashSet<>();
         for (final Node trigger : nodeRead.nodes()) {
             if (trigger.definition().kind() != StepDefinition.Kind.TRIGGER) {
                 continue;
@@ -147,7 +148,11 @@ public final class ProjectCompiler {
                     index.destination(trigger.index(), trigger.definition().primaryOutcome())
             );
             triggers.add(triggerPlan);
-            examples.addAll(trigger.examples());
+            for (final var example : trigger.examples()) {
+                if (!exampleIds.add(example.id())) return rejected("PROJECT_EXAMPLE_ID_DUPLICATE",
+                        "Example id is already declared: " + example.id() + ".", "nodes[" + trigger.index() + "].examples");
+                examples.add(example);
+            }
         }
 
         final List<Diagnostic> validationProblems = StepValidation.validate(catalog, validations);
@@ -1278,6 +1283,11 @@ public final class ProjectCompiler {
             if (unknown.isPresent()) {
                 return ExamplesRead.rejected(unknown.get());
             }
+            final RailixValue identifier = object.values().get("id");
+            if (identifier != null && (!(identifier instanceof RailixValue.StringValue stable)
+                    || !stable.value().matches("[a-z][a-z0-9:-]{0,127}")))
+                return ExamplesRead.rejected(Diagnostic.atPath("PROJECT_EXAMPLE_ID_INVALID",
+                        "Example id must be a safe stable identifier, at most 128 characters.", path + ".id"));
             final TextRead name = text(
                     object,
                     "name",
@@ -1340,7 +1350,7 @@ public final class ProjectCompiler {
                 ));
             }
             examples.add(new ApplicationPlan.ExamplePlan(
-                    trigger + ":" + index,
+                    identifier instanceof RailixValue.StringValue stable ? stable.value() : trigger + ":" + index,
                     trigger,
                     name.value(),
                     index,

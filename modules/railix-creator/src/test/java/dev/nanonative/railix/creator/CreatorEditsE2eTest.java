@@ -148,7 +148,7 @@ final class CreatorEditsE2eTest extends CreatorServerE2eSupport {
             final String changes = """
                     {"nodes":{"command":{"id":"command","use":"railix.trigger.cli",
                       "inputs":{"target":["context","payload","arguments"]},
-                      "examples":[{"name":"caf\u00e9","payload":["H\u00c9LLO"]}]}}}
+                      "examples":[{"id":"command:0","name":"caf\u00e9","payload":["H\u00c9LLO"]}]}}}
                     """;
             assertThat(changes.getBytes(StandardCharsets.UTF_8).length).isGreaterThan(changes.length());
 
@@ -158,7 +158,7 @@ final class CreatorEditsE2eTest extends CreatorServerE2eSupport {
             assertThat(view.statusCode()).isEqualTo(200);
             assertThat(child(child(object(view.body()), "result"), "context").values().get("result"))
                     .isEqualTo(RailixValue.string("h\u00e9llo"));
-            assertThat(Files.readString(directory.resolve("project.json"))).contains("caf\u00e9", "H\u00c9LLO");
+            assertThat(Files.readString(directory.resolve("railix.examples.json"))).contains("caf\u00e9", "H\u00c9LLO");
         }
     }
 
@@ -181,7 +181,7 @@ final class CreatorEditsE2eTest extends CreatorServerE2eSupport {
             assertThat(links(after, "inserted.next")).containsExactly(link("inserted.next", "end"));
             assertThat(links(after, "choice.otherwise")).isEqualTo(links(before, "choice.otherwise"));
             assertThat(links(after, "otherwise.next")).isEqualTo(links(before, "otherwise.next"));
-            assertThat(Files.readString(directory.resolve("project.json"))).isEqualTo(RailixJson.write(after));
+            assertThat(ProjectFiles.read(directory.resolve("project.json")).source()).isEqualTo(RailixJson.write(after));
         }
     }
 
@@ -408,7 +408,8 @@ final class CreatorEditsE2eTest extends CreatorServerE2eSupport {
             final HttpResponse<String> response = edit(creator.baseUri(), "/api/project", 0, changes);
 
             assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
-            assertThat(Files.size(directory.resolve("project.json"))).isGreaterThan(RailixData.DEFAULT_MAX_SOURCE_BYTES);
+            assertThat(Files.size(directory.resolve("project.json")) + Files.size(directory.resolve("railix.examples.json")))
+                    .isGreaterThan(RailixData.DEFAULT_MAX_SOURCE_BYTES);
         }
     }
 

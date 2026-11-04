@@ -55,19 +55,24 @@ final class ApplicationGenerator {
             return new Result("", "", "", Map.of(), diagnostics, List.of());
         }
         final Map<String, Integer> handlerIndexes = handlerIndexes(implementations);
+        final int[] customMetricIndexes = metricIndexes(nodes);
         final String[] compiledNodes = new String[nodes.size()];
         final Map<Integer, List<String>> lifecycle = new LinkedHashMap<>();
+        final List<String> customMetrics = new ArrayList<>();
         for (int index = 0; index < nodes.size(); index++) {
             final ApplicationPlan.NodePlan node = nodes.get(index);
             if (node.step().kind() == StepDefinition.Kind.APP) {
                 continue;
             }
-            final NodeCompiler compiler = new NodeCompiler(index, handlerIndexes, implementations, lifecycleMethods);
+            final NodeCompiler compiler = new NodeCompiler(index, customMetricIndexes[index], handlerIndexes, implementations, lifecycleMethods);
             compiledNodes[index] = compiler.compile(node);
+            customMetrics.addAll(compiler.metrics);
             if (!compiler.lifecycle.isEmpty()) {
                 lifecycle.put(index, List.copyOf(compiler.lifecycle));
             }
-            if (compiledNodes[index].length() > MAX_PLAN_SOURCE_CHARACTERS) {
+            long sourceCharacters = compiledNodes[index].length();
+            for (final String declaration : compiler.metrics) sourceCharacters += declaration.length();
+            if (sourceCharacters > MAX_PLAN_SOURCE_CHARACTERS) {
                 return new Result("", "", "", Map.of(), List.of(Diagnostic.atPath(
                         "PROJECT_APPLICATION_STEP_LIMIT",
                         "One compiled Step exceeds the " + MAX_PLAN_SOURCE_CHARACTERS
@@ -88,9 +93,9 @@ final class ApplicationGenerator {
                 : lifecycleOrder(nodes).stream().flatMap(index -> lifecycle.getOrDefault(index, List.of()).stream()).toList();
         return new Result(
                 source(plan.projectId(), nodes, triggers, implementations, handlerIndexes,
-                        compiledNodes, orderedLifecycle, Variant.PRODUCTION),
+                        compiledNodes, orderedLifecycle, customMetrics, false),
                 source(plan.projectId(), nodes, triggers, implementations, handlerIndexes,
-                        compiledNodes, orderedLifecycle, Variant.DEVELOPMENT),
+                        compiledNodes, orderedLifecycle, customMetrics, true),
                 developmentLauncherSource(),
                 Map.of(DEVELOPMENT_EXAMPLES_RESOURCE, developmentExamples),
                 List.of(),
@@ -239,7 +244,9 @@ final class ApplicationGenerator {
                             owner = plan.id();
                             DevelopmentRuntime.Trace.before(plan.node(), plan.id(), plan.use(), localContext());
                             try {
-                                final int outcome = super.process(plan, implementation, received, resolver);
+                                final int outcome = super.process(plan,
+                                        (configuration, input) -> DevelopmentRuntime.Trace.invoke(configuration, input, implementation),
+                                        received, resolver);
                                 if (outcome < 0) DevelopmentRuntime.Trace.after(plan.id(), finish(),
                                         outcome == WorkflowRuntime.CONTINUED ? context() : localContext());
                                 else DevelopmentRuntime.Trace.after(plan.id(), plan.outcomes().get(outcome), localContext());
@@ -282,9 +289,10 @@ final class ApplicationGenerator {
             final Map<String, Integer> handlerIndexes,
             final String[] compiledNodes,
             final List<String> lifecycle,
-            final Variant variant
+            final List<String> customMetrics,
+            final boolean examples
     ) {
-        final int[] metricIndexes = variant == Variant.DEVELOPMENT ? metricIndexes(nodes) : new int[0];
+        final int[] metricIndexes = metricIndexes(nodes);
         final StringBuilder source = new StringBuilder(8_192);
         final StringBuilder classes = new StringBuilder();
         final Map<Integer, StringBuilder> flows = new LinkedHashMap<>();
@@ -292,6 +300,8 @@ final class ApplicationGenerator {
                 package dev.nanonative.railix.core.project;
 
                 import dev.nanonative.railix.core.runtime.RunResult;
+                import dev.nanonative.railix.core.runtime.RuntimeMetrics;
+                import dev.nanonative.railix.core.runtime.MetricDefinition;
                 import dev.nanonative.railix.core.step.StepInput;
                 import dev.nanonative.railix.core.step.StepResult;
                 import dev.nanonative.railix.core.value.RailixJson;
@@ -306,13 +316,13 @@ final class ApplicationGenerator {
                 import java.util.Map;
                 import static dev.nanonative.railix.core.project.RailixApplication.*;
                 """);
-        if (variant == Variant.DEVELOPMENT) {
+        if (examples) {
             source.append("import dev.nanonative.railix.development.DevelopmentRuntime;\n");
         }
         source.append("\n/** Executable application generated from one validated Railix project. */\n")
                 .append("public final class RailixApplication implements ")
-                .append(variant == Variant.PRODUCTION
-                        ? "RuntimeApplication"
+                .append(!examples
+                        ? "ObservedApplication"
                         : "DevelopmentRuntime.Application")
                 .append(" {\n")
                 .append("    static final int END = -1;\n")
@@ -321,34 +331,25 @@ final class ApplicationGenerator {
                 .append(indent(Integer.toString(ROUTE_PARTITION_SIZE), 3)).append(";\n")
                 .append("    private static final String PROJECT_ID =\n")
                 .append(indent(quote(projectId), 3)).append(";\n");
-        if (variant == Variant.DEVELOPMENT) {
-            source.append("    static final DevelopmentRuntime.Metrics METRICS = ")
-                    .append("new DevelopmentRuntime.Metrics(PROJECT_ID, ")
+        {
+            source.append("    static final RuntimeMetrics METRICS = ")
+                    .append("new RuntimeMetrics(PROJECT_ID, ")
                     .append(array(classes, "Flows", "String", triggers.stream()
                             .map(trigger -> quote(nodes.get(trigger.node()).id())).toList()))
                     .append(", ")
                     .append(array(classes, "Steps", "String", IntStream.range(0, nodes.size())
                             .filter(index -> metricIndexes[index] >= 0)
                             .mapToObj(index -> quote(nodes.get(index).id())).toList()))
+                    .append(customMetrics.isEmpty() ? "" : ", List.of(" + array(classes, "CustomMetrics", "RuntimeMetrics.Registration", customMetrics) + ")")
                     .append(");\n");
         }
         int handlerIndex = 0;
-        final List<String> calls = new ArrayList<>();
-        final List<String> traceCalls = new ArrayList<>();
         for (final StepCatalog.Implementation implementation : implementations.values()) {
             if (handlerIndex % PLAN_PARTITION_SIZE == 0) {
                 classes.append("final class Handlers_").append(handlerIndex / PLAN_PARTITION_SIZE).append(" {\n");
             }
             classes.append("    static final WorkflowRuntime.StepCall CALL_").append(handlerIndex)
                     .append(" = ").append(implementation.className()).append("::process;\n");
-            if (variant == Variant.DEVELOPMENT) {
-                classes.append("    static StepResult trace_").append(handlerIndex)
-                        .append("(final StepInput configuration, final StepInput input) throws InterruptedException {\n")
-                        .append("        return DevelopmentRuntime.Trace.invoke(configuration, input, CALL_")
-                        .append(handlerIndex).append(");\n    }\n");
-                calls.add(handlerReference(handlerIndex));
-                traceCalls.add("Handlers_" + handlerIndex / PLAN_PARTITION_SIZE + "::trace_" + handlerIndex);
-            }
             handlerIndex++;
             if (handlerIndex % PLAN_PARTITION_SIZE == 0 || handlerIndex == implementations.size()) {
                 classes.append("}\n");
@@ -371,32 +372,33 @@ final class ApplicationGenerator {
                 .append("    @Override public RunResult start() { return lifecycle.start(); }\n")
                 .append("    @Override public RunResult launch(final List<String> arguments) { return lifecycle.launch(arguments); }\n")
                 .append("    @Override public RunResult stop(final java.time.Duration budget) { return lifecycle.stop(budget); }\n\n");
-        if (variant == Variant.DEVELOPMENT) {
-            source.append("    static final WorkflowRuntime.StepCall[] CALLS = ")
-                    .append(array(classes, "Calls", "WorkflowRuntime.StepCall", calls)).append(";\n")
-                    .append("    static final WorkflowRuntime.StepCall[] TRACE_CALLS = ")
-                    .append(array(classes, "TraceCalls", "WorkflowRuntime.StepCall", traceCalls)).append(";\n");
+        if (examples) {
             appendDevelopmentExecution(source);
         }
         appendPlans(classes, nodes, compiledNodes);
         source.append("    private RailixApplication() {\n    }\n\n")
                 .append("    static ")
-                .append(variant == Variant.PRODUCTION
-                        ? "RuntimeApplication"
+                .append(!examples
+                        ? "ObservedApplication"
                         : "DevelopmentRuntime.Application")
                 .append(" runtime() {\n        return APPLICATION;\n    }\n\n")
                 .append("    public static void main(final String[] arguments) {\n");
-        source.append("        final Thread shutdown = new Thread(() -> {\n")
+        source.append("        final var observation = dev.nanonative.railix.core.runtime.ObservationServer.open(RailixApplication.class, METRICS);\n")
+                .append("        final Thread shutdown = new Thread(() -> {\n")
                 .append("            try {\n")
                 .append("                final RunResult stopped = APPLICATION.stop();\n")
                 .append("                if (!(stopped instanceof RunResult.Succeeded)) {\n")
                 .append("                    reportLifecycleFailure(stopped);\n")
+                .append("                    observation.ifPresent(dev.nanonative.railix.core.runtime.ObservationServer::close);\n")
                 .append("                    Runtime.getRuntime().halt(1);\n                }\n")
                 .append("            } catch (final RuntimeException | Error failure) {\n")
                 .append("                failure.printStackTrace(System.err);\n")
-                .append("                Runtime.getRuntime().halt(1);\n            }\n")
+                .append("                observation.ifPresent(dev.nanonative.railix.core.runtime.ObservationServer::close);\n")
+                .append("                Runtime.getRuntime().halt(1);\n")
+                .append("            } finally { observation.ifPresent(dev.nanonative.railix.core.runtime.ObservationServer::close); }\n")
                 .append("        }, \"railix-shutdown\");\n")
                 .append("        Runtime.getRuntime().addShutdownHook(shutdown);\n")
+                .append("        try {\n")
                 .append("        final RunResult launched = APPLICATION.launch(List.of(arguments));\n")
                 .append("        if (!(launched instanceof RunResult.Succeeded)) {\n")
                 .append("            reportLifecycleFailure(launched);\n")
@@ -409,19 +411,20 @@ final class ApplicationGenerator {
                 .append("            return; // The JVM shutdown hook already owns termination.\n        }\n")
                 .append("        if (!(stopped instanceof RunResult.Succeeded)) reportLifecycleFailure(stopped);\n")
                 .append("        if (status != 0 || !(stopped instanceof RunResult.Succeeded)) {\n")
-                .append("            System.exit(status == 0 ? 1 : status);\n        }\n    }\n\n")
+                .append("            System.exit(status == 0 ? 1 : status);\n        }\n")
+                .append("        } finally { observation.ifPresent(dev.nanonative.railix.core.runtime.ObservationServer::close); }\n    }\n\n")
                 .append("    @Override\n")
                 .append("    public String projectId() {\n        return PROJECT_ID;\n    }\n\n");
-        if (variant == Variant.DEVELOPMENT) {
             source.append("    @Override\n")
-                    .append("    public DevelopmentRuntime.Metrics metrics() {\n")
+                    .append("    public RuntimeMetrics metrics() {\n")
                     .append("        return METRICS;\n    }\n\n");
+        if (examples) {
             appendDevelopmentRun(source, classes, nodes, triggers);
             appendTrace(source, classes, flows, nodes, triggers);
         }
-        appendSources(source, classes, flows, nodes, triggers, handlerIndexes, metricIndexes, variant);
-        appendExecutors(flows, nodes, triggers, variant);
-        appendDispatch(source, flows, classes, nodes, handlerIndexes, metricIndexes, variant);
+        appendSources(source, classes, flows, nodes, triggers, handlerIndexes, metricIndexes);
+        appendExecutors(flows, nodes, triggers, examples);
+        appendDispatch(source, flows, classes, nodes, handlerIndexes, metricIndexes);
         flows.values().forEach(flow -> classes.append(flow).append("}\n"));
         source.append("    private static void reportLifecycleFailure(final RunResult result) {\n")
                 .append("        switch (result) {\n")
@@ -581,11 +584,11 @@ final class ApplicationGenerator {
                     .append("        try {\n")
                     .append("            final WorkflowRuntime.Execution execution = new TraceExecution(")
                     .append(resultsReference(trigger)).append(", context, ")
-                    .append(runtime(nodes.get(trigger.node()).id(), Variant.DEVELOPMENT, "test"))
+                    .append(runtime(nodes.get(trigger.node()).id(), "test"))
                     .append(", lifecycle);\n")
                     .append("            result = DevelopmentRuntime.Trace.start(execution.context(), sink,\n")
                     .append("                    () -> execute_").append(trigger.node())
-                    .append("(execution, ").append(trigger.start()).append(", TRACE_CALLS));\n")
+                    .append("(execution, ").append(trigger.start()).append("));\n")
                     .append("            return result;\n")
                     .append("        } finally {\n")
                     .append("            METRICS.finishFlow(").append(flow).append(", metric, result);\n")
@@ -601,8 +604,7 @@ final class ApplicationGenerator {
             final List<ApplicationPlan.NodePlan> nodes,
             final List<ApplicationPlan.TriggerPlan> triggers,
             final Map<String, Integer> handlers,
-            final int[] metricIndexes,
-            final Variant variant
+            final int[] metricIndexes
     ) {
         root.append("    @Override\n")
                 .append("    public WorkflowRuntime.SourceResult runSource(final String source,\n")
@@ -625,7 +627,7 @@ final class ApplicationGenerator {
         for (final ApplicationPlan.TriggerPlan trigger : triggers) {
             final ApplicationPlan.NodePlan node = nodes.get(trigger.node());
             cases.put(node.step().source().orElseThrow().name(), "Flow_" + trigger.node() + "."
-                    + (variant == Variant.DEVELOPMENT ? "measuredSource_" : "source_") + trigger.node() + "(values, lifecycle)");
+                    + "measuredSource_" + trigger.node() + "(values, lifecycle)");
         }
         root.append(keySelector(classes, "source", "WorkflowRuntime.SourceResult",
                 "final String source, final Map<String, RailixValue> values, final WorkflowRuntime.Lifecycle lifecycle", "source, values, lifecycle", "source", cases,
@@ -647,8 +649,8 @@ final class ApplicationGenerator {
                     .append("        }\n")
                     .append("        final WorkflowRuntime.Execution execution = WorkflowRuntime.execution(")
                     .append(resultsReference(trigger)).append(", RailixValue.object(Map.of()),\n")
-                    .append("                ").append(runtime(node.id(), variant, "false")).append(", lifecycle);\n");
-            if (variant == Variant.DEVELOPMENT && metricIndexes[trigger.node()] >= 0) {
+                    .append("                ").append(runtime(node.id(), "false")).append(", lifecycle);\n");
+            if (metricIndexes[trigger.node()] >= 0) {
                 final int metricIndex = metricIndexes[trigger.node()];
                 source.append("        final long stepMetric = METRICS.startStep(")
                         .append(metricIndex).append(");\n")
@@ -657,7 +659,7 @@ final class ApplicationGenerator {
                         .append("        try {\n")
                         .append("            outcome = execution.call(")
                         .append(planReference(trigger.node())).append(", ")
-                        .append(call(handler, variant, false)).append(", values, ")
+                        .append(handlerReference(handler)).append(", values, ")
                         .append(inputsReference(trigger.node()))
                         .append(");\n")
                         .append("            if (outcome < 0) {\n")
@@ -670,12 +672,12 @@ final class ApplicationGenerator {
             } else {
                 source.append("        final int outcome = execution.call(")
                         .append(planReference(trigger.node())).append(", ")
-                        .append(call(handler, variant, false)).append(", values, ")
+                        .append(handlerReference(handler)).append(", values, ")
                         .append(inputsReference(trigger.node())).append(");\n");
             }
             source
                     .append("        if (outcome < 0) {\n")
-                    .append(variant == Variant.DEVELOPMENT && metricIndexes[trigger.node()] >= 0
+                    .append(metricIndexes[trigger.node()] >= 0
                             ? "            return new WorkflowRuntime.SourceResult(stepResult, Map.of());\n        }\n"
                             : "            return new WorkflowRuntime.SourceResult(execution.finish(), Map.of());\n        }\n")
                     .append("        final int destination = ").append(destination(trigger.node(), node)).append(";\n")
@@ -686,15 +688,13 @@ final class ApplicationGenerator {
                     .append(".outcomes().get(outcome) + \".\", ")
                     .append(quote(node.id())).append("), Map.of());\n        }\n")
                     .append("        final RunResult result = execute_").append(trigger.node())
-                    .append(variant == Variant.PRODUCTION
-                            ? "(execution, destination);\n"
-                            : "(execution, destination, CALLS);\n")
+                    .append("(execution, destination);\n")
                     .append("        return result instanceof RunResult.Succeeded || result instanceof RunResult.Completed\n")
                     .append("                ? new WorkflowRuntime.SourceResult(result, execution.responses(")
                     .append(responseSlotsReference(trigger)).append("))\n")
                     .append("                : new WorkflowRuntime.SourceResult(result, Map.of());\n")
                     .append("    }\n\n");
-            if (variant == Variant.DEVELOPMENT) {
+            {
                 source.append("    static WorkflowRuntime.SourceResult measuredSource_")
                         .append(trigger.node()).append("(final Map<String, RailixValue> values, final WorkflowRuntime.Lifecycle lifecycle) {\n")
                         .append("        final long metric = METRICS.startFlow(").append(flow).append(");\n")
@@ -715,13 +715,13 @@ final class ApplicationGenerator {
             final Map<Integer, StringBuilder> flows,
             final List<ApplicationPlan.NodePlan> nodes,
             final List<ApplicationPlan.TriggerPlan> triggers,
-            final Variant variant
+            final boolean examples
     ) {
         for (int flow = 0; flow < triggers.size(); flow++) {
             final ApplicationPlan.TriggerPlan trigger = triggers.get(flow);
             final StringBuilder source = flows.get(trigger.node());
             final ApplicationPlan.NodePlan triggerNode = nodes.get(trigger.node());
-            if (variant == Variant.DEVELOPMENT) {
+            if (examples) {
                 source.append("    static RunResult run_").append(trigger.node())
                         .append("(final RailixValue.ObjectValue context, final boolean test, final WorkflowRuntime.Lifecycle lifecycle) {\n")
                         .append("        if (context.values().containsKey(\"runtime\")) {\n")
@@ -733,34 +733,30 @@ final class ApplicationGenerator {
                         .append("        try {\n")
                         .append("            final WorkflowRuntime.Execution execution = WorkflowRuntime.execution(")
                         .append(resultsReference(trigger)).append(", context, ")
-                        .append(runtime(triggerNode.id(), Variant.DEVELOPMENT, "test")).append(", lifecycle);\n")
+                        .append(runtime(triggerNode.id(), "test")).append(", lifecycle);\n")
                         .append("            result = execute_").append(trigger.node())
-                        .append("(execution, ").append(trigger.start()).append(", CALLS);\n")
+                        .append("(execution, ").append(trigger.start()).append(");\n")
                         .append("            return result;\n")
                         .append("        } finally {\n")
                         .append("            METRICS.finishFlow(").append(flow).append(", metric, result);\n")
                         .append("        }\n")
                         .append("    }\n\n");
             }
-            appendExecutor(source, trigger.node(), variant);
+            appendExecutor(source, trigger.node());
         }
     }
 
     private static void appendExecutor(
             final StringBuilder source,
-            final int trigger,
-            final Variant variant
+            final int trigger
     ) {
         source.append("    private static RunResult ")
                 .append("execute_").append(trigger)
                 .append("(final WorkflowRuntime.Execution execution, int current")
-                .append(variant == Variant.DEVELOPMENT ? ", final WorkflowRuntime.StepCall[] calls" : "")
                 .append(") {\n")
                 .append("        while (current != END) {\n");
         source.append("            final int outcome = dispatch_").append(trigger)
-                .append(variant == Variant.PRODUCTION
-                        ? "(execution, current);\n"
-                        : "(execution, current, calls);\n")
+                .append("(execution, current);\n")
                 .append("            if (outcome < 0) {\n")
                 .append("                final RunResult result = execution.finish();\n");
         source.append("                return result;\n            }\n");
@@ -783,8 +779,7 @@ final class ApplicationGenerator {
             final StringBuilder classes,
             final List<ApplicationPlan.NodePlan> nodes,
             final Map<String, Integer> handlers,
-            final int[] metricIndexes,
-            final Variant variant
+            final int[] metricIndexes
     ) {
         final List<Integer> ordinary = new ArrayList<>();
         for (int index = 0; index < nodes.size(); index++) {
@@ -797,11 +792,10 @@ final class ApplicationGenerator {
         if (nodes.stream().anyMatch(node -> node.step().continuations())) {
             final Map<Integer, String> dispatch = new LinkedHashMap<>();
             for (final int partition : shared.keySet()) dispatch.put(partition,
-                    "Routes_" + partition + ".dispatch(execution, current" + (variant == Variant.DEVELOPMENT ? ", calls" : "") + ")");
+                    "Routes_" + partition + ".dispatch(execution, current)");
             appendSelector(root, classes, "dispatchContinuation", "int",
-                    "final WorkflowRuntime.Execution execution, final int current"
-                            + (variant == Variant.DEVELOPMENT ? ", final WorkflowRuntime.StepCall[] calls" : ""),
-                    "execution, current" + (variant == Variant.DEVELOPMENT ? ", calls" : ""), dispatch,
+                    "final WorkflowRuntime.Execution execution, final int current",
+                    "execution, current", dispatch,
                     "missingPlan(execution, current)");
             for (final String operation : List.of("step", "destination")) {
                 final boolean outcome = operation.equals("outcome") || operation.equals("destination");
@@ -814,10 +808,9 @@ final class ApplicationGenerator {
                         operation.equals("destination") ? "UNROUTED" : "\"unknown\"");
             }
             root.append("    static RunResult continueFlow(final WorkflowRuntime.Execution execution, int current")
-                    .append(variant == Variant.DEVELOPMENT ? ", final WorkflowRuntime.StepCall[] calls" : "")
-                    .append(") {\n        while (current != END) {\n");
+                        .append(") {\n        while (current != END) {\n");
             root.append("            final int outcome = dispatchContinuation(execution, current")
-                    .append(variant == Variant.DEVELOPMENT ? ", calls" : "").append(");\n")
+                    .append(");\n")
                     .append("            if (outcome < 0) {\n                final RunResult result = execution.finish();\n");
             root.append("                return result;\n            }\n");
             root.append("            final int next = destinationContinuation(current, outcome);\n")
@@ -845,17 +838,16 @@ final class ApplicationGenerator {
             }
             final Map<Integer, List<Integer>> partitions = partitions(ordinary.stream().filter(reachable::get).toList());
             final Map<Integer, String> cases = new LinkedHashMap<>();
-            final String arguments = variant == Variant.DEVELOPMENT
-                    ? "execution, current, calls" : "execution, current";
+            final String arguments = "execution, current";
             for (final int partition : partitions.keySet()) {
                 cases.put(partition, "Routes_" + partition + ".dispatch(" + arguments + ")");
             }
             appendSelector(source, classes, "dispatch_" + trigger, "int",
                     "final WorkflowRuntime.Execution execution, final int current"
-                            + (variant == Variant.DEVELOPMENT ? ", final WorkflowRuntime.StepCall[] calls" : ""),
+,
                     arguments, cases, "missingPlan(execution, current)");
             appendRouting(source, classes, trigger, partitions, emitted ? Map.of() : shared,
-                    nodes, handlers, metricIndexes, variant);
+                    nodes, handlers, metricIndexes);
             emitted = true;
         }
     }
@@ -868,8 +860,7 @@ final class ApplicationGenerator {
             final Map<Integer, List<Integer>> shared,
             final List<ApplicationPlan.NodePlan> nodes,
             final Map<String, Integer> handlers,
-            final int[] metricIndexes,
-            final Variant variant
+            final int[] metricIndexes
     ) {
         appendRouteSelector(
                 root, classes, trigger, partitions, "String", "step", "current", "Integer.toString(current)", false
@@ -887,9 +878,6 @@ final class ApplicationGenerator {
             source.append("final class ").append(owner).append(" {\n");
             source.append("        static int dispatch(\n")
                     .append("                final WorkflowRuntime.Execution execution, final int current")
-                    .append(variant == Variant.DEVELOPMENT
-                            ? ", final WorkflowRuntime.StepCall[] calls"
-                            : "")
                     .append(") {\n")
                     .append("            return switch (current) {\n");
             for (final int index : partition.getValue()) {
@@ -897,10 +885,10 @@ final class ApplicationGenerator {
                 final String continuation = node.step().continuations()
                         ? ", (child, selected) -> continueFlow(child, Routes_" + partition.getKey()
                         + ".destination(" + index + ", selected)"
-                        + (variant == Variant.DEVELOPMENT ? ", calls" : "") + ")"
+                        + ")"
                         : "";
                 source.append("                case ").append(index).append(" -> ");
-                if (variant == Variant.DEVELOPMENT && metricIndexes[index] >= 0) {
+                if (metricIndexes[index] >= 0) {
                     final int metricIndex = metricIndexes[index];
                     source.append("{\n")
                             .append("                    final long metric = METRICS.startStep(")
@@ -910,7 +898,7 @@ final class ApplicationGenerator {
                             .append("                    try {\n")
                             .append("                        outcome = execution.call(")
                             .append(planReference(index)).append(", ")
-                            .append(call(handlers.get(node.step().id()), variant, true)).append(", Map.of(), ")
+                            .append(handlerReference(handlers.get(node.step().id()))).append(", Map.of(), ")
                             .append(inputsReference(index)).append(continuation).append(");\n")
                             .append("                        if (outcome < 0) {\n")
                             .append("                            stepResult = execution.finish();\n")
@@ -923,7 +911,7 @@ final class ApplicationGenerator {
                             .append("                }\n");
                 } else {
                     source.append("execution.call(").append(planReference(index)).append(", ")
-                            .append(call(handlers.get(node.step().id()), variant, true)).append(", Map.of(), ")
+                            .append(handlerReference(handlers.get(node.step().id()))).append(", Map.of(), ")
                             .append(inputsReference(index)).append(continuation).append(");\n");
                 }
             }
@@ -1085,6 +1073,8 @@ final class ApplicationGenerator {
 
     private static final class NodeCompiler {
         private final int node;
+        private final int metricIndex;
+        private final List<String> metrics = new ArrayList<>();
         private final Map<String, Integer> handlers;
         private final Map<String, StepCatalog.Implementation> implementations;
         private final Map<String, List<String>> lifecycleMethods;
@@ -1097,11 +1087,13 @@ final class ApplicationGenerator {
 
         private NodeCompiler(
                 final int node,
+                final int metricIndex,
                 final Map<String, Integer> handlers,
                 final Map<String, StepCatalog.Implementation> implementations,
                 final Map<String, List<String>> lifecycleMethods
         ) {
             this.node = node;
+            this.metricIndex = metricIndex;
             this.handlers = handlers;
             this.implementations = implementations;
             this.lifecycleMethods = lifecycleMethods;
@@ -1117,11 +1109,22 @@ final class ApplicationGenerator {
                     runtimeStep(
                             plan.id(), plan.step(), plan.step().kind() == StepDefinition.Kind.STEP,
                             receives, returns, plan.outcomes(), plan.path(),
-                            configuration(plan.inputs(), plan.step().primaryOutcome()), node
+                            configuration(plan.inputs(), plan.step().primaryOutcome()), node,
+                            metricBinding(plan.step(), plan.path())
                     )
             );
             lifecycle("NODE_" + node, plan.step());
             return fields.append(methods).toString();
+        }
+
+        private String metricBinding(final StepDefinition step, final String path) {
+            if (step.metrics().isEmpty()) return "null";
+            metrics.add("new RuntimeMetrics.Registration(" + metricIndex + ", " + quote(path) + ", "
+                    + quote(step.id()) + ", " + list(step.metrics().stream().map(metric ->
+                    "new MetricDefinition(" + quote(metric.name()) + ", " + quote(metric.label()) + ", "
+                            + quote(metric.unit()) + ", MetricDefinition.Kind." + metric.kind().name()
+                            + ", MetricDefinition.Aggregation." + metric.aggregation().name() + ")").toList()) + ")");
+            return "METRICS.step(" + quote(path) + ")";
         }
 
         private void lifecycle(final String plan, final StepDefinition step) {
@@ -1318,7 +1321,8 @@ final class ApplicationGenerator {
                         runtimeStep(
                                 step.step().id(), step.step(), false, "Map.of()", "Map.of()",
                                 step.step().outcomes(), step.path(),
-                                configuration(step.inputs(), step.step().primaryOutcome()), -1
+                                configuration(step.inputs(), step.step().primaryOutcome()), -1,
+                                metricBinding(step.step(), step.path())
                         )
                 );
                 lifecycle(plan, step.step());
@@ -1375,7 +1379,8 @@ final class ApplicationGenerator {
             final List<String> outcomes,
             final String path,
             final String configuration,
-            final int node
+            final int node,
+            final String metrics
     ) {
         return "new WorkflowRuntime.StepPlan(\n"
                 + indent(quote(id), 1) + ",\n"
@@ -1389,7 +1394,8 @@ final class ApplicationGenerator {
                 + indent(quote(path), 1) + ",\n"
                 + indent(configuration, 1) + ",\n"
                 + indent(Boolean.toString(step.continuations()), 1) + ",\n"
-                + indent(Integer.toString(node), 1) + "\n)";
+                + indent(Integer.toString(node), 1) + ",\n"
+                + indent(metrics, 1) + "\n)";
     }
 
     private static String runtimePath(final ApplicationPlan.Path path) {
@@ -1412,13 +1418,10 @@ final class ApplicationGenerator {
 
     private static String runtime(
             final String trigger,
-            final Variant variant,
             final String test
     ) {
         final String triggerValue = "\"trigger\", RailixValue.string(" + quote(trigger) + ")";
-        return "RailixValue.object(Map.of(" + (variant == Variant.PRODUCTION
-                ? triggerValue
-                : "\"test\", RailixValue.bool(" + test + "), " + triggerValue) + "))";
+        return "RailixValue.object(Map.of(\"test\", RailixValue.bool(" + test + "), " + triggerValue + "))";
     }
 
     private static String responseSlotsReference(final ApplicationPlan.TriggerPlan trigger) {
@@ -1431,13 +1434,6 @@ final class ApplicationGenerator {
 
     private static String inputsReference(final int node) {
         return "Plans_" + node / PLAN_PARTITION_SIZE + ".INPUTS_" + node;
-    }
-
-    private static String call(final int handler, final Variant variant, final boolean routed) {
-        if (variant == Variant.PRODUCTION) {
-            return "Handlers_" + handler / PLAN_PARTITION_SIZE + ".CALL_" + handler;
-        }
-        return (routed ? "calls" : "CALLS") + "[" + handler + "]";
     }
 
     private static String handlerReference(final int handler) {
@@ -1493,7 +1489,9 @@ final class ApplicationGenerator {
     }
 
     private static String array(final StringBuilder classes, final String name, final String type, final List<String> values) {
-        if (values.size() <= PLAN_PARTITION_SIZE) {
+        long characters = 0;
+        for (final String value : values) characters += value.length();
+        if (values.size() <= PLAN_PARTITION_SIZE && characters <= MAX_PLAN_SOURCE_CHARACTERS) {
             return "new " + type + "[]{" + String.join(",\n", values) + "}";
         }
         appendArray(classes, name, type, values, 0, values.size());
@@ -1509,7 +1507,9 @@ final class ApplicationGenerator {
     ) {
         final String owner = "Constants_" + name + "_" + start + "_" + end;
         final StringBuilder body = new StringBuilder();
-        if (end - start <= ROUTE_PARTITION_SIZE) {
+        long characters = 0;
+        for (int index = start; index < end; index++) characters += values.get(index).length();
+        if (end - start == 1 || end - start <= ROUTE_PARTITION_SIZE && characters <= MAX_PLAN_SOURCE_CHARACTERS) {
             for (int index = start; index < end; index++) {
                 body.append("        values[").append(index).append("] = ").append(values.get(index)).append(";\n");
             }
@@ -1590,8 +1590,4 @@ final class ApplicationGenerator {
         }
     }
 
-    private enum Variant {
-        PRODUCTION,
-        DEVELOPMENT
-    }
 }

@@ -1,8 +1,8 @@
-# Development Execution And Observation
+# Application Execution And Observation
 
 ## Human Review
 
-Status: **Existing development baseline; accepted production direction**, updated on 2026-10-18.
+Status: **Shared runtime implementation in progress**, updated on 2026-11-03.
 Time-series database exclusion, planned data-administration separation and the production
 direction below do not change current endpoints or establish a fresh test pass. The roadmap owns
 delivery status.
@@ -15,6 +15,26 @@ capability boundary. Read-only observation never implies authority to inspect or
 Decisions: [ADR 0020](../adr/0020-creator-first-application-graph.md). Historical checks: [verification](../verification.md).
 
 ## Development Observation
+
+The 2026-11-03 correction makes the operational contract environment-independent: the same
+compiled Step calls, counters, sampling and metric exports apply to real ingress and Examples.
+Build-time capability selection, not a development/production mode, determines optional code.
+Example injection and recorded per-Step values remain the exception. Assertion evaluation belongs
+to Creator and MUST NOT execute application Steps or enter the generated application.
+The generated ordinary executor now uses the same direct handler references with and without
+Examples. `RuntimeMetrics` owns the common bounded store. The standalone listener and first local
+attachment/comparison implementation are described below. Their checks are recorded separately.
+
+The user accepted a first authenticated, loopback-only standalone connection on 2026-11-03.
+The user also selected local observation enabled by default, with a build-time opt-out. Disabling
+the connection MUST NOT change Step execution or metric calculation. Ordinary builds enable it.
+`build --no-observation` disables the listener without changing generated Step calls or counters.
+Remote access and its authorization remain out of scope for that increment. Implementation must
+separate observation from process ownership: detaching or closing Creator must not stop an
+independently started application. The accepted
+[same-workspace authoring direction](creator.md#live-application-and-local-changes) separates the
+read-only observed version from editable local work. It does not authorize deployment through
+the observation connection or extend the first attachment increment beyond loopback.
 
 The generated development application runs every compiled named Trigger Example automatically.
 An Example begins at the generic Trigger output after protocol conversion, carries
@@ -59,24 +79,136 @@ case snapshot. The owner rejects the request before replay when its completed so
 64 MiB. Exact Step context cannot be reconstructed from compact context changes without replaying
 from each Example's initial context.
 Runtime metrics use fixed-cardinality counters selected at compile time per graph Step. Counts are
-exact, Flow timings are exact, and Step timings sample one execution in 1,024. The development
-application serves JSON, Prometheus, and Influx metric formats; Creator displays application, Flow,
+exact, Flow timings are exact, and Step timings sample one execution in 1,024. The shared application
+endpoint serves JSON, Prometheus, and Influx metric formats; Creator displays application, Flow,
 and selected Step values without owning those values. Metric JSON and text exports distinguish exact
 primitive counter bytes, lookup-index bytes, and their sum from JVM-dependent object storage.
 Every metric JSON response carries the owning application PID; Creator and its browser discard a
 response when rolling replacement changes the current PID or artifact fingerprint.
 
-Current production artifacts physically omit Example tracing, development endpoints, and metrics.
-They do not merely disable dormant code. Protocol-specific test clients, assertions, remote
-attachment, and environment-selected development capabilities remain roadmap work.
+Artifacts without Examples omit their manifest, value tracing and Example execution endpoints.
+They retain the same operational metric store and generated instrumentation as artifacts with
+Examples. The independent read-only observation endpoint must not require Example execution code.
+Protocol-specific test clients, Creator assertions and remote attachment remain separate work.
+
+`MetricsEndpoint` is the shared authenticated HTTP handler. The Example-enabled launcher registers
+it on its existing management server. Normal JAR startup uses `ObservationServer` on an ephemeral
+IPv4 loopback port. Observation never keeps a CLI-only application alive beyond its source lifetime.
+Shutdown closes its listener, reader executor and credential and removes its own registration.
+Unavailable optional observation does not prevent application execution.
+
+### Local Standalone Connection
+
+The listener publishes one transient connection record under `~/.railix/observations/`. The
+directory must be owned by the current user with mode `0700`, each record with mode `0600`.
+Unsupported protection fails closed. Discovery ignores dead processes, reused PIDs, unsafe links,
+unsafe permissions and invalid records. Old crash records do not consume the live-candidate budget.
+It reads at most 16 KiB per record and supports at most 512 live candidates per selection read.
+These files are connection credentials and identity metadata, not project documents or topology.
+They are never included in builds, browser responses, URLs or application contexts.
+
+Creator selects a discovered instance, authenticates `GET /v1/application` and matches its listener
+nonce, PID, process start time, source revision and actual JAR digest. It does not follow redirects
+or accept caller-supplied network hosts. The original JAR must still be available and match the
+digest captured at startup. Project data then use the same bounded local/embedded reader and installed
+Step catalog. Matching local documents are preferred. Embedded originals can supply an older
+observed version while the local draft is newer. Otherwise the user selects the matching local file.
+
+The connection exposes only identity and the common metric reads/queries. It has no Example, run,
+activation, shutdown or deployment routes. Creator uses the same bounded/deadline-controlled HTTP
+body reader for owned and independent applications. A detached reader only closes its own HTTP
+client. Closing Creator never stops an independently started process. This first connection is
+same-user, POSIX-filesystem and loopback only, not a remote access or deployment contract.
+
+Live reads carry `X-Railix-Live-Instance` with the selected listener nonce. An outdated selection
+receives a conflict, never a different instance's data. One candidate connection may be prepared
+alongside the active connection. Only an authenticated same-origin confirmation POST activates it.
+Confirmation pauses Creator's owned local process, never the observed process. The draft remains a
+compiled build with an artifact lease, without a dormant JVM. Editing does not execute its lifecycle
+or Examples until `Start locally` uses the normal start/activate path. Reconfirming the active
+instance is idempotent and does not stop an explicitly started local process. Read-only GET requests
+cannot confirm a connection. Closing or cancelling before confirmation leaves the active version
+and owned process unchanged. The next selection
+or Creator shutdown closes an unused candidate. Local comparison payloads also identify their source
+instance so another browser's selection cannot relabel cached changes.
+
+## Application Source And Build Identity
+
+Clarified on 2026-11-03: a complete flow view needs the exact deployed topology, not only its
+measurements. The current metric export includes project/Flow/Step IDs and a PID, but no links,
+editable project configuration or deployed build identity. Optional project inclusion and
+artifact-referenced local authoring are implemented below. The existing observation path still
+uses separate captured sources and instance-bound readers for its owned local application and
+independently observed application. They never share counters or Example evidence.
+
+Selected by the user on 2026-11-03: a build option may include the existing project documents in
+the artifact. Without embedded project data, the matching documents MUST be available locally to
+Creator for the Flow view. Both sources MUST use the same project formats and reading contracts.
+There MUST NOT be an intermediate minimal description, separate topology manifest or alternative
+graph format. Compiler inputs remain the materialized functional graph; groups and Creator
+graphics remain optional presentation data.
+
+Creator MUST verify that the project data describe the observed build rather than a newer local
+draft. Source/build identification metadata may establish that correspondence, but MUST NOT
+duplicate the graph. Neither a project name nor matching Step IDs prove equivalent behavior.
+A PID identifies a process locally, not a deployed build or a globally unique instance. Editable
+data must also resolve the relevant third-party Step definitions through the existing contracts.
+
+If neither embedded nor matching local project data are available, Creator MUST request the
+matching project instead of drawing a guessed Flow from metrics or presenting a different local
+revision as the deployed version. Available measurements do not imply an available Flow view.
+Including project documents MUST NOT implicitly enable Example execution or application-side
+assertions; their capability ownership remains unchanged.
+
+### Artifact Project Loading
+
+Implementation added on 2026-11-03, with verification tracked in the roadmap:
+
+- `railix build [project-file] [--include-project]` builds the ordinary standalone JAR and prints
+  its path. Source inclusion is off unless selected. When enabled, `META-INF/railix/project/`
+  contains the original `railix.project.json` and any existing `railix.examples.json`,
+  `railix.creator.json` and `railix.dependencies.lock.json`. No generated scenes, runtime values,
+  derived grouping/layout or alternative graph descriptions are added.
+- The standard JAR manifest contains `Railix-Project-Id`, a SHA-256 source revision over the
+  canonical functional graph and resolved implementation/contract identities and locked artifact digests.
+  Examples, presentation and generated Java text are excluded. The hash is correspondence
+  metadata, not authentication or a substitute for trusting a Step bundle.
+- `railix creator [project-file] [port] --application application.jar` verifies the local project
+  revision before normal startup. Existing local project files take precedence. Without them,
+  embedded documents are restored into a new workspace directory, validated with the existing
+  reader/compiler/catalog and only then published. Its parent must already exist. Extraction
+  never replaces existing project files or directories. Unknown, duplicate or traversing source
+  entries, malformed UTF-8, incomplete documents and missing locked bundles fail explicitly.
+- Both variants use `ProjectFiles.read`, the same installed Step catalog and `CreatorServer`
+  startup. The resulting execution is local and owned by Creator. This command neither attaches
+  to nor acquires control over an existing application process. Source inclusion does not package
+  dependency-store copies, enable Example execution in the standalone JAR or move assertions there.
+- A build captures the original documents once and compiles and packages that same input. The
+  dependency resolver accepts the captured lock through its existing parser. A final read compares
+  current files without using them as new inputs. A journal or observed source change rejects the
+  build rather than publishing a mixture of editor revisions. No capture manifest is persisted.
+- The user accepted a 64 MiB limit per project document for both disk and embedded sources.
+  Compressed entries are size-checked and streamed to a temporary workspace, not retained together
+  in memory. Oversized disk reads also stop at that limit. This is a rejection safeguard, not a
+  target document size. Derived UI state, observations and generated topology remain unpersisted.
+
+The source-loading commands do not themselves attach to a running app. Protected local attachment
+and simultaneous Live/Draft comparison use the connection journey below. Remote access remains planned.
+
+Project configuration may contain credentials. Packaging source and starting a local copy are
+therefore separate decisions from reading metrics. The access distinction follows
+[OWASP's least-privilege guidance for secrets](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html#23-access-control),
+not an assumption that authenticated read-only access can safely disclose every project value.
+No automatic secret removal or safe production-I/O isolation is implemented by this direction.
 
 ## Accepted Production Observation Direction
 
-Accepted on 2026-10-18: generated production applications will include low-cost, bounded Step
+Accepted on 2026-10-18 and clarified on 2026-11-03: generated applications include low-cost, bounded Step
 and Flow telemetry so a connected Creator can show live activity without a separate observability
 stack. Baseline measurements are available by default. Detailed production tracing is separately
-enabled and bounded; it must not collect workflow values by default. Examples, their output fakes,
-and expectation evaluation remain development-only and are omitted from production artifacts.
+enabled and bounded; it must not collect workflow values by default. Examples and their output
+fakes are optional build capabilities. Their execution and recorded values are omitted when that
+capability is disabled. Expectation evaluation belongs to Creator, not to either application artifact.
 
 Development and production must retain one generated Step execution path and compatible metric
 meanings. An Example supplies Trigger output to that path; selecting or replaying its evidence does
@@ -88,8 +220,9 @@ measurable cost, so the production baseline requires a resource budget and packa
 Before implementation, agree the baseline measurements and overhead bound, tracing admission and
 retention, payload redaction, authentication and remote attachment, and how unavailable or stale
 production data appears in Creator. No production trace endpoint, storage format, sampling rate or
-test harness is selected by this direction. The current development-only behavior above remains
-the implementation baseline until that work is verified.
+test harness is selected by this direction. The shared metric store, direct ordinary dispatch and
+protected metric HTTP handler, standalone local attachment and build opt-out are implemented.
+Bounded real-traffic value tracing remains planned. Example capture does not prove that feature.
 
 The current generated development application binds an ephemeral loopback management port and
 requires its per-process bearer token on every route:
@@ -151,6 +284,12 @@ Metric aggregation reads the requested counters; an explicitly requested applica
 scans all flow counters. Example reads snapshot the union bitmap and use immutable reached intervals
 per completed case. These observations add no counters or hooks to production execution.
 
+Example summaries report `complete:true` only after a complete terminal record. A recording error
+reports `complete:false`, independently of whether application work continued. Selected Step
+projections report the exact `visits` observed while replaying the trace, rather than asking
+Creator to infer repeated arrivals from the last occurrence. These are read-side Example facts,
+not new production instrumentation or assertion logic in the application.
+
 Metric values and presentation are separate. The application owns the catalog and cumulative
 measurements; Creator caches the catalog per child application and relays bounded selections.
 The Inspector renders available catalog entries by unit, not a metric-name whitelist. Scene
@@ -159,9 +298,66 @@ combines query batches using each definition's `sum` or `max`; nonaggregatable v
 Absent measurements are omitted, not fabricated as zero. Timing definitions identify their sample
 counter, so an unsampled duration is displayed as unavailable.
 
+### Step-Defined Metrics
+
+Clarified on 2026-11-04: a Step may supply its own metric definitions and measurements through
+the public Step contract. Railix registers them in the existing application metric catalog and
+publishes them through its existing metric endpoint and exports. Steps remain functions, not
+metric servers. Registering a metric MUST NOT create a Step-owned listener, port or separate
+reporting channel. Built-in and third-party Steps use the same contract.
+
+The implementation verified on 2026-11-04 declares fixed `MetricDefinition` values through
+`StepDefinition.Builder.metric(...)`. A counter defaults to sum aggregation. A gauge defaults to
+no aggregation. PROCESS and optional PRE/POST functions use `context.counter(name).increment()` /
+`.add(amount)` and `context.gauge(name).set(value)`. No lifecycle hook is required solely to register
+metrics. Railix binds handles once while constructing the generated application's metric store.
+Updates perform atomic memory operations, not I/O, polling, descriptor creation or per-call handle
+allocation. Names cannot be introduced from invocation data. Counters reject negative increments
+and saturate instead of overflowing. Gauges accept finite numbers and remain absent until set.
+
+The catalog qualifies each name as `<Step definition ID>:<local name>`. Duplicate local names or
+conflicting declarations fail before execution. Measurements are separate for each placement,
+including nested Steps. Nested measurements appear under their owning graph Step and use the
+declared aggregation. Group summaries omit multiple nonaggregatable observations rather than
+choosing one. Single-Step JSON also retains each custom placement under `placements`, and text
+exports identify its fixed placement separately. Draft and Live Inspectors disclose those values
+individually, including repeated nested gauges.
+The ordinary per-node metrics switch also disables custom measurements, including nested ones,
+through shared no-op handles. No custom counter arrays are allocated for disabled placements.
+The existing catalog, JSON reads/queries, Prometheus and Influx exports carry these measurements.
+Creator uses their labels and units through its existing generic Inspector, without Step-ID checks.
+The nominal `port` unit displays the exact number, without grouping or an added suffix, for built-in
+and installed Steps alike. Source-activation failures identify their owning graph Step. The runtime
+still omits arbitrary exception messages; a Step owns its safe transport-boundary diagnostics.
+Metric metadata counts toward the existing generated-code budget for one Step. Generated constant
+arrays split by content size as well as entry count so many valid declarations across an application
+do not create an oversized Java initializer.
+
+```java
+StepDefinition.named("example.work", "1")
+        .metric(MetricDefinition.counter("processed", "Processed", "count"))
+        .metric(MetricDefinition.gauge("queue_depth", "Queue depth", "items"))
+        .implementation(Work.class);
+
+// Inside a static Step function. No registration or transport setup here.
+context.counter("processed").increment();
+context.gauge("queue_depth").set(12);
+```
+
+Prometheus exports keep separate counter/gauge families and an injectively escaped definition
+namespace, with the original identifier, label and unit in HELP. Fixed placement labels distinguish
+repeated uses. Unlike a single catch-all family, each family retains one kind and unit, following
+the [Prometheus exporter guidance](https://prometheus.io/docs/instrumenting/writing_exporters/).
+Reading any export does not call Step functions or collect new measurements.
+
+### Scoped Metric Reads
+
 A reached destination does not by itself establish that every incoming connection was reached.
 An incoming connection from a known unvisited source remains unreached. Missing source evidence
 remains unknown, rather than inventing an arrival through a shared destination.
+Likewise, destination counters are not route counters when several connections arrive there.
+Such connections omit their metric projection rather than repeating the destination total on
+each incoming belt. The destination Step keeps its own ordinary counters.
 
 Metric queries include `steps` and `flows` objects, empty when unused. For example,
 `{"steps":{"region":[[0,9]]},"flows":{},"metrics":["executions","duration_nanos_max"]}`
@@ -173,9 +369,9 @@ Concurrent counters are observations, not an atomic transaction across every Ste
 Existing JSON, Prometheus and Influx names and units remain unchanged.
 
 New charts, rates or averages over existing measurements require only frontend changes. A genuinely
-new measurement still needs application instrumentation. Custom instrumentation, historical time
-windows and environment-specific capability selection remain roadmap work; no formula engine,
-metric database, additional dependency or per-request allocation is introduced here.
+new measurement still needs application instrumentation through the fixed declarations above.
+Historical time windows and further capability selection remain roadmap work. No formula engine,
+metric database, additional dependency or per-update allocation is introduced here.
 The 2026-09-19 scope clarification explicitly excludes a dedicated built-in time-series database.
 Existing metric exports remain in scope; any historical window needs a separate bounded-retention
 contract, not an assumed embedded database.
@@ -232,6 +428,9 @@ Unchanged observations do not redraw the world or rebuild the selected Example p
 Picker updates deferred while the user interacts are retried by the existing poll after interaction,
 not by another timer or a full Inspector redraw. Runtime metrics are disclosed on demand; the
 per-Step metrics build setting remains immediately available.
+Changing Step, group or navigation selection cancels an older application-observation read and
+requests an immediate refresh through that same poll owner. Its eligible Example list must not
+wait for a slow read started for the previous selection.
 
 The App/JVM/System comparison matches metric identifiers after removing their scope prefix,
 together with their catalog unit. Unavailable cells stay empty; differing units and duplicate

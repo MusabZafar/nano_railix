@@ -1997,3 +1997,54 @@ body[data-reduced-motion=true] *, body[data-reduced-motion=true] *::before, body
   .build-indicator::before { display: none; }
   #inspector-nav .inspector-tabs button { padding-inline: 4px; }
 }
+/* One workspace, with a clearly read-only live version. */
+#workspace-source { grid-column:3; grid-row:1; display:flex; align-items:center; gap:4px; flex-shrink:0; }
+:root:has(#workspace-source:not([hidden])):has(#example-session:not([hidden])) { --header-height:92px; }
+body:has(#workspace-source:not([hidden])):has(#example-session:not([hidden])) .workbench-header { grid-template-rows:48px 44px; }
+body:has(#workspace-source:not([hidden])) #example-session { grid-row:2; grid-column:2 / -1; }
+#workspace-source[hidden] { display:none; }
+#workspace-source button { min-height:36px; padding:6px 10px; color:var(--hud-text); background:var(--hud-control); border:1px solid var(--hud-border); border-radius:7px; }
+.restore-draft { margin:12px 16px 0; }
+#workspace-source [aria-pressed="true"] { color:var(--accent,#a4d7ce); background:var(--panel,#293c45); box-shadow:inset 0 -2px currentColor; }
+#workspace-source small { font-size:.72em; opacity:.75; margin-left:4px; }
+#start-local { display:flex; align-items:center; gap:6px; }
+#workspace-source [hidden] { display:none; }
+#live-connections { width:min(540px,calc(100vw - 32px)); max-height:calc(100dvh - 48px); padding:20px; color:var(--ink); background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+#live-connections::backdrop { background:rgb(10 22 28 / 40%); }
+#live-connections header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+#live-connections h2 { margin:0; font-size:1.25rem; }
+#live-content { display:grid; gap:8px; }
+#live-content li { overflow-wrap:anywhere; }
+#live-content button { display:flex; align-items:center; gap:10px; width:100%; text-align:left; min-width:0; padding:12px; flex-wrap:wrap; }
+#live-content button small { display:block; overflow-wrap:anywhere; font-size:.75rem; opacity:.75; }
+#live-content [data-live-instance] small { flex-basis:100%; }
+#live-message:empty { display:none; }
+.change-kind { display:grid; place-items:center; width:24px; height:24px; border:1px solid currentColor; border-radius:6px; }
+.change-kind[data-kind="added"] { color:#a4d7ce; }
+.change-kind[data-kind="removed"] { color:#e5a098; }
+.change-kind[data-kind="changed"] { color:#dfc093; }
+body[data-workspace-source="live"] .world-ports,
+body[data-workspace-source="live"] #inspector-connections,
+body[data-workspace-source="live"] #inspector-footer { display:none; }
+body[data-workspace-source="live"] .world-label.draft-removed { opacity:.5; }
+@media(max-width:650px) {
+  :root:has(#workspace-source:not([hidden])) { --header-height:132px; }
+  :root:has(#workspace-source:not([hidden])):has(#example-session:not([hidden])) { --header-height:176px; }
+  body:has(#workspace-source:not([hidden])) .workbench-header,
+  body:has(#workspace-source:not([hidden])):has(#example-session:not([hidden])) .workbench-header { grid-template-rows:44px 44px 44px auto; }
+  #workspace-source { grid-column:1 / -1; grid-row:3; width:100%; justify-content:center; }
+  body:has(#workspace-source:not([hidden])) #example-session { grid-column:1 / -1; grid-row:4; }
+  #workspace-source button { min-height:44px; }
+  #workspace-source small { display:none; }
+  #workspace-source .start-local-label { display:none; }
+  #start-local { min-width:44px; justify-content:center; }
+}
+@media(min-width:651px) and (max-width:1100px) {
+  :root:has(#workspace-source:not([hidden])),
+  :root:has(#workspace-source:not([hidden])):has(#example-session:not([hidden])) { --header-height:88px; }
+  body:has(#workspace-source:not([hidden])) .workbench-header,
+  body:has(#workspace-source:not([hidden])):has(#example-session:not([hidden])) .workbench-header { grid-template-rows:44px 44px; }
+  #workspace-source { grid-column:2; grid-row:2; }
+  body:has(#workspace-source:not([hidden])) #example-session { grid-column:3; }
+}
+@media(min-width:1101px) { body:has(#workspace-source:not([hidden])) .workbench-header { grid-template-columns:104px minmax(140px,1fr) max-content max-content; } }

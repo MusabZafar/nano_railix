@@ -11,10 +11,29 @@ window.fetch = (input, options = {}) => {
   const headers = new Headers(input instanceof Request ? input.headers : options.headers);
   new Headers(options.headers).forEach((value, name) => headers.set(name, value));
   headers.set("X-Railix-Creator-Token", creatorToken);
-  return browserFetch(input, { ...options, headers });
+  const versioned = /^\/api\/(editor|scene|application|metrics|catalog)(\/|$)/.test(url.pathname)
+    && (options.method || (input instanceof Request ? input.method : 'GET')) === 'GET';
+  const epoch = state.workspaceEpoch;
+  if (versioned && state.liveView) {
+    url.pathname = url.pathname.replace('/api/', '/api/live/');
+    input = input instanceof Request ? new Request(url,input) : url.href;
+  }
+  if(state.liveConnection?.instance) headers.set('X-Railix-Live-Instance',state.liveConnection.instance);
+  return browserFetch(input, { ...options, headers }).then(response => {
+    if (versioned && epoch !== state.workspaceEpoch) throw new DOMException('Workspace changed','AbortError');
+    return response;
+  });
 };
 
 const state = {
+  liveView: false,
+  liveConnection: null,
+  liveChanges: {},
+  workspaceEpoch: 0,
+  switchingWorkspace: false,
+  liveController: null,
+  liveCandidate: '',
+  restoreCommand: null,
   project: null,
   builtProject: null,
   savedCreator: null,
@@ -179,6 +198,8 @@ async function boot() {
     state.creatorVersion = project.creator_revision;
     state.application = project.application;
     state.workspace = project.workspace;
+    state.liveConnection = project.live_application || null;
+    state.liveChanges = project.comparison_instance===state.liveConnection?.instance ? project.changes || {} : {};
     state.diagnostics = project.diagnostics || [];
     state.catalog = catalog.steps;
     state.definitions = new Map(state.catalog.map(definition => [definition.id, definition]));
@@ -187,7 +208,7 @@ async function boot() {
     state.world = new RailixWorld(document.querySelector("#graph"), {
       selectNode: selectWorldNode,
       editingBusy: () => state.actionPending,
-      outputPorts: item => state.editor.full.includes(item.id) ? displayOutcomes(node(item.id)).map(outcome =>
+      outputPorts: item => !state.liveView && state.editor.full.includes(item.id) ? displayOutcomes(node(item.id)).map(outcome =>
         ({id:item.id+'.'+outcome,name:outcomeLabel(node(item.id),outcome)})) : [],
       connect: (from,to) => { void editorAction({kind:'connect',from,to}).then(result => { if (!result) state.world.connection(null); }); },
       insert: openBeltPicker,
@@ -261,6 +282,11 @@ function render() {
     return;
   }
   document.title = `${state.project.id} - Railix Creator`;
+  document.body.dataset.workspaceSource = state.liveView ? 'live' : 'draft';
+  document.querySelector('#workspace-source').hidden = !state.liveConnection && state.application.state !== 'ready';
+  for(const button of document.querySelectorAll('button[data-workspace-source],#show-live-changes'))button.hidden=!state.liveConnection;
+  for (const button of document.querySelectorAll('button[data-workspace-source]')) button.setAttribute('aria-pressed',String((button.dataset.workspaceSource === 'live') === state.liveView));
+  document.querySelector('#show-live-changes').textContent = count(Object.keys(state.liveChanges).length,'change');
   renderBuildStatus();
   renderWorldNavigation();
   renderExampleContext();
@@ -276,7 +302,8 @@ function render() {
   const builtAt = Number(state.application.built_at || 0);
   document.querySelector("#last-build").textContent = builtAt
     ? new Date(builtAt).toLocaleString()
-    : "Not built";
+    : state.liveView ? '' : "Not built";
+  document.querySelector('#last-build').closest('div').hidden=state.liveView && !builtAt;
   state.worldNodes = new Map(state.project.nodes.map(operation => [operation.id, operation]));
   state.worldGroups = new Map(state.creator.groups.map(group => [group.id, group]));
   updateWorldMarks(state.world?.scene);
@@ -330,6 +357,137 @@ function render() {
   syncInspectorLayout();
 }
 
+async function showLiveConnections() {
+  const dialog=document.querySelector('#live-connections'), host=document.querySelector('#live-content'), message=document.querySelector('#live-message');
+  document.querySelector('#project-actions').hidePopover();
+  document.querySelector('#live-title').textContent='Live applications';
+  document.querySelector('#live-source-selection').hidden=true;
+  state.liveController?.abort();
+  const controller=state.liveController=new AbortController();
+  host.replaceChildren();message.textContent='Looking for local applications';dialog.showModal();
+  try {
+    const response=await fetch('/api/live',{signal:controller.signal});
+    const value=parseExact(await response.text());
+    if (!response.ok) throw Error(value.message || 'Applications could not be read.');
+    host.innerHTML=value.applications.map(app=>`<button type="button" data-live-instance="${html(app.instance)}"><strong>Application ${html(numberText(app.pid))}</strong><small>${html(app.artifact)}</small></button>`).join('');
+    message.textContent=value.applications.length ? '' : 'No running applications for this user.';
+  } catch(error) { if(!controller.signal.aborted) message.textContent=error.message; }
+}
+
+function reportWorkspaceFailure(message) {
+  const dialog=document.querySelector('#live-connections');
+  if(!dialog.open) {
+    document.querySelector('#live-title').textContent='Live application';
+    document.querySelector('#live-content').replaceChildren();
+    document.querySelector('#live-source-selection').hidden=true;
+    dialog.showModal();
+  }
+  document.querySelector('#live-message').textContent=message;
+}
+
+async function switchWorkspace(liveView,connection=state.liveConnection) {
+  if (state.switchingWorkspace || state.actionPending || state.writeActive || state.pendingProject || state.saveFailure) {
+    reportWorkspaceFailure('Finish or discard the local edit before changing versions.');return false;
+  }
+  const before=state.liveView, previousConnection=state.liveConnection;
+  let confirmed = false, confirming = false;
+  state.switchingWorkspace=true;state.actionPending=true;state.liveView=liveView;state.liveConnection=connection;state.workspaceEpoch++;
+  for(const name of ['applicationController','metricsController','observationController','groupMeanController','traceController','editorController']) state[name]?.abort();
+  clearTimeout(state.applicationPollTimer);clearTimeout(state.metricsPollTimer);clearTimeout(state.observationTimer);clearTimeout(state.groupMeanTimer);
+  state.editorRequest++;
+  try {
+    if (liveView) {
+      confirming=true;
+      const response=await fetch('/api/live',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({instance:connection.instance,confirm:true})});
+      const value=parseExact(await response.text());
+      if(!response.ok){confirming=false;throw Error(value.message || 'Connection could not be confirmed.');}
+      confirmed=true;confirming=false;
+    }
+    let payload,catalog,failure;
+    for(const view of liveView ? [true,false] : [false]) {
+      state.liveView=view;state.workspaceEpoch++;
+      try {
+        const [response,catalogResponse]=await Promise.all([fetch('/api/editor'),fetch('/api/catalog')]);
+        const next=parseExact(await response.text()), definitions=parseExact(await catalogResponse.text());
+        if(!response.ok || !catalogResponse.ok) throw Error(next.message || definitions.message || 'This version could not be opened.');
+        payload=next;catalog=definitions;break;
+      } catch(error) {
+        if(!view)throw error;
+        failure=error;
+      }
+    }
+    state.project=payload.project;state.builtProject=clone(payload.project);state.editor=payload.editor;state.history=payload.history;
+    state.creator=payload.creator;state.savedCreator=clone(payload.creator);state.projectVersion=payload.revision;state.creatorVersion=payload.creator_revision;
+    state.catalog=catalog.steps;state.definitions=new Map(catalog.steps.map(definition=>[definition.id,definition]));
+    state.workspace=payload.workspace;state.diagnostics=payload.diagnostics || [];state.localDiagnostics=[];state.liveChanges=payload.comparison_instance===state.liveConnection?.instance ? payload.changes || {} : {};
+    state.selection={type:'app',id:'app'};state.regionSelection=null;state.picker=state.pathPicker=state.groupPicker=null;state.groupDraft=null;
+    state.managedGroup='';state.selectedSteps.clear();state.inspectorMode='overview';state.evidenceView=null;
+    clearPreview();replaceApplication(payload.application);resetMetrics(true);state.observations=null;state.groupMeans.clear();
+    state.exampleFailures=[];state.worldIssues.clear();state.worldMarkedRegions.clear();state.build='Built';
+    state.world.resetScene();render();await state.world.refresh();showInspector(false);
+    if(failure) {reportWorkspaceFailure(failure.message);return false;}
+    document.querySelector('#live-connections').close();
+    return true;
+  } catch(error) {
+    reportWorkspaceFailure(error.message);
+    // After confirmation only the new instance may supply live values.
+    if(confirmed || confirming) {window.location.reload();return false;}
+    state.liveView=before;state.liveConnection=previousConnection;state.workspaceEpoch++;render();return false;
+  }
+  finally {state.switchingWorkspace=false;state.actionPending=false;renderBuildStatus();scheduleApplicationPoll(0);scheduleMetricsPoll(0);scheduleWorldObservations(0);}
+}
+
+async function startLocal() {
+  if(state.liveView || state.actionPending || state.writeActive || state.pendingProject || state.saveFailure)return;
+  state.actionPending=true;renderBuildStatus();
+  try {
+    const response=await fetch('/api/application',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'start',revision:state.projectVersion,creator_revision:state.creatorVersion})});
+    const value=parseExact(await response.text());
+    if(value.application)replaceApplication(value.application);
+    if(!response.ok)throw Error(value.message || 'Local application could not start.');
+    resetMetrics(true);render();
+  } catch(error) {reportWorkspaceFailure(error.message);}
+  finally {state.actionPending=false;renderBuildStatus();scheduleApplicationPoll(0);scheduleWorldObservations(0);}
+}
+
+async function connectLive(instance,project='') {
+  if(state.actionPending || state.writeActive || state.pendingProject || state.saveFailure) {
+    document.querySelector('#live-message').textContent='Finish or discard the local edit before connecting.';return;
+  }
+  state.liveCandidate=instance;
+  state.liveController?.abort();
+  const controller=state.liveController=new AbortController();
+  const message=document.querySelector('#live-message');
+  const buttons=[...document.querySelectorAll('#live-content button')];
+  buttons.forEach(button=>button.disabled=true);message.textContent='Connecting';
+  try {
+    const response=await fetch('/api/live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance,...(project?{project}:{})}),signal:controller.signal});
+    const value=parseExact(await response.text());
+    if(!response.ok) throw Error(value.message || 'Connection failed.');
+    if(controller.signal.aborted || !document.querySelector('#live-connections').open)return;
+    await switchWorkspace(true,value.application);
+  } catch(error) {if(!controller.signal.aborted){message.textContent=error.message;document.querySelector('#live-source-selection').hidden=!/PROJECT_SOURCE_(REQUIRED|MISMATCH)/.test(error.message);}}
+  finally {buttons.forEach(button=>button.disabled=false);}
+}
+
+async function showLiveChanges() {
+  const dialog=document.querySelector('#live-connections');
+  document.querySelector('#live-title').textContent='Live / Draft';
+  document.querySelector('#live-source-selection').hidden=true;
+  document.querySelector('#live-message').textContent='';
+  try {
+    const response=await fetch('/api/live/changes');
+    const value=parseExact(await response.text());
+    if(!response.ok) throw Error(value.message || 'Comparison unavailable.');
+    state.liveChanges=value;
+    document.querySelector('#live-content').innerHTML=Object.entries(state.liveChanges).map(([id,change])=>`<button type="button" data-live-change="${html(id)}"><span class="change-kind" data-kind="${html(change.state)}">${{added:'+',removed:'-',changed:'~'}[change.state]}</span><strong>${html(id)}</strong><small>${html(inputLabel(change.state))}</small></button>`).join('');
+    if(!Object.keys(state.liveChanges).length) document.querySelector('#live-message').textContent='Same functional version';
+    dialog.showModal();
+  } catch(error) {document.querySelector('#world-error').textContent=error.message;document.querySelector('#world-error').hidden=false;}
+}
+
 function updateWorldMarks(scene) {
   state.worldChanges = changedIds();
   state.worldIssues = new Map();
@@ -357,6 +515,14 @@ function renderDock() {
   const operation = selectedOperation();
   const region = state.regionSelection;
   const dock = document.querySelector("#selection-overview");
+  if (state.liveView) {
+    const name = region?.name || stepPresentation(operation?.id).name || (operation && stepName(definitionFor(operation))) || state.project.id;
+    renderDockMarkup(document.querySelector('#inspector-identity'), `<div><small>Live / Read-only</small><h2>${html(name)}</h2></div>`);
+    renderDockMarkup(document.querySelector('#inspector-navigation'), '<button type="button" id="dock-focus" aria-label="Focus"><i class="hud-symbol" data-symbol="locate" aria-hidden="true"></i></button>');
+    document.querySelector('#inspector-footer').hidden = true;
+    document.querySelector('#inspector-connections').hidden = true;
+    return;
+  }
   if (!operation && !region) {
     return;
   }
@@ -419,6 +585,7 @@ function exampleStatus(example) {
 
 function renderExampleContext() {
   const host = document.querySelector('#example-session');
+  if (state.liveView) { host.hidden=true; return; }
   const id = selectedExampleId(), example = selectedTraceCase();
   renderTimeScale();
   const scope = exampleScopeId();
@@ -427,8 +594,8 @@ function renderExampleContext() {
   const ready = Boolean(author) || !scope || scoped?.id === scope && scoped.key === exampleScopeKey(scope) && !scoped.error;
   const recorded = [...state.exampleIds.values()].flatMap(choices => [...choices.values()]);
   const inventory = author ? (author.examples || []).map((example,index)=>({...example,
-    ...recorded.find(candidate=>candidate.trigger===author.id && Number(candidate.index)===index),
-    name:example.name,id:author.id+':'+index,trigger:author.id,index})) : recorded;
+    ...recorded.find(candidate=>candidate.id===example.id),
+    name:example.name,id:example.id,trigger:author.id,index})) : recorded;
   const current = inventory.find(candidate => candidate.id === id);
   const cases = inventory
     .filter(candidate => author || !scope || ready && scoped.ids.has(candidate.id));
@@ -477,7 +644,7 @@ function exampleScopeKey(id) {
 
 async function refreshExampleScope(application, signal, examples) {
   const id = exampleScopeId(), key = exampleScopeKey(id);
-  if (!id || examples.state !== 'completed' || state.exampleScope?.key === key) return;
+  if (!id || examples.state !== 'completed' || state.exampleScope?.key === key && !state.exampleScope.retry) return;
   let response;
   try {
     response = await fetch(`/api/scene/observations?${new URLSearchParams({revision:state.world.scene.revision,cases:id})}`, {signal});
@@ -485,7 +652,10 @@ async function refreshExampleScope(application, signal, examples) {
     if (signal.aborted) throw error;
   }
   if (!response?.ok) {
-    if (key === exampleScopeKey(exampleScopeId())) { state.exampleScope={id,key,error:true}; renderExampleContext(); }
+    if (key === exampleScopeKey(exampleScopeId())) {
+      state.exampleScope={id,key,error:true,retry:!response || [202,409,502,503,504].includes(response.status)};
+      renderExampleContext();
+    }
     return;
   }
   const result = parseExact(await response.text());
@@ -541,6 +711,15 @@ function renderDockMarkup(element, source) {
 }
 
 function renderDockObservation() {
+  if(state.liveView) {
+    const tree=document.querySelector('#selection-evidence .context-children');
+    if(tree && state.evidenceView?.delta)renderDockMarkup(tree,contextRows(state.evidenceView.delta));
+    const metric=document.querySelector('.live-step-metrics');
+    if(metric)renderDockMarkup(metric,state.regionSelection
+      ? metricFacts('Live group metrics',metricRows(currentWorldObservations()?.nodes.get(state.regionSelection.id)?.metrics))
+      : metricsPanel());
+    return;
+  }
   refreshInspectorTabs();
   if (state.groupDraft) return;
   const slot = document.querySelector("#dock-observation");
@@ -749,10 +928,14 @@ function focusRegion(regionId) {
 }
 
 function renderBuildStatus() {
+  const start=document.querySelector('#start-local');
+  start.hidden=state.liveView || !(state.application.state==='ready'
+    || state.liveConnection && state.application.state==='stopped');
+  start.disabled=state.actionPending || state.writeActive || Boolean(state.pendingProject || state.saveFailure);
   document.querySelector("#build-state").textContent = state.build === "Built"
     ? inputLabel(state.application.state || "running") : state.build;
   document.body.dataset.build = state.build.toLowerCase().replace(" ", "-");
-  for (const kind of ['undo','redo']) document.querySelector(`#editor-${kind}`).disabled = state.actionPending || state.writeActive || Boolean(state.saveFailure?.reload) || !state.history?.[kind];
+  for (const kind of ['undo','redo']) document.querySelector(`#editor-${kind}`).disabled = state.liveView || state.actionPending || state.writeActive || Boolean(state.saveFailure?.reload) || !state.history?.[kind];
   for (const selector of ['#inspector','#overlay','.world-ports']) {
     const element=document.querySelector(selector);
     if(element) element.inert=state.actionPending && !(selector==='#inspector' && state.projectImport.reload
@@ -760,6 +943,7 @@ function renderBuildStatus() {
   }
   document.querySelector('#project-menu').disabled=!state.project || state.actionPending && !state.projectImport.reload;
   document.querySelector('#open-settings').disabled=state.actionPending;
+  document.querySelector('#open-project-import').disabled=state.liveView;
   const selecting = Boolean(state.editorController && !state.editorController.signal.aborted
     && state.editorController.node && state.editorController.node !== (state.regionSelection ? 'app' : state.selection.id));
   document.querySelector('#inspector').setAttribute('aria-busy',String(selecting || state.inspectorMode === 'groups' && Boolean(state.editorController)));
@@ -927,6 +1111,7 @@ async function flushEdits() {
 }
 
 async function editorAction(command, preview = false) {
+  if (state.liveView) return null;
   cancelAttention();
   if (state.actionPending) return null;
   state.actionPending = true;
@@ -947,6 +1132,7 @@ async function editorAction(command, preview = false) {
     state.creatorVersion = payload.creator_revision;
     state.history = payload.history;
     state.workspace = payload.workspace;
+    state.liveChanges = payload.comparison_instance===state.liveConnection?.instance ? payload.changes || {} : {};
     replaceApplication(payload.application);
     state.localDiagnostics = [];
     if (command.kind === 'delete' && state.jsonDraft?.node === command.node) state.jsonDraft=null;
@@ -984,7 +1170,7 @@ async function selectWorldNode(id, event, request) {
   if (state.actionPending) return false;
   closeProjectImport(false);
   if (!request || state.attentionRequest !== request) cancelAttention();
-  if (event?.shiftKey) {
+  if (event?.shiftKey && !state.liveView) {
     state.groupDraft = null;
     const item = state.world?.scene?.nodes.find(node => node.id === id);
     if (item?.kind !== 'step') return false;
@@ -1051,6 +1237,7 @@ function selectWorldGroup(group, region) {
   resetMetrics(true);
   render();
   showInspector(true);
+  refreshApplicationSelection();
   state.world.repaint();
   if (group) void loadEditor('app', group).then(() => { renderDock(); state.world.repaint(); void requestSelectedTrace(); });
   else void requestSelectedTrace();
@@ -1190,7 +1377,8 @@ function worldAppearance(item) {
       && state.inspectorMode === "groups" && state.managedGroup === group.id) || state.selectedSteps.has(item.id),
     related: Boolean(state.world?.related(item)),
     editing: state.groupDraft?.nodes.includes(item.id) || false,
-    changed: state.worldChanges.has(item.id),
+    changed: state.worldChanges.has(item.id) || Boolean(state.liveChanges[item.id]),
+    removed: state.liveView && state.liveChanges[item.id]?.state === 'removed',
     error: issues.some(issue => issue.severity !== "warning") || !selectedExampleId() && !['app','trigger','region'].includes(item.kind)
       && Boolean(live && metricNumber(live.errors) > 0),
     warning: issues.some(issue => issue.severity === "warning") || item.kind === "app" && Boolean(state.themeError),
@@ -1355,10 +1543,11 @@ async function refreshWorldObservations() {
   state.observationTimer = 0;
   state.observationController?.abort();
   const status = document.querySelector("#status-observations");
-  if (document.hidden || state.build === "Building" || state.pendingProject || state.application.state !== "running" || !state.world?.scene) {
+  if (document.hidden || state.switchingWorkspace || state.build === "Building" || state.pendingProject || state.application.state !== "running" || !state.world?.scene) {
     state.observations = null;
     state.world?.repaint();
     status.hidden = true;
+    if(!document.hidden && !state.switchingWorkspace)renderDockObservation();
     return;
   }
   const example = selectedExampleId();
@@ -1418,6 +1607,7 @@ async function refreshWorldObservations() {
       state.observationController = null;
       if (repaint) state.world?.repaint();
       renderWorldStatus();
+      renderDockObservation();
       scheduleWorldObservations(1_000);
     }
   }
@@ -1607,6 +1797,16 @@ function mergeSummary(target, source) {
 
 function inspector() {
   if (!state.selection.id && !state.regionSelection) return "";
+  if (state.liveView) {
+    if(state.regionSelection) return `<div class="live-step-metrics">${metricFacts('Live group metrics',metricRows(currentWorldObservations()?.nodes.get(state.regionSelection.id)?.metrics))}</div>`;
+    const operation=selectedOperation(), change=state.liveChanges[operation?.id];
+    const key=`live-draft:${state.liveConnection?.instance}:${operation?.id}`;
+    if (state.evidenceView?.key!==key) state.evidenceView={key,all:!change,open:new Map(),limits:new Map()};
+    const delta=contextChanges(change?.before || operation || {},change ? change.after || {} : operation || {});
+    state.evidenceView.delta=delta;
+    return `${change?.state==='removed'?`<button type="button" class="restore-draft" data-restore-live-step="${html(operation.id)}">Restore in draft</button>`:''}<section id="selection-evidence" aria-label="Live and draft comparison"><header><strong>${change ? inputLabel(change.state)+' in draft' : 'Live configuration'}</strong><button type="button" data-evidence-fields aria-label="${state.evidenceView.all?'Show changed fields only':'Show all fields'}" aria-pressed="${state.evidenceView.all}"><i class="hud-symbol" data-symbol="eye" aria-hidden="true"></i></button></header><div class="context-tree"><div class="context-children">${contextRows(delta)}</div></div></section>
+      <div class="live-step-metrics">${metricsPanel()}</div>`;
+  }
   if (state.regionSelection) {
     const region = state.regionSelection, group = state.creator.groups.find(group => group.id === region.group);
     if (!['appearance','groups'].includes(state.inspectorMode)) state.inspectorMode = "overview";
@@ -2262,6 +2462,7 @@ function appInspector(issues) {
 }
 
 function buildDetails() {
+  if(state.liveView) return `<header><strong>Live application / Read-only</strong><button type="button" popovertarget="application-status" popovertargetaction="hide" aria-label="Close build details">Close</button></header><dl class="facts"><div><dt>Artifact</dt><dd>${html(state.application.build_path || '')}</dd></div><div><dt>Source revision</dt><dd>${html(state.application.source_revision || '')}</dd></div><div><dt>Artifact digest</dt><dd>${html(state.application.artifact_digest || '')}</dd></div></dl>`;
   const builtAt = Number(state.application.built_at || 0);
   return `<header><strong>Application and build</strong>
       <button type="button" popovertarget="application-status" popovertargetaction="hide" aria-label="Close build details">Close</button></header>
@@ -3619,6 +3820,7 @@ function openPicker(mode, anchor, outcome = "") {
 }
 
 async function openBeltPicker(id, outcome, arrivals = []) {
+  if (state.liveView) return;
   const source=state.world.scene.nodes.find(item=>item.id===id);
   if (arrivals.length > 1 || arrivals.length===1 && (!source || source.kind==='region')) {
     state.picker?.controller?.abort();
@@ -3782,7 +3984,7 @@ function addCatalogStep(id) {
       id: triggerId,
       use: definition.id,
       inputs: defaultInputs(definition.inputs),
-      examples: clone(definition.examples)
+      examples: clone(definition.examples).map(example => ({...example, id: opaqueId("example")}))
     });
     state.project.links.push(
       { from: "app." + primaryOutcome(node("app")), to: triggerId },
@@ -3980,10 +4182,9 @@ function selectExample(index, trigger = node(state.selection.id), {deferObservat
   state.exampleIndex = Math.max(-1, Math.min(index, (trigger.examples?.length ?? state.exampleIds.get(trigger.id)?.size ?? 0) - 1));
   state.application.example = state.exampleIds.get(trigger.id)?.get(state.exampleIndex) || null;
   state.exampleDraft = null;
-  state.applicationController?.abort('selection');
   clearPreview(true, false);
   render();
-  scheduleApplicationPoll(0);
+  refreshApplicationSelection();
   if (deferObservation) return Promise.resolve();
   const trace = requestSelectedTrace();
   if (sourceChanged && !state.editorController && !state.regionSelection && state.selection.id
@@ -4008,6 +4209,7 @@ function addExample() {
     index++;
   }
   trigger.examples.push({
+    id: opaqueId("example"),
     name: "example-" + index,
     payload: clone(template.payload),
     ...(plainObject(template.context) ? { context: clone(template.context) } : {})
@@ -5018,13 +5220,18 @@ function scheduleApplicationPoll(delay = 250) {
   state.applicationPollTimer = window.setTimeout(refreshApplication, delay);
 }
 
+function refreshApplicationSelection() {
+  state.applicationController?.abort('selection');
+  scheduleApplicationPoll(0);
+}
+
 function observationRetryDelay() {
   return document.hidden ? 2_000 : 500;
 }
 
 async function refreshApplication() {
   state.applicationPollTimer = 0;
-  if (state.applicationRefreshing) {
+  if (state.applicationRefreshing || state.switchingWorkspace) {
     return;
   }
   let nextDelay;
@@ -5045,6 +5252,7 @@ async function refreshApplication() {
       if (application.state !== "running") {
         return;
       }
+      if (state.liveView) { refreshApplicationFacts(); return; }
       const cachedExampleId = selectedExampleId();
       const [examplesResponse, exampleResponse] = await Promise.all([
         fetch("/api/examples/status", { cache: "no-store", signal }),
@@ -5127,7 +5335,7 @@ async function refreshApplication() {
       else refreshNestedOptions();
     }
     const running = ["queued", "running"].includes(state.application.examples?.state);
-    scheduleApplicationPoll(nextDelay ?? (document.hidden ? 2_000 : running ? 100 : 500));
+    scheduleApplicationPoll(nextDelay ?? (document.hidden ? 2_000 : state.liveView ? 1_000 : running ? 100 : 500));
   }
 }
 
@@ -5203,6 +5411,7 @@ async function refreshExampleCoverage(application, examples, signal) {
 }
 
 function selectedExampleId() {
+  if (state.liveView) return '';
   return state.exampleIds.get(state.exampleTrigger)?.get(state.exampleIndex)?.id || "";
 }
 
@@ -5214,8 +5423,8 @@ function refreshApplicationFacts() {
     "build-path": state.application.build_path || "",
     "application-build-state": state.build,
     "application-run-state": inputLabel(state.application.state || "unavailable"),
-    "last-build": builtAt ? new Date(builtAt).toLocaleString() : "Not built",
-    "application-last-build": builtAt ? new Date(builtAt).toLocaleString() : "Not built",
+    "last-build": builtAt ? new Date(builtAt).toLocaleString() : state.liveView ? '' : "Not built",
+    "application-last-build": builtAt ? new Date(builtAt).toLocaleString() : state.liveView ? '' : "Not built",
     "example-suite-state": inputLabel(state.application.examples?.state || "unavailable"),
     "example-suite-progress": exampleProgress(),
     "example-trace-storage": formatBytes(state.application.examples?.storage_bytes)
@@ -5256,7 +5465,7 @@ function metricsSetting(operation) {
 }
 
 function metricTarget() {
-  return !state.regionSelection && state.inspectorMode === "inspect" && ["trigger", "step"].includes(state.selection.type)
+  return !state.regionSelection && (state.liveView || state.inspectorMode === "inspect") && ["trigger", "step"].includes(state.selection.type)
     ? state.selection.id : "app";
 }
 
@@ -5280,7 +5489,7 @@ function resetMetrics(poll = false) {
 async function refreshMetrics() {
   state.metricsPollTimer = 0;
   const target = metricTarget();
-  if (document.hidden || state.build !== "Built" || state.pendingProject) {
+  if (document.hidden || state.switchingWorkspace || state.build !== "Built" || state.pendingProject) {
     scheduleMetricsPoll(500);
     return;
   }
@@ -5333,7 +5542,7 @@ async function refreshMetrics() {
 }
 
 function renderMetrics() {
-  const panel = document.querySelector("#metrics-panel");
+  const panel = document.querySelector(state.liveView && !state.regionSelection ? ".live-step-metrics" : "#metrics-panel");
   if (panel) {
     renderDockMarkup(panel, metricsPanel());
   }
@@ -5374,7 +5583,8 @@ function metricsPanel() {
   }
   const steps = Array.isArray(state.metrics.steps) ? state.metrics.steps : [];
   const flows = Array.isArray(state.metrics.flows) ? state.metrics.flows : [];
-  const step = steps.find(candidate => candidate.id === target)?.metrics;
+  const measuredStep = steps.find(candidate => candidate.id === target);
+  const step = measuredStep?.metrics;
   const flow = flows.find(candidate => candidate.id === target)?.metrics;
   if (!step && !flow) {
     return "";
@@ -5382,6 +5592,10 @@ function metricsPanel() {
   const rows = [];
   if (step) {
     rows.push(...metricRows(step, flow ? "Step" : ""));
+    (measuredStep.placements || []).forEach((placement, index) => {
+      const separate = Object.fromEntries(Object.entries(placement.metrics || {}).filter(([id]) => !Object.hasOwn(step, id)));
+      rows.push(...metricRows(separate).map(([label, value, id]) => [`${label} (${index + 1})`, value, id, placement.id]));
+    });
     rows.push(
       [flow ? "Step sampled average" : "Sampled average", averageNanos(step)]
     );
@@ -5405,6 +5619,7 @@ function metricRows(values, prefix = "") {
       : definition.unit === "ns" ? formatNanos(value)
       : definition.unit === "ms" ? formatMillis(value)
       : definition.unit === "ppm" ? formatPercentPpm(value)
+      : definition.unit === "port" ? numberText(value)
       : definition.unit === "count" ? formatInteger(value) : `${numberText(value)} ${definition.unit || ""}`.trim();
     return [prefix ? `${prefix} ${label[0].toLowerCase()}${label.slice(1)}` : label, formatted, id];
   });
@@ -5413,7 +5628,7 @@ function metricRows(values, prefix = "") {
 function metricFacts(title, rows) {
   const facts = rows
     .filter(([_label, value]) => value !== null && value !== undefined)
-    .map(([label, value, id]) => `<div${id ? ` data-metric-id="${html(id)}"` : ""}><dt>${html(label)}</dt><dd>${html(value)}</dd></div>`)
+    .map(([label, value, id, placement]) => `<div${id ? ` data-metric-id="${html(id)}"` : ""}${placement ? ` title="${html(placement)}"` : ""}><dt>${html(label)}</dt><dd>${html(value)}</dd></div>`)
     .join("");
   if (!facts) return "";
   return `<section class="inspector-section facts runtime-metrics">
@@ -5434,9 +5649,11 @@ function metricNumber(value) {
 
 function formatInteger(value) {
   const source = String(numberText(value === undefined ? 0 : value));
-  const sign = source.startsWith("-") ? "-" : "";
-  const digits = sign ? source.slice(1) : source;
-  return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const point = source.indexOf(".");
+  const integer = point < 0 ? source : source.slice(0, point);
+  const sign = integer.startsWith("-") ? "-" : "";
+  const digits = sign ? integer.slice(1) : integer;
+  return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (point < 0 ? "" : source.slice(point));
 }
 
 function formatBytes(value) {
@@ -5487,7 +5704,7 @@ function formatPercentPpm(value) {
 }
 
 async function requestSelectedTrace() {
-  if (state.build === "Building" || !state.application.pid || state.jsonDraft || state.exampleDraft
+  if (document.hidden || state.build === "Building" || !state.application.pid || state.jsonDraft || state.exampleDraft
       || state.editorController && state.editorController.node !== state.selection.id) {
     return;
   }
@@ -5508,7 +5725,8 @@ async function requestSelectedTrace() {
   const observation = operation ? observationFor(operation) : null;
   if (!observation) {
     if (state.traceSummaryKey === summaryKey && state.traceSummary || state.traceKey === summaryKey
-        && (state.traceController || state.traceReadError?.key === summaryKey)) return;
+        && (state.traceController || state.traceReadError?.key === summaryKey && !state.traceReadError.retry)) return;
+    const retrying = state.traceKey === summaryKey && state.traceReadError?.retry === true;
     state.traceController?.abort();
     const controller = state.traceController = new AbortController();
     state.traceKey = summaryKey;
@@ -5525,7 +5743,8 @@ async function requestSelectedTrace() {
       refreshTraceView();
     } catch (error) {
       if (error.name !== 'AbortError' && state.traceController === controller) {
-        state.traceReadError = {key:summaryKey, message:error.message};
+        state.traceReadError = {key:summaryKey, message:error.message,
+          retry:!retrying && (error.retryable === true || error instanceof TypeError)};
         renderExampleContext();
       }
     } finally {
@@ -5544,10 +5763,11 @@ async function requestSelectedTrace() {
     operation.id
   ].join(":");
   const key = summaryKey + ":" + casesKey;
-  if (state.traceKey === key && (state.traceController || state.traceReadError?.key === summaryKey
+  if (state.traceKey === key && (state.traceController || state.traceReadError?.key === summaryKey && !state.traceReadError.retry
       || state.traceSummary && state.traceCasesKey === casesKey)) {
     return;
   }
+  const retrying = state.traceKey === key && state.traceReadError?.retry === true;
   state.traceController?.abort();
   const controller = new AbortController();
   state.traceController = controller;
@@ -5620,7 +5840,8 @@ async function requestSelectedTrace() {
     }
     state.traceController = null;
     state.traceStep = null;
-    state.traceReadError = {key:summaryKey, message:error.message};
+    state.traceReadError = {key:summaryKey, message:error.message,
+      retry:!retrying && (error.retryable === true || error instanceof TypeError)};
     state.traceCases = [];
     state.traceCasesKey = "";
     state.traceCasesPid = 0;
@@ -5642,7 +5863,8 @@ async function requestRegionTrace(example) {
   const region = state.regionSelection, revision = state.world?.scene?.revision;
   if (!region || !revision) return;
   const summaryKey = exampleSummaryKey(example), key = `${summaryKey}:${revision}:${region.id}`;
-  if (state.regionTrace?.key === key) return;
+  if (state.regionTrace?.key === key && (state.traceController || !state.traceReadError?.retry)) return;
+  const retrying = state.regionTrace?.key === key && state.traceReadError?.retry === true;
   state.traceController?.abort();
   const controller = state.traceController = new AbortController();
   state.regionTrace = {key, region:region.id, example:example.id, kind:'pending', status:'Loading Example'};
@@ -5682,7 +5904,8 @@ async function requestRegionTrace(example) {
   } catch (error) {
     if (current()) {
       state.regionTrace = {key, region:region.id, example:example.id, kind:'unavailable', status:error.message || 'Example data unavailable'};
-      state.traceReadError = {key:summaryKey, message:state.regionTrace.status};
+      state.traceReadError = {key:summaryKey, message:state.regionTrace.status,
+        retry:!retrying && (error.retryable === true || error instanceof TypeError)};
       renderExampleContext();
       renderDockObservation();
     }
@@ -5694,12 +5917,14 @@ async function requestRegionTrace(example) {
 async function readExampleProjection(path, signal) {
   const response = await fetch(path, { cache: "no-store", signal });
   const source = await response.text();
-  if (!response.ok) {
+  if (!response.ok || response.status === 202) {
     const failure = parseExact(source);
-    throw new Error(response.status === 409 ? 'Example changed. Retry after the update.'
+    const error = new Error(response.status === 409 ? 'Example changed. Retry after the update.'
       : response.status === 413 ? 'Example values exceed the display limit.'
       : response.status === 503 ? 'Application is updating or busy. Retry when ready.'
       : failure.message || 'Recorded Example values could not be read.');
+    error.retryable = [202,409,502,503,504].includes(response.status);
+    throw error;
   }
   const projection = parseExact(source);
   if (!plainObject(projection)) {
@@ -5837,6 +6062,7 @@ function exampleCoverage(encoded, project) {
 }
 
 function renderPreview() {
+  if(state.liveView)return;
   renderDockObservation();
   const operation = selectedOperation();
   if (!operation) return;
@@ -6112,6 +6338,7 @@ async function drainWrites() {
 }
 
 async function save(revision, projectChanged, projectSource, creatorSource) {
+  if (state.liveView) return;
   if (revision !== state.revision) {
     state.pendingProject ||= projectChanged;
     return false;
@@ -6703,6 +6930,7 @@ function editableOperation(locator) {
 
 function selectStep(id) {
   clearPreview();
+  refreshApplicationSelection();
   resetMetrics();
   state.exampleDraft = null;
   state.selection = { type: "step", id };
@@ -6977,6 +7205,7 @@ function clearSelection() {
   state.inspectorMode = "inspect";
   state.picker = state.groupPicker = state.pathPicker = null;
   clearPreview();
+  refreshApplicationSelection();
   resetMetrics(true);
   showInspector(false);
   render();
@@ -6999,9 +7228,50 @@ document.addEventListener('toggle', event => {
   renderDockObservation();
 }, true);
 
+document.querySelector('#live-source-selection').addEventListener('submit',event=>{event.preventDefault();if(state.liveCandidate)void connectLive(state.liveCandidate,document.querySelector('#live-source-path').value.trim());});
+document.querySelector('#live-connections').addEventListener('close',()=>{state.liveController?.abort();state.restoreCommand=null;});
+
 document.addEventListener("click", event => {
   if (event.target.closest('#creator-retry')) { window.location.reload(); return; }
   const target = event.target;
+  if(target.closest('#open-live-connections')) {void showLiveConnections();return;}
+  if(target.closest('#start-local')) {void startLocal();return;}
+  if(target.closest('[data-close-live]')) {state.liveController?.abort();document.querySelector('#live-connections').close();return;}
+  const connection=target.closest('[data-live-instance]');
+  if(connection){void connectLive(connection.dataset.liveInstance);return;}
+  const restoration=target.closest('[data-restore-live-step]');
+  if(restoration){const id=restoration.dataset.restoreLiveStep;void (async()=>{
+    if(!await switchWorkspace(false))return;
+    const command={kind:'restore',node:id},preview=await editorAction(command,true);
+    if(!preview)return;
+    const nodes=Object.keys(preview.project_changes?.nodes || {});
+    if(nodes.length<2){await editorAction(command);return;}
+    state.restoreCommand={command,revision:state.projectVersion,creator:state.creatorVersion};
+    document.querySelector('#live-title').textContent=`Restore ${nodes.length} connected Steps`;
+    document.querySelector('#live-content').innerHTML=`<ul>${nodes.map(id=>`<li>${html(id)}</li>`).join('')}</ul><button type="button" data-confirm-restore>Restore in draft</button>`;
+    document.querySelector('#live-message').textContent='';document.querySelector('#live-source-selection').hidden=true;
+    document.querySelector('#live-connections').showModal();
+  })();return;}
+  if(target.closest('[data-confirm-restore]')) {
+    const request=state.restoreCommand;
+    if(request && request.revision===state.projectVersion && request.creator===state.creatorVersion) {
+      document.querySelector('#live-connections').close();void editorAction(request.command);
+    } else document.querySelector('#live-message').textContent='Draft changed. Select the Step again.';
+    return;
+  }
+  const version=target.closest('button[data-workspace-source]');
+  if(version){const live=version.dataset.workspaceSource==='live';if(live!==state.liveView)void switchWorkspace(live);return;}
+  if(target.closest('#show-live-changes')) {void showLiveChanges();return;}
+  const difference=target.closest('[data-live-change]');
+  if(difference){
+    const id=difference.dataset.liveChange;
+    void (async()=>{
+      const change=state.liveChanges[id];
+      if(change && await switchWorkspace(change.state!=='added')) {
+        await selectWorldNode(id);state.world.focus(id,.5);
+      }
+    })();return;
+  }
   const icon=target.closest('[data-select-icon]');
   if(icon) {
     const selected=state.icons?.find(item=>item.id===icon.dataset.selectIcon);

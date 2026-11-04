@@ -69,6 +69,23 @@ final class CreatorSceneObservationsE2eTest extends CreatorServerE2eSupport {
     }
 
     @Test
+    void convergingInputsDoNotClaimTheSharedDestinationCountForEachRoute() throws Exception {
+        final Path project=directory.resolve("railix.project.json");
+        Files.writeString(project,CreatorProjects.grouping()
+                .replace("{\"id\":\"lowercase-text\"", "{\"id\":\"branch\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}},{\"id\":\"left\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},{\"id\":\"right\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},{\"id\":\"lowercase-text\"")
+                .replace("{\"from\":\"command.next\",\"to\":\"lowercase-text\"}","{\"from\":\"command.next\",\"to\":\"branch\"},{\"from\":\"branch.match\",\"to\":\"left\"},{\"from\":\"branch.otherwise\",\"to\":\"right\"},{\"from\":\"left.next\",\"to\":\"lowercase-text\"},{\"from\":\"right.next\",\"to\":\"lowercase-text\"}"));
+        try(CreatorServer creator=start(project)) {
+            assertThat(awaitExampleView(creator.baseUri(),"command:0").statusCode()).isEqualTo(200);
+            final String view="x=-10000&y=-10000&width=100000&height=100000&scale=1";
+            final var visible=scene(creator.baseUri(),view);
+            final var response=request(creator.baseUri(),"GET","/api/scene/observations?revision="+string(visible,"revision")+"&"+view,"");
+            assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+            final var routes=entries(object(response.body()),"links").stream().filter(link->string(link,"id").startsWith("left.") || string(link,"id").startsWith("right.")).toList();
+            assertThat(routes).hasSize(2).allSatisfy(link->assertThat(link.values()).doesNotContainKey("metrics"));
+        }
+    }
+
+    @Test
     void visibleIconsAreDeduplicatedAcrossStepsAndDisconnectedGroups() throws Exception {
         final Path project = directory.resolve("railix.project.json");
         Files.writeString(project, branchGroupProject());

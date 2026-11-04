@@ -1,5 +1,6 @@
 package dev.nanonative.railix.core.step;
 
+import dev.nanonative.railix.core.runtime.MetricDefinition;
 import dev.nanonative.railix.core.value.RailixData;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueRefinement;
@@ -920,6 +921,7 @@ public final class StepDefinition {
     private final String version;
     private final String displayName;
     private final List<String> searchTerms;
+    private final List<MetricDefinition> metrics;
     private final Kind kind;
     private final List<Port> receives;
     private final List<Port> returns;
@@ -941,6 +943,7 @@ public final class StepDefinition {
         version = requiredText(builder.version, "Step version");
         displayName = builder.displayName == null ? displayName(id) : builder.displayName;
         searchTerms = immutable(builder.searchTerms);
+        metrics = immutable(builder.metrics);
         kind = builder.kind;
         receives = immutable(builder.receives);
         returns = immutable(builder.returns);
@@ -963,6 +966,10 @@ public final class StepDefinition {
         distinct(inputs.stream().map(Field::name).toList(), "Input names");
         distinct(results.stream().map(Result::name).toList(), "Result names");
         distinct(searchTerms, "Step search terms");
+        distinct(metrics.stream().map(MetricDefinition::name).toList(), "Step metric names");
+        if (!metrics.isEmpty() && kind == Kind.APP) {
+            throw new IllegalArgumentException("Only executable Steps may declare custom metrics.");
+        }
         if (source != null && kind != Kind.TRIGGER) {
             throw new IllegalArgumentException("Only Trigger Steps may declare an external source.");
         }
@@ -1050,6 +1057,14 @@ public final class StepDefinition {
      */
     public List<String> searchTerms() {
         return searchTerms;
+    }
+
+    /**
+     * Returns fixed measurements published by the application's shared metric endpoint.
+     * @return immutable declarations in authoring order
+     */
+    public List<MetricDefinition> metrics() {
+        return metrics;
     }
 
     /**
@@ -1264,6 +1279,7 @@ public final class StepDefinition {
         private final String version;
         private String displayName;
         private final List<String> searchTerms = new ArrayList<>();
+        private final List<MetricDefinition> metrics = new ArrayList<>();
         private Kind kind = Kind.STEP;
         private final List<Port> receives = new ArrayList<>();
         private final List<Port> returns = new ArrayList<>();
@@ -1281,6 +1297,18 @@ public final class StepDefinition {
         private Builder(final String id, final String version) {
             this.id = id;
             this.version = version;
+        }
+
+        /**
+         * Declares a fixed custom measurement without creating a listener or Step instance.
+         * PROCESS and optional lifecycle functions update it through their context.
+         * @param metric immutable declaration with a unique local name
+         * @return this builder
+         * @throws NullPointerException for a missing declaration
+         */
+        public Builder metric(final MetricDefinition metric) {
+            metrics.add(java.util.Objects.requireNonNull(metric, "Metric declaration is required."));
+            return this;
         }
 
         /**

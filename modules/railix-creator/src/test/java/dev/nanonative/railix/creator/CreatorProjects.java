@@ -18,7 +18,7 @@ final class CreatorProjects {
     }
 
     static String lowercaseCli() {
-        return example("lowercase-app");
+        return ProjectFiles.identify(example("lowercase-app"), true);
     }
 
     static String grouping() {

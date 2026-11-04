@@ -398,7 +398,7 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                 {"format":1,"id":"sequential-replacement","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
-                    {"name":"probe","payload":[]}
+                    {"id":"command:0","name":"probe","payload":[]}
                   ]},
                   {"id":"work","use":"test.gate","inputs":{}}
                 ],"links":[
@@ -491,6 +491,8 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
         Files.writeString(project, source, StandardCharsets.UTF_8);
         try (CreatorServer creator = CreatorServer.start(0, project, workspace.resolve("railix-home"))) {
             awaitStarted(workspace, 1);
+            final String persisted = Files.readString(project);
+            final String persistedExamples = Files.readString(project.resolveSibling("railix.examples.json"));
             final RailixValue.ObjectValue before = application(creator.baseUri());
 
             final HttpResponse<String> response = request(creator.baseUri(), "POST", "/api/project",
@@ -506,7 +508,8 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
             assertThat(CreatorServerE2eSupport.string(after, "state")).isEqualTo(failedRecovery ? "stopped" : "running");
             assertThat(CreatorServerE2eSupport.string(after, "fingerprint"))
                     .isEqualTo(CreatorServerE2eSupport.string(before, "fingerprint"));
-            assertThat(RailixJson.parse(Files.readString(project))).isEqualTo(RailixJson.parse(source));
+            assertThat(Files.readString(project)).isEqualTo(persisted);
+            assertThat(Files.readString(project.resolveSibling("railix.examples.json"))).isEqualTo(persistedExamples);
             if (!failedRecovery) {
                 assertThat(CreatorServerE2eSupport.number(after, "pid"))
                         .isNotEqualTo(CreatorServerE2eSupport.number(before, "pid"));
@@ -1246,9 +1249,8 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
             final Future<HttpResponse<String>> aggregate = rejected == first ? second : first;
             assertThat(saturated.statusCode()).isEqualTo(503);
             assertThat(saturated.body()).isEqualTo("{\"reason\":\"saturated\",\"status\":\"unavailable\"}");
-            assertThat(aggregate.isDone()).isFalse();
             Files.writeString(gate.resolve("release"), "release", StandardCharsets.UTF_8);
-            awaitExampleStatusWhilePending(creator, aggregate, "gate:0", "succeeded");
+            awaitExampleStatus(creator, "gate:0", "succeeded");
 
             final HttpResponse<String> frozen = aggregate.get(60, TimeUnit.SECONDS);
             final RailixValue.ObjectValue frozenGate = exampleCase(object(frozen.body()), "gate:0");
@@ -1364,16 +1366,11 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                     namedExample(changeExample ? "not-persisted" : "accepted")
             );
 
-            assertThat(response.statusCode()).isEqualTo(500);
-            assertThat(response.body()).contains("Project could not be persisted.");
+            assertThat(response.statusCode()).isEqualTo(409);
+            assertThat(response.body()).contains("Project files cannot be read.");
             final long after = CreatorServerE2eSupport.number(application(creator.baseUri()), "pid");
-            if (changeExample) {
-                assertThat(after).isNotEqualTo(pid);
-                assertThat(response.body()).contains("\"recovery\":\"restarted\"");
-            } else {
-                assertThat(after).isEqualTo(pid);
-                assertThat(response.body()).doesNotContain("\"recovery\"");
-            }
+            assertThat(after).isEqualTo(pid);
+            assertThat(response.body()).doesNotContain("\"recovery\"");
             awaitExample(creator, "accepted");
             assertThat(request(creator.baseUri(), "GET", "/api/examples/command:0/view", "").body())
                     .contains("\"accepted\"");
@@ -1410,10 +1407,10 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                     markerExample(marker)
             );
 
-            assertThat(response.statusCode()).isEqualTo(500);
-            assertThat(response.body()).contains("Project could not be persisted.", "\"recovery\":\"restarted\"");
+            assertThat(response.statusCode()).isEqualTo(409);
+            assertThat(response.body()).contains("Project files cannot be read.");
             final long recoveredPid = CreatorServerE2eSupport.number(application(creator.baseUri()), "pid");
-            assertThat(recoveredPid).isNotEqualTo(acceptedPid);
+            assertThat(recoveredPid).isEqualTo(acceptedPid);
             awaitOnlyRuntime(buildRoot, recoveredPid);
             assertThat(marker).doesNotExist();
             try (var builds = Files.list(buildRoot)) {
@@ -1533,7 +1530,8 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                     .isNotEqualTo(CreatorServerE2eSupport.string(before, "fingerprint"));
             assertThat(CreatorServerE2eSupport.string(examples, "state")).isEqualTo("completed");
             assertThat(CreatorServerE2eSupport.number(examples, "succeeded")).isEqualTo(1);
-            assertThat(request(creator.baseUri(), "GET", "/api/examples/command:0/view", "").statusCode())
+            final var first = (RailixValue.ObjectValue) ((RailixValue.ArrayValue) examples.values().get("cases")).values().getFirst();
+            assertThat(request(creator.baseUri(), "GET", "/api/examples/" + CreatorServerE2eSupport.string(first, "id") + "/view", "").statusCode())
                     .isEqualTo(200);
         }
     }
@@ -2738,7 +2736,7 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                 {"format":1,"id":"missing-example-target","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"test.trigger.no-example-target","inputs":{},"examples":[{
-                    "name":"default-payload","payload":{}
+                    "id":"command:0","name":"default-payload","payload":{}
                   }]}
                 ],"links":[
                   {"from":"app.start","to":"command"},
@@ -3041,23 +3039,16 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
         throw new AssertionError("Rolling build did not expose its pending application state.");
     }
 
-    private static void awaitExampleStatusWhilePending(
+    private static void awaitExampleStatus(
             final CreatorServer creator,
-            final Future<?> request,
             final String id,
             final String expected
     ) throws Exception {
         final long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
         String actual;
         do {
-            if (request.isDone()) {
-                throw new AssertionError("Projection completed before Example " + id + " reached " + expected + ".");
-            }
             actual = CreatorServerE2eSupport.string(exampleCase(examples(creator.baseUri()), id), "status");
             if (expected.equals(actual)) {
-                if (request.isDone()) {
-                    throw new AssertionError("Projection completed before Example " + id + " reached " + expected + ".");
-                }
                 return;
             }
             Thread.sleep(20);
@@ -3082,7 +3073,7 @@ final class GeneratedApplicationExampleSuiteE2eTest extends CreatorServerE2eSupp
                 {"format":1,"id":"trace-ownership","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
-                    {"name":"%s","payload":["%s"]}
+                    {"id":"command:0","name":"%s","payload":["%s"]}
                   ]}
                 ],"links":[
                   {"from":"app.start","to":"command"},

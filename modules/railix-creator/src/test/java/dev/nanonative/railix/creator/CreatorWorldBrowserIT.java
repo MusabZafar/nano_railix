@@ -34,6 +34,375 @@ import static org.assertj.core.api.Assertions.within;
 
 @Timeout(120)
 final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
+    @Test
+    @Tag("responsive")
+    void preferredAndActivePortsUseTheSameInspectorForBuiltInAndInstalledSources() throws Exception {
+        creator.close();
+        final var fixture = evidenceStressScene();
+        final var project = JsonParser.parseString(fixture.project()).getAsJsonObject();
+        final Path file = directory.resolve("railix.project.json"), marker = directory.resolve("socket-port");
+        try (var occupied = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+            final int preferred = occupied.getLocalPort();
+            assertThat(preferred).isLessThan(65535);
+            project.getAsJsonArray("nodes").add(JsonParser.parseString("""
+                    {"id":"api","use":"railix.trigger.http","inputs":{"port":%d},
+                     "examples":[{"name":"request","payload":{}}]}
+                    """.formatted(preferred)));
+            project.getAsJsonArray("nodes").add(JsonParser.parseString("""
+                    {"id":"socket","use":"test.socket","inputs":{"marker":%s,"mode":"normal"},
+                     "examples":[{"name":"message","payload":"example"}]}
+                    """.formatted(RailixJson.write(RailixValue.string(marker.toString())))));
+            for (final String id : List.of("api", "socket")) {
+                project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"app.start\",\"to\":\"" + id + "\"}"));
+                project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"" + id + ".next\",\"to\":\"end\"}"));
+            }
+            GeneratedApplicationFixture.installedCatalog(directory, List.of(GenericTriggerLifecycleE2eTest.definition()),
+                    thirdparty.production.ProductionRuntimeConcurrencySteps.SocketSource.class);
+            Files.writeString(file, project.toString());
+            Files.writeString(directory.resolve("railix.creator.json"), fixture.creator());
+            Files.deleteIfExists(directory.resolve("railix.examples.json"));
+            creator = CreatorServer.start(0, file, directory.resolve("railix-home"));
+            page.navigate(creator.baseUri().toString());
+            awaitScene();
+            selectWorldNode("api");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#port-value"))
+                    .hasValue(Integer.toString(preferred));
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#next-free-port-value")).isChecked();
+            final var measured = JsonParser.parseString(CreatorServerE2eSupport.request(creator.baseUri(), "GET",
+                    "/api/metrics/nodes/api", "").body()).getAsJsonObject().getAsJsonArray("steps")
+                    .get(0).getAsJsonObject().getAsJsonObject("metrics");
+            final int active = measured.get("railix.trigger.http:active_port").getAsInt();
+            assertThat(active).isGreaterThan(preferred);
+            openInspectorSection("Runtime metrics");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='railix.trigger.http:preferred_port'] dd"))
+                    .hasText(Integer.toString(preferred));
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='railix.trigger.http:active_port'] dd"))
+                    .hasText(Integer.toString(active));
+            page.locator("[data-metric-id='railix.trigger.http:active_port']").scrollIntoViewIfNeeded();
+            page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target/screenshots"))
+                    .resolve("http-active-port-" + page.viewportSize().width + ".png")));
+            try (var client = java.net.http.HttpClient.newHttpClient()) {
+                assertThat(client.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + active + "/"))
+                        .timeout(java.time.Duration.ofSeconds(5)).GET().build(), java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode())
+                        .isEqualTo(200);
+            }
+            selectWorldNode("socket");
+            openInspectorSection("Runtime metrics");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='test.socket:active_port'] dd"))
+                    .hasText(Files.readString(marker));
+            assertThat(JsonParser.parseString(Files.readString(file)).getAsJsonObject().getAsJsonArray("nodes").asList().stream()
+                    .map(value -> value.getAsJsonObject()).filter(node -> node.get("id").getAsString().equals("api"))
+                    .findFirst().orElseThrow().getAsJsonObject("inputs").get("port").getAsInt()).isEqualTo(preferred);
+            assertThat(pageErrors).isEmpty();
+        }
+    }
+
+    @Test
+    @Tag("responsive")
+    void installedStepMetricsAppearThroughTheExistingInspectorInABranchHeavyProject() throws Exception {
+        creator.close();
+        final var fixture = evidenceStressScene();
+        final var project = JsonParser.parseString(fixture.project()).getAsJsonObject();
+        project.getAsJsonArray("nodes").add(JsonParser.parseString("""
+                {"id":"measured","use":"external.metric","inputs":{},
+                 "receives":{"value":["context","payload"]},"returns":{"value":["context","payload"]}}
+                """));
+        project.getAsJsonArray("nodes").add(JsonParser.parseString("""
+                {"id":"nested-measured","use":"railix.field-manipulation","inputs":{
+                  "field":["context","payload"],"steps":[{"use":"external.metric","inputs":{}},
+                    {"use":"external.metric","inputs":{}}]}}
+                """));
+        for (final var value : project.getAsJsonArray("links")) {
+            final var link = value.getAsJsonObject();
+            if (link.get("from").getAsString().equals("command.next")) link.addProperty("from", "nested-measured.next");
+        }
+        project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"command.next\",\"to\":\"measured\"}"));
+        project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"measured.next\",\"to\":\"nested-measured\"}"));
+        GeneratedApplicationFixture.installedCatalog(directory, List.of(StepMetricsApplicationE2eTest.definition()),
+                thirdparty.conformance.MetricStep.class);
+        final Path file = directory.resolve("railix.project.json");
+        Files.writeString(file, project.toString());
+        Files.writeString(directory.resolve("railix.creator.json"), fixture.creator());
+        Files.deleteIfExists(directory.resolve("railix.examples.json"));
+        creator = CreatorServer.start(0, file, directory.resolve("railix-home"));
+        page.navigate(creator.baseUri().toString());
+        awaitScene();
+        selectWorldNode("measured");
+        openInspectorSection("Runtime metrics");
+        final var processed = page.locator("[data-metric-id='external.metric:processed'] dd");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(processed).hasText("4");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='external.metric:depth'] dd"))
+                .hasText("1,234.56789");
+        selectWorldNode("nested-measured");
+        openInspectorSection("Runtime metrics");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(processed).hasText("8");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='external.metric:depth']"))
+                .hasCount(2);
+        assertThat(page.locator("[data-metric-id='external.metric:depth'] dt").allTextContents())
+                .containsExactly("Depth (1)", "Depth (2)");
+        page.locator("[data-metric-id='external.metric:depth']").last().scrollIntoViewIfNeeded();
+        page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target/screenshots"))
+                .resolve("step-metrics-" + page.viewportSize().width + ".png")));
+        assertThat(pageErrors).isEmpty();
+    }
+
+    @Test
+    @Tag("responsive")
+    void liveGroupMetricsFollowRealTrafficWithoutReopeningTheInspector() throws Exception {
+        creator.close();
+        final int port;
+        try(var socket=new java.net.ServerSocket(0)){port=socket.getLocalPort();}
+        final Path project=directory.resolve("project.json"),userHome=directory.resolve("observed-home"),home=userHome.resolve(".railix");
+        final String source="""
+                {"format":1,"id":"live-group","nodes":[
+                  {"id":"app","use":"railix.app","inputs":{}},
+                  {"id":"api","use":"railix.trigger.http","inputs":{"port":%d},"examples":[{"name":"request","payload":{}}]},
+                  {"id":"one","use":"railix.field-manipulation","inputs":{
+                    "field":["context","payload","request"],"steps":[{"use":"external.metric","inputs":{}},
+                      {"use":"external.metric","inputs":{}}]}},
+                  {"id":"two","use":"railix.field-manipulation","inputs":{}}
+                ],"links":[{"from":"app.start","to":"api"},{"from":"api.next","to":"one"},
+                  {"from":"one.next","to":"two"},{"from":"two.next","to":"end"}]}
+                """.formatted(port);
+        Files.writeString(project,source);Files.deleteIfExists(directory.resolve("railix.examples.json"));
+        Files.writeString(directory.resolve("railix.creator.json"),"""
+                {"format":2,"groups":[{"id":"work","name":"Work"}],"steps":{"one":{"group":"work"},"two":{"group":"work"}}}
+                """);
+        GeneratedApplicationFixture.installedCatalog(directory, List.of(StepMetricsApplicationE2eTest.definition()),
+                thirdparty.conformance.MetricStep.class);
+        copyTree(directory.resolve("railix-home/artifacts"), home.resolve("artifacts"));
+        final Path jar=Files.copy(ApplicationBuilder.buildProduction(project,ProjectFiles.build(project,home,true)).jar(),directory.resolve("running.jar"));
+        Files.writeString(project,source.replace("\"port\":"+port,"\"port\":0"));
+        final Process app=LiveApplicationE2eTest.start(jar,userHome,directory.resolve("app.log"));
+        try(var client=java.net.http.HttpClient.newHttpClient()) {
+            LiveApplicationE2eTest.await(()->assertThat(dev.nanonative.railix.core.runtime.ObservationServer.connections(home)).hasSize(1));
+            final var request=java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:"+port+"/"))
+                    .timeout(java.time.Duration.ofSeconds(5)).GET().build();
+            LiveApplicationE2eTest.await(()->assertThat(client.send(request,java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(200));
+            creator=CreatorServer.start(0,project,home);
+            page.navigate(creator.baseUri().toString());awaitScene();
+            page.locator("#project-menu").click();page.locator("#open-live-connections").click();page.locator("[data-live-instance]").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","live");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#live-connections")).isHidden();
+            page.locator("[data-world-id='api']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#inspector"))
+                    .hasAttribute("data-selection", "api");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='railix.trigger.http:preferred_port'] dd"))
+                    .hasText(Integer.toString(port));
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='railix.trigger.http:active_port'] dd"))
+                    .hasText(Integer.toString(port));
+            page.locator("[data-metric-id='railix.trigger.http:active_port']").scrollIntoViewIfNeeded();
+            page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target/screenshots"))
+                    .resolve("http-active-port-live-" + page.viewportSize().width + ".png")));
+            page.locator("#close-inspector").click();
+            page.locator("#scope-overview").click();awaitScene();
+            page.locator("[data-group-region-label]").first().click();
+            page.locator("#world-location [data-inspect-region]").click();
+            final var executions=page.locator("#inspector-content [data-metric-id='executions'] dd");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(executions).isVisible();
+            final String before=executions.innerText();
+            assertThat(client.send(request,java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(200);
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(executions).not().hasText(before);
+            final var retained=executions.elementHandle();
+            for(int tick=0;tick<2;tick++)page.waitForResponse(response->response.url().contains("/api/live/scene/observations?")
+                    && response.status()==200,()->{});
+            assertThat(retained.evaluate("element=>element.isConnected")).as("Unchanged live facts retain their DOM").isEqualTo(true);
+            page.locator("#close-inspector").click();page.locator("[data-world-id='one']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#inspector")).hasAttribute("data-selection","one");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(executions).isVisible();
+            final String stepBefore=executions.innerText();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-metric-id='external.metric:depth']"))
+                    .hasCount(2);
+            assertThat(page.locator("[data-metric-id='external.metric:depth'] dt").allTextContents())
+                    .containsExactly("Depth (1)", "Depth (2)");
+            assertThat(page.locator("[data-metric-id='external.metric:depth'] dd").allTextContents())
+                    .containsExactly("1,234.56789", "1,234.56789");
+            page.locator("[data-metric-id='external.metric:depth']").last().scrollIntoViewIfNeeded();
+            page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target/screenshots"))
+                    .resolve("step-metrics-live-" + page.viewportSize().width + ".png")));
+            assertThat(client.send(request,java.net.http.HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(200);
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(executions).not().hasText(stepBefore);
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#status-pid")).hasText("PID "+app.pid());
+            page.waitForResponse(response->response.url().contains("/api/live/scene/observations?")
+                    && !response.url().contains("members=") && response.status()==200,()->{}).finished();
+            page.locator("#inspector-content").innerText();
+            ProjectSourceArtifactsE2eTest.stop(app);
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#status-pid")).isHidden();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(executions).hasCount(0);
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#inspector")).hasAttribute("data-selection","one");
+            assertThat(pageErrors).isEmpty();
+        } finally {ProjectSourceArtifactsE2eTest.stop(app);}
+    }
+
+    @Test
+    void aFailedLiveSwitchReturnsToTheDraftAndCanOpenTheAttemptedInstance() throws Exception {
+        creator.close();
+        final Path project=directory.resolve("project.json"), userHome=directory.resolve("observed-home"), home=userHome.resolve(".railix");
+        Files.writeString(project,"""
+                {"format":1,"id":"live-switch","nodes":[
+                  {"id":"app","use":"railix.app","inputs":{}},
+                  {"id":"api","use":"railix.trigger.http","inputs":{"port":0},"examples":[{"name":"request","payload":{}}]}
+                ],"links":[{"from":"app.start","to":"api"},{"from":"api.next","to":"end"}]}
+                """);
+        Files.deleteIfExists(directory.resolve("railix.examples.json"));
+        final Path jar=Files.copy(ApplicationBuilder.buildProduction(project,ProjectFiles.build(project,home,true)).jar(),directory.resolve("running.jar"));
+        final Process first=LiveApplicationE2eTest.start(jar,userHome,directory.resolve("first.log"));
+        final Process second=LiveApplicationE2eTest.start(jar,userHome,directory.resolve("second.log"));
+        try {
+            LiveApplicationE2eTest.await(()->assertThat(dev.nanonative.railix.core.runtime.ObservationServer.connections(home)).hasSize(2));
+            final var connections=dev.nanonative.railix.core.runtime.ObservationServer.connections(home);
+            final String a=connections.stream().filter(connection->connection.pid()==first.pid()).findFirst().orElseThrow().instance();
+            final String b=connections.stream().filter(connection->connection.pid()==second.pid()).findFirst().orElseThrow().instance();
+            creator=CreatorServer.start(0,project,home);
+            page.navigate(creator.baseUri().toString());awaitScene();
+            page.locator("#project-menu").click();page.locator("#open-live-connections").click();
+            page.locator("[data-live-instance='"+a+"']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#status-pid")).hasText("PID "+first.pid());
+            page.route("**/api/live/catalog",route->{
+                final var response=route.fetch();
+                assertThat(response.status()).isEqualTo(200);
+                route.fulfill(new Route.FulfillOptions().setStatus(503).setContentType("application/json").setBody("{\"message\":\"Temporary read failure\"}"));
+            });
+            page.locator("#project-menu").click();page.locator("#open-live-connections").click();
+            page.locator("[data-live-instance='"+b+"']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","draft");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#live-message")).containsText("Temporary read failure");
+            page.unroute("**/api/live/catalog");
+            page.locator("[data-close-live]").click();
+            page.locator("button[data-workspace-source='live']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#status-pid")).hasText("PID "+second.pid());
+            page.locator("button[data-workspace-source='draft']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","draft");
+            page.route("**/api/live/catalog",route->route.fulfill(new Route.FulfillOptions().setStatus(503)
+                    .setContentType("application/json").setBody("{\"message\":\"Temporary read failure\"}")));
+            page.locator("button[data-workspace-source='live']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#live-connections")).isVisible();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#live-message")).hasText("Temporary read failure");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","draft");
+            assertThat(first.isAlive()).isTrue();assertThat(second.isAlive()).isTrue();assertThat(pageErrors).isEmpty();
+        } finally {
+            page.unroute("**/api/live/catalog");
+            ProjectSourceArtifactsE2eTest.stop(first);ProjectSourceArtifactsE2eTest.stop(second);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans={false,true})
+    @Tag("responsive")
+    void liveConnectionComparesARealBranchHeavyAppWithoutControllingIt(final boolean include) throws Exception {
+        creator.close();
+        final StressScene fixture=evidenceStressScene();
+        final var project=JsonParser.parseString(fixture.project()).getAsJsonObject();
+        project.getAsJsonArray("nodes").add(JsonParser.parseString("{\"id\":\"api\",\"use\":\"railix.trigger.http\",\"inputs\":{\"port\":0},\"examples\":[{\"name\":\"request\",\"payload\":{}}]}"));
+        project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"app.start\",\"to\":\"api\"}"));
+        project.getAsJsonArray("links").add(JsonParser.parseString("{\"from\":\"api.next\",\"to\":\"end\"}"));
+        final Path path=directory.resolve("project.json"), userHome=directory.resolve("observed-home"), home=userHome.resolve(".railix");
+        Files.writeString(path,project.toString());Files.deleteIfExists(directory.resolve("railix.examples.json"));
+        Files.writeString(directory.resolve("railix.creator.json"),fixture.creator());
+        final var source=ProjectFiles.build(path,home,include);
+        final Path artifact=Files.copy(ApplicationBuilder.buildProduction(path,source).jar(),directory.resolve("running.jar"));
+        final Process app=LiveApplicationE2eTest.start(artifact,userHome,directory.resolve("live.log"));
+        try {
+            LiveApplicationE2eTest.await(()->assertThat(dev.nanonative.railix.core.runtime.ObservationServer.connections(home)).hasSize(1));
+            creator=CreatorServer.start(0,path,home);
+            page.navigate(creator.baseUri().toString());awaitScene();
+            page.locator("#project-menu").click();page.locator("#open-live-connections").click();
+            page.locator("[data-live-instance]").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","live");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#example-session")).isHidden();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#editor-undo")).isDisabled();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#status-pid")).hasText("PID "+app.pid());
+            page.locator(".build-indicator").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#application-details")).containsText("Live application / Read-only");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#application-status")).not().containsText("Not built");
+            page.locator("[aria-label='Close build details']").click();
+            final var viewport=page.viewportSize();page.setViewportSize(800,800);
+            page.waitForFunction("()=>document.querySelector('#workspace-source').getBoundingClientRect().bottom<=document.querySelector('.workbench-header').getBoundingClientRect().bottom+1");
+            page.setViewportSize(viewport.width,viewport.height);
+            page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target/screenshots"))
+                    .resolve("live-workspace-"+(include?"embedded-":"local-")+viewport.width+".png")));
+            page.locator("[data-workspace-source='draft']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","draft");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#build-state")).hasText("Ready");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Start locally").setExact(true))).isVisible();
+            final var edited=CreatorServerE2eSupport.request(creator.baseUri(),"PATCH","/api/project","""
+                    {"revision":0,"changes":{"nodes":{"lane-0-2":null},"links":{
+                    "lane-0-1.ok":[{"from":"lane-0-1.ok","to":"lane-0-3"}],"lane-0-2.next":null}}}
+                    """);
+            assertThat(edited.statusCode()).as(edited.body()).isEqualTo(200);
+            page.locator("#show-live-changes").click();
+            page.locator("[data-live-change='lane-0-2']").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#selection-evidence")).containsText("Removed in draft");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#inspector-identity")).containsText("Read-only");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#delete-step")).hasCount(0);
+            if(page.locator("button[data-workspace-source='live']").isVisible()) {
+                page.locator("button[data-workspace-source='live']").click();
+                com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#selection-evidence")).containsText("Removed in draft");
+            }
+            page.locator("[data-evidence-fields]").click();
+            page.waitForFunction("() => document.querySelector('#graph').dataset.cameraMoving==='false'");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-world-id='lane-0-2']")).isVisible();
+            final Path output=Files.createDirectories(Path.of("target/screenshots"));
+            page.screenshot(new Page.ScreenshotOptions().setPath(output.resolve("live-comparison-"+(include?"embedded-":"local-")+page.viewportSize().width+".png")));
+            page.locator("[data-restore-live-step]").click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("body")).hasAttribute("data-workspace-source","draft");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#inspector-identity")).containsText("Normalize city");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#build-state")).hasText("Ready");
+            page.screenshot(new Page.ScreenshotOptions().setPath(output.resolve("live-draft-ready-"+(include?"embedded-":"local-")+page.viewportSize().width+".png")));
+            page.reload();awaitScene();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#build-state")).hasText("Ready");
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("button[data-workspace-source='live']")).isVisible();
+            page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Start locally").setExact(true)).click();
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#build-state")).hasText("Running");
+            assertThat(pageErrors).isEmpty();
+            creator.close();assertThat(app.isAlive()).isTrue();
+        } finally {ProjectSourceArtifactsE2eTest.stop(app);}
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Tag("responsive")
+    void artifactSourcesOpenTheBranchHeavyWorkspace(final boolean include) throws Exception {
+        creator.close();
+        final StressScene fixture = evidenceStressScene();
+        final Path original = directory.resolve("project.json");
+        final var documents = ProjectFiles.split(ProjectFiles.identify(fixture.project(), true), ProjectFiles.EMPTY_EXAMPLES);
+        Files.writeString(original, documents.project());
+        Files.writeString(directory.resolve("railix.examples.json"), documents.examples());
+        Files.writeString(directory.resolve("railix.creator.json"), fixture.creator());
+        final Path home = directory.resolve("railix-home");
+        final var artifact = ApplicationBuilder.buildProduction(original, ProjectFiles.build(original, home, include));
+        final var source = ProjectFiles.fromApplication(artifact.jar(), include
+                ? directory.resolve("restored/project.json") : original, home);
+        creator = CreatorServer.start(0, source.project(), home, source.revision());
+        page.navigate(creator.baseUri().toString());
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#build-state")).hasText("Running");
+        awaitScene();
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(
+                page.locator("#visible-example option[data-status='succeeded']")).hasCount(3);
+        page.locator("#visible-example").selectOption("command:1");
+        page.locator("#scope-overview").click();
+        awaitScene();
+        final Path screenshots = Files.createDirectories(Path.of("target", "screenshots"));
+        page.screenshot(new Page.ScreenshotOptions().setPath(screenshots.resolve("project-source-"
+                + (include ? "embedded-" : "local-") + page.viewportSize().width + ".png")));
+        inspectGroup("audit-group-1");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("[data-linked-use] option")).hasCount(4);
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#selection-evidence")).containsText("recorded");
+        page.screenshot(new Page.ScreenshotOptions().setPath(screenshots.resolve("project-source-"
+                + (include ? "embedded-" : "local-") + page.viewportSize().width + "-group.png")));
+        assertThat(pageErrors).isEmpty();
+        assertThat(Files.readString(source.project().resolveSibling("railix.creator.json"))).contains("Shared audits", "Path 1");
+        assertThat(((RailixValue.ArrayValue) ((RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(
+                Files.readString(source.project()))).value()).values().get("nodes")).values()).hasSize(155);
+        System.out.printf("PROJECT_SOURCE_VARIANT include=%s viewport=%d steps=155 source_bytes=%d artifact_bytes=%d%n",
+                include, page.viewportSize().width, Files.size(source.project())
+                        + Files.size(source.project().resolveSibling("railix.creator.json"))
+                        + Files.size(source.project().resolveSibling("railix.examples.json")), Files.size(artifact.jar()));
+    }
+
     @ParameterizedTest
     @ValueSource(doubles={0,25_000})
     void aSingleMeasuredDurationHasNoArtificialSpread(final double nanos) {
@@ -974,6 +1343,30 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    void aTransientRecordedInputReadRecoversOnceWithoutRerunningTheExample() throws Exception {
+        openProject(CreatorEditorBrowserIT.attentionProject());
+        LiveApplicationE2eTest.await(()->assertThat(CreatorServerE2eSupport.request(creator.baseUri(),"GET","/api/examples/status","").body()).contains("\"state\":\"completed\""));
+        final var before=CreatorServerE2eSupport.request(creator.baseUri(),"GET","/api/examples/status","");
+        final var reads=new java.util.concurrent.atomic.AtomicInteger();
+        page.route("**/api/examples/steps/**",route->{
+            if(reads.incrementAndGet()==1)route.fulfill(new com.microsoft.playwright.Route.FulfillOptions()
+                    .setStatus(503).setContentType("application/json").setBody("{\"status\":\"unavailable\"}"));
+            else route.resume();
+        });
+        page.locator("#issue-count").click();
+        page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Inspect Example: invalid-name").setExact(true)).click();
+        openInspectorTab("overview");
+        page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Show input context").setExact(true)).click();
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#selection-evidence [data-evidence-fields]")).isVisible();
+        assertThat(reads.get()).isEqualTo(2);
+        final var after=CreatorServerE2eSupport.request(creator.baseUri(),"GET","/api/examples/status","");
+        assertThat(after.body()).isEqualTo(before.body());
+        assertThat(pageErrors).isEmpty();
+    }
+
+    @Test
     void unavailableRecordedInputClearsTheOldTreeAndWaitsForExplicitRetry() {
         openProject(CreatorEditorBrowserIT.attentionProject());
         page.locator("#issue-count").click();
@@ -990,10 +1383,8 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(evidence.locator("[role=img]"))
                 .hasAttribute("data-state", "unavailable");
         assertThat(evidence.locator(".context-tree,[data-evidence-fields]").count()).isZero();
-        final int failedReads=reads.size();
-        assertThat(failedReads).isPositive();
-        for(int poll=0;poll<2;poll++)page.waitForResponse(response->response.url().endsWith("/api/application"),()->{});
-        assertThat(reads).hasSize(failedReads);
+        for(int poll=0;poll<4;poll++)page.waitForResponse(response->response.url().endsWith("/api/application"),()->{});
+        assertThat(reads).as("One automatic retry, then wait for the user").hasSize(2);
         page.unroute("**/api/examples/steps/**");
         page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Retry Example values").setExact(true)).click();
@@ -1258,7 +1649,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#example-session .example-context-state [role=img]"))
                 .hasAttribute("data-state", "unavailable");
         for (int poll = 0; poll < 3; poll++) page.waitForResponse(response -> response.url().endsWith("/api/application"), () -> {});
-        assertThat(reads.get()).as("A failed read must stay paused across application polls").isEqualTo(1);
+        assertThat(reads.get()).as("One automatic retry, then stay paused across application polls").isEqualTo(2);
         page.unroute(path);
         page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Retry Example values").setExact(true)).click();
     }

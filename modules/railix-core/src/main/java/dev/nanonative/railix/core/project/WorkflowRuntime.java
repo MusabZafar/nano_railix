@@ -71,7 +71,7 @@ public final class WorkflowRuntime {
                 final ResourceScope scope = new ResourceScope(stage.plan().use());
                 scopes.put(stage.plan(), scope);
                 if (!stage.source().isEmpty()) {
-                    sources.put(stage.source(), new SourceBinding(stage.source(), scope));
+                    sources.put(stage.source(), new SourceBinding(stage.source(), stage.plan().id(), scope));
                 }
             }
         }
@@ -131,13 +131,16 @@ public final class WorkflowRuntime {
                     if (source.activation != null) {
                         source.active = true;
                         activeSources++;
-                        source.activation.run();
+                        try {
+                            source.activation.run();
+                        } catch (final RuntimeException failure) {
+                            startup = failedResult("SOURCE_START_FAILED",
+                                    "Source activation failed: " + failure.getClass().getSimpleName(), source.step);
+                            stop(RuntimeApplication.DEFAULT_DRAIN_BUDGET);
+                            break;
+                        }
                     }
                 }
-            } catch (final RuntimeException failure) {
-                startup = failedResult("SOURCE_START_FAILED",
-                        "Source activation failed: " + failure.getClass().getSimpleName(), "");
-                stop(RuntimeApplication.DEFAULT_DRAIN_BUDGET);
             } catch (final Error failure) {
                 try {
                     stop(RuntimeApplication.DEFAULT_DRAIN_BUDGET);
@@ -297,7 +300,7 @@ public final class WorkflowRuntime {
         private RunResult invoke(final Stage stage, final List<StepCall> hooks, final String phase) {
             for (final StepCall hook : hooks) {
                 final StepInput context = StepInput.lifecycle(stage.plan().primaryOutcome(), sources.get(stage.source()),
-                        scopes.get(stage.plan()));
+                        scopes.get(stage.plan()), stage.plan().metrics());
                 try {
                     final StepResult result = hook.process(stage.plan().configuration(), context);
                     if (result == null || !stage.plan().primaryOutcome().equals(result.outcome())
@@ -400,14 +403,16 @@ public final class WorkflowRuntime {
 
         private final class SourceBinding implements StepInput.Source {
             private final String name;
+            private final String step;
             private final ResourceScope scope;
             private Runnable activation;
             private boolean active;
             private boolean completed;
             private int status;
 
-            private SourceBinding(final String name, final ResourceScope scope) {
+            private SourceBinding(final String name, final String step, final ResourceScope scope) {
                 this.name = name;
+                this.step = step;
                 this.scope = scope;
             }
 
@@ -464,6 +469,7 @@ public final class WorkflowRuntime {
             public StepInput.Source complete(final int status) {
                 if (status < 0 || status > 255) throw new IllegalArgumentException("Source status must be 0 through 255.");
                 synchronized (Lifecycle.this) {
+                    if (stopping && completed) return this;
                     if (!active || (completed && this.status != status)) {
                         throw new IllegalStateException("Source completion requires an active source and a consistent status.");
                     }
@@ -715,7 +721,7 @@ public final class WorkflowRuntime {
             final Lifecycle.ResourceScope scope = lifecycle == null ? null : lifecycle.scopes.get(plan);
             return StepInput.routedInvocation(inputs.values, inputs.options, inputs.programs, inputs.selected,
                     inputs.primaryOutcome, scope == null || scope.resources.isEmpty() ? null : scope,
-                    inputs.routes, inputs.continuations);
+                    inputs.routes, inputs.continuations, plan.metrics());
         }
 
         int commit(final StepPlan plan, final StepResult result, final Inputs resolution,
@@ -1853,7 +1859,8 @@ public final class WorkflowRuntime {
             String path,
             StepInput configuration,
             boolean continuations,
-            int node
+            int node,
+            StepInput.Metrics metrics
     ) {
         String primaryOutcome() {
             return outcomes.getFirst();

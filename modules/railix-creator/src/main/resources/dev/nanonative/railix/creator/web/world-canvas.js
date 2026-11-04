@@ -331,7 +331,7 @@ class RailixCanvas {
     const frame=this.active(look)?Math.round((1-Math.abs(phase*2-1))*(sprite.frames-1)):0;
     let dx=0,dy=0;
     if(item.reveal){const amount=Math.max(0,1-(performance.now()-item.reveal.start)/180);dx=item.reveal.dx*amount;dy=item.reveal.dy*amount;}
-    ctx.globalAlpha=1;
+    ctx.globalAlpha=look.removed?.45:1;
     if(item.group) {
       const origin=this.point(item.box.x+28*item.unit,item.box.y+item.box.height*.5,3*item.unit);
       item.groupGeometry=this.group(ctx,item.group,[origin[0]+dx,origin[1]+dy],item.groupUnit);

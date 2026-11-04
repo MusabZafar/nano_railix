@@ -1,5 +1,6 @@
 package dev.nanonative.railix.core.step;
 
+import dev.nanonative.railix.core.runtime.MetricDefinition;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueRefinement;
@@ -18,7 +19,7 @@ public final class StepContractJson {
     private static final Set<String> CONTRACT_FIELDS = Set.of(
             "display_name", "example_target", "examples", "id", "inputs", "kind",
             "maximum_instances", "outcomes", "primary_outcome", "receives", "results",
-            "returns", "search_terms", "source", "version", "jdk_modules", "continuations"
+            "returns", "search_terms", "source", "version", "jdk_modules", "continuations", "metrics"
     );
 
     private StepContractJson() {
@@ -36,6 +37,13 @@ public final class StepContractJson {
                 .ifPresent(address -> value.put("jdk_modules", strings(address.jdkModules())));
         value.put("display_name", RailixValue.string(definition.displayName()));
         value.put("search_terms", strings(definition.searchTerms()));
+        if (!definition.metrics().isEmpty()) value.put("metrics", RailixValue.array(definition.metrics().stream()
+                .<RailixValue>map(metric -> RailixValue.object(Map.of(
+                        "name", RailixValue.string(metric.name()), "label", RailixValue.string(metric.label()),
+                        "unit", RailixValue.string(metric.unit()),
+                        "kind", RailixValue.string(metric.kind().name().toLowerCase(Locale.ROOT)),
+                        "aggregation", RailixValue.string(metric.aggregation().name().toLowerCase(Locale.ROOT)))))
+                .toList()));
         value.put("kind", RailixValue.string(definition.kind().name().toLowerCase(Locale.ROOT)));
         value.put("primary_outcome", RailixValue.string(definition.primaryOutcome()));
         if (definition.continuations()) value.put("continuations", RailixValue.bool(true));
@@ -159,6 +167,16 @@ public final class StepContractJson {
         if (optionalBoolean(contract, "continuations", "contract").orElse(false)) builder.withContinuations();
         final List<String> terms = strings(contract, "search_terms", "contract");
         builder.searchTerms(terms.toArray(String[]::new));
+        if (contract.values().containsKey("metrics")) {
+            for (final RailixValue value : array(contract, "metrics", "contract").values()) {
+                final var item = object(value, "contract.metrics[]");
+                object(item, Set.of("name", "label", "unit", "kind", "aggregation"), "contract.metrics[]");
+                builder.metric(new MetricDefinition(text(item, "name", "contract.metrics[]"),
+                        text(item, "label", "contract.metrics[]"), text(item, "unit", "contract.metrics[]"),
+                        enumeration(MetricDefinition.Kind.class, text(item, "kind", "contract.metrics[]"), "contract.metrics[].kind"),
+                        enumeration(MetricDefinition.Aggregation.class, text(item, "aggregation", "contract.metrics[]"), "contract.metrics[].aggregation")));
+            }
+        }
         for (final StepDefinition.Port port : ports(contract, "receives", "contract")) {
             builder.receive(port.name(), port.shape(), port.refinement());
         }
@@ -644,7 +662,7 @@ public final class StepContractJson {
             final Set<String> fields,
             final String path
     ) {
-        object(value, fields, path, Set.of("example_target", "source", "jdk_modules", "continuations"));
+        object(value, fields, path, Set.of("example_target", "source", "jdk_modules", "continuations", "metrics"));
     }
 
     private static void object(

@@ -12,7 +12,6 @@ import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import java.nio.file.Path;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,7 +43,7 @@ final class GeneratedApplicationParityE2eTest {
     }
 
     @Test
-    void successfulVariantsReturnTheSameBusinessContextAndVariantSpecificRuntime() throws Exception {
+    void ordinaryIngressReturnsTheSameCompleteContextInBothArtifacts() throws Exception {
         final CreatorFirstExecutionArtifacts.ProcessResult productionResult = production.run("parity-success");
         final RailixValue.ObjectValue developmentBody = body(development.run(
                 "command", "{\"payload\":{\"arguments\":[\"Hello RAILIX\"]}}"
@@ -56,11 +55,8 @@ final class GeneratedApplicationParityE2eTest {
         final RailixValue.ObjectValue productionContext = object(productionResult.output().substring(prefix.length()));
         final RailixValue.ObjectValue developmentContext = (RailixValue.ObjectValue)
                 developmentBody.values().get("context");
-        assertThat(withoutRuntime(productionContext)).isEqualTo(withoutRuntime(developmentContext));
+        assertThat(productionContext).isEqualTo(developmentContext);
         assertThat(productionContext.values().get("runtime")).isEqualTo(RailixValue.object(Map.of(
-                "trigger", RailixValue.string("command")
-        )));
-        assertThat(developmentContext.values().get("runtime")).isEqualTo(RailixValue.object(Map.of(
                 "test", RailixValue.bool(false),
                 "trigger", RailixValue.string("command")
         )));
@@ -106,12 +102,6 @@ final class GeneratedApplicationParityE2eTest {
         final RailixJson.Result parsed = RailixJson.parse(source);
         assertThat(parsed).isInstanceOf(RailixJson.Parsed.class);
         return (RailixValue.ObjectValue) ((RailixJson.Parsed) parsed).value();
-    }
-
-    private static RailixValue.ObjectValue withoutRuntime(final RailixValue.ObjectValue context) {
-        final Map<String, RailixValue> values = new LinkedHashMap<>(context.values());
-        values.remove("runtime");
-        return RailixValue.object(values);
     }
 
     private static String text(final RailixValue.ObjectValue value, final String field) {

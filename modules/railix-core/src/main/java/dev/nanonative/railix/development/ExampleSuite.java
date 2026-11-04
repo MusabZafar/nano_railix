@@ -1,5 +1,7 @@
 package dev.nanonative.railix.development;
 
+import dev.nanonative.railix.core.runtime.RuntimeMetrics;
+
 import dev.nanonative.railix.core.value.RailixData;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
@@ -238,15 +240,15 @@ final class ExampleSuite implements AutoCloseable {
     }
 
     Optional<RailixValue.ObjectValue> query(final RailixValue.ObjectValue query) throws ProjectionUnavailable {
-        DevelopmentRuntime.queryFields(query, Set.of("groups", "example", "cases"));
+        RuntimeMetrics.queryFields(query, Set.of("groups", "example", "cases"));
         final boolean includeCases = query.values().get("cases") instanceof RailixValue.BooleanValue flag && flag.value();
         if (query.values().containsKey("cases") && !(query.values().get("cases") instanceof RailixValue.BooleanValue)) {
             throw new IllegalArgumentException("cases must be a boolean.");
         }
-        final Map<String, int[]> requested = DevelopmentRuntime.queryRanges(query.values().get("groups"), nodeCount);
+        final Map<String, int[]> requested = RuntimeMetrics.queryRanges(query.values().get("groups"), nodeCount);
         if (includeCases && requested.size() != 1) throw new IllegalArgumentException("Case selection requires one group.");
         final String id = query.values().containsKey("example")
-                ? DevelopmentRuntime.queryIdentifier(query.values().get("example")) : null;
+                ? RuntimeMetrics.queryIdentifier(query.values().get("example")) : null;
         final ExampleCase example = id == null ? null : casesById.get(id);
         if (id != null && example == null) {
             return Optional.empty();
@@ -573,6 +575,7 @@ final class ExampleSuite implements AutoCloseable {
         final Set<Integer> nodes = new LinkedHashSet<>();
         RailixValue.ObjectValue initial = null;
         RailixValue.ObjectValue selectedResult = null;
+        int selectedVisits = 0;
         try (BufferedReader lines = new BufferedReader(
                 new InputStreamReader(source, StandardCharsets.UTF_8),
                 16_384
@@ -616,6 +619,7 @@ final class ExampleSuite implements AutoCloseable {
                         final int occurrence = integer(event, "occurrence");
                         final String id = string(event, "id");
                         final int node = optionalInteger(event, "node");
+                        if (!summary && node == selectedNode) selectedVisits++;
                         if (node == selectedNode && context == null) {
                             throw new IOException("Development trace has no initial context.");
                         }
@@ -668,7 +672,10 @@ final class ExampleSuite implements AutoCloseable {
                         if (summary) {
                             return Optional.of(summary(initial, nodes, event));
                         }
-                        return Optional.ofNullable(selectedResult);
+                        if (selectedResult == null) return Optional.empty();
+                        final Map<String, RailixValue> projected = new LinkedHashMap<>(selectedResult.values());
+                        projected.put("visits", RailixValue.number(selectedVisits));
+                        return Optional.of(RailixValue.object(projected));
                     }
                     case "trace_error" -> {
                         if (summary) {
@@ -678,9 +685,11 @@ final class ExampleSuite implements AutoCloseable {
                                 .filter(frame -> frame.node == selectedNode)
                                 .findFirst()
                                 .orElse(null);
-                        return selected == null
-                                ? Optional.ofNullable(selectedResult)
-                                : Optional.of(failedStepProjection(selected, event, context));
+                        final var result = selected == null ? selectedResult : failedStepProjection(selected, event, context);
+                        if (result == null) return Optional.empty();
+                        final Map<String, RailixValue> projected = new LinkedHashMap<>(result.values());
+                        projected.put("visits", RailixValue.number(selectedVisits));
+                        return Optional.of(RailixValue.object(projected));
                     }
                     default -> throw new IOException("Development trace event type is invalid.");
                 }
@@ -703,6 +712,7 @@ final class ExampleSuite implements AutoCloseable {
                 .toList();
         return RailixValue.object(Map.of(
                 "application_pid", RailixValue.number(ProcessHandle.current().pid()),
+                "complete", RailixValue.bool("result".equals(string(terminal, "type"))),
                 "initial_context", initial,
                 "nodes", RailixValue.array(reached),
                 "result", without(terminal, Set.of("type"))

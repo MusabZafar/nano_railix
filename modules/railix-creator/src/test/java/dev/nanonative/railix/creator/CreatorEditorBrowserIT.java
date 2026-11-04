@@ -410,6 +410,7 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     void aTimedOutExampleIsListedWithoutBlamingItsApplicationOrTrigger() throws Exception {
         final Path gate = directory.resolve("timeout-gate");
         creator.close();
+        Files.deleteIfExists(directory.resolve("railix.examples.json"));
         GeneratedApplicationFixture.installedCatalog(directory, List.of(
                 dev.nanonative.railix.core.step.StepDefinition.named("test.gate", "1")
                         .input("root", dev.nanonative.railix.core.step.StepDefinition.Input.json(
@@ -461,6 +462,7 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     void exampleOptionsFollowRealQueuedRunningAndCompletedWork() throws Exception {
         final Path gate = directory.resolve("example-gate");
         creator.close();
+        Files.deleteIfExists(directory.resolve("railix.examples.json"));
         GeneratedApplicationFixture.installedCatalog(directory, List.of(
                 dev.nanonative.railix.core.step.StepDefinition.named("test.gate", "1")
                         .input("root", dev.nanonative.railix.core.step.StepDefinition.Input.json(
@@ -943,13 +945,13 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void failedExampleScopeWaitsForAnExplicitRetry() {
+    void rejectedExampleScopeWaitsForAnExplicitRetry() {
         openProject(choiceProject());
         final var reads = new java.util.concurrent.atomic.AtomicInteger();
         page.route("**/api/scene/observations?**", route -> {
             if (route.request().url().contains("cases=")) {
                 reads.incrementAndGet();
-                route.fulfill(new Route.FulfillOptions().setStatus(503).setContentType("application/json").setBody("{}"));
+                route.fulfill(new Route.FulfillOptions().setStatus(400).setContentType("application/json").setBody("{}"));
             } else route.resume();
         });
         selectWorldNode("matched");
@@ -1268,9 +1270,9 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
         page.waitForFunction("() => document.querySelector('#inspector').dataset.selection==='normalize' && !state.traceController");
         com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#inspector-nav [data-inspector-mode=inspect]"))
                 .hasAttribute("data-has-error", "true");
-        final int failedReads = reads.size(), completedPolls = polls.size();
+        final int completedPolls = polls.size();
         page.waitForCondition(() -> polls.size() >= completedPolls + 3);
-        assertThat(reads).hasSize(failedReads);
+        assertThat(reads).as("One automatic retry, then no further background reads").hasSize(2);
         page.unroute("**/api/examples/*/view");
         page.locator("[data-retry-example]").click();
         page.waitForFunction("() => Boolean(state.traceSummary) && !state.traceReadError");
@@ -1466,13 +1468,15 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
         final var sequence = !overlapping ? List.of(0, 1)
                 : order.equals("older-first") ? List.of(0, 1, 2) : List.of(2, 0, 1);
         for (final int index : sequence) {
-            held.get(index).fulfill(new Route.FulfillOptions().setResponse(snapshots.get(index)));
-            snapshots.get(index).dispose();
             if (index == 0 && order.equals("older-first")) {
-                page.waitForCondition(() -> Boolean.TRUE.equals(page.evaluate(
-                        "async () => (await (await fetch('/api/settings')).json()).values.reduced_motion")),
-                        new Page.WaitForConditionOptions().setTimeout(5000));
-            }
+                final var saved=page.waitForResponse(response->response.url().endsWith("/api/settings")
+                                && response.request().method().equals("POST"),
+                        ()->held.get(index).fulfill(new Route.FulfillOptions().setResponse(snapshots.get(index))));
+                saved.finished();assertThat(saved.status()).as(saved.text()).isEqualTo(200);
+                assertThat(com.google.gson.JsonParser.parseString(saved.request().postData()).getAsJsonObject()
+                        .getAsJsonObject("values").get("reduced_motion").getAsBoolean()).isTrue();
+            } else held.get(index).fulfill(new Route.FulfillOptions().setResponse(snapshots.get(index)));
+            snapshots.get(index).dispose();
         }
         page.waitForCondition(() -> Boolean.TRUE.equals(page.evaluate(
                 "async hud => {const settings=(await (await fetch('/api/settings')).json()).values;return hud ? settings.effects===false : settings.reduced_motion;}", hud)),
@@ -1913,6 +1917,7 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    @Tag("browser-diagnostics")
     void selectingAnExampleKeepsTheSharedStepsSourceInSync(final boolean pendingSelection) throws Exception {
         openProject("""
                 {"format":1,"id":"shared-input","nodes":[
@@ -1951,6 +1956,60 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
         page.locator("#visible-example").selectOption("cli:0");
         page.waitForFunction("() => document.querySelector('#visible-example')?.value==='cli:0'");
         assertThat(page.locator("[data-observation-source]").count()).isZero();
+        assertThat(pageErrors).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"step", "group", "group-inspector"})
+    @Tag("responsive")
+    @Tag("browser-diagnostics")
+    void changingSelectionDoesNotWaitForThePreviousApplicationPoll(final String selection) {
+        openProject(CreatorServerE2eSupport.threeStepProject());
+        final String group = selection.equals("group") ? createGroup("two", "three")
+                : selection.equals("group-inspector") ? createGroup("one", "two") : "";
+        selectWorldNode("one");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#visible-example")).isEnabled();
+        final var held = new ArrayList<com.microsoft.playwright.Route>();
+        final var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+        page.route("**/api/application", route -> {
+            if (route.request().method().equals("GET") && first.compareAndSet(true, false)) held.add(route);
+            else route.resume();
+        });
+        try {
+            page.waitForCondition(() -> !held.isEmpty());
+            if (selection.equals("step")) selectWorldNode("two");
+            else if (selection.equals("group-inspector")) {
+                if (page.viewportSize().width <= 650) page.locator("#close-inspector").click();
+                page.locator("#world-location [data-inspect-region]").click();
+            }
+            else {
+                page.locator("#close-inspector").click();
+                page.locator("[data-region-group='" + group + "']").click();
+                awaitScene();
+            }
+            com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#visible-example")).isEnabled();
+            assertThat(page.locator("#visible-example option[data-trigger='command']").count()).isEqualTo(1);
+            assertThat(pageErrors).isEmpty();
+            page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("target/screenshots/selection-"
+                    + selection + "-" + page.viewportSize().width + ".png")));
+        } finally {
+            page.unroute("**/api/application");
+            held.forEach(com.microsoft.playwright.Route::resume);
+        }
+    }
+
+    @Test
+    void exampleSelectionRecoversAfterATransientScopeReadFailure() throws Exception {
+        openProject(CreatorServerE2eSupport.threeStepProject());
+        final var failed=new java.util.concurrent.atomic.AtomicBoolean();
+        page.route("**/api/scene/observations?**",route->{
+            if(route.request().url().contains("cases=one") && failed.compareAndSet(false,true))
+                route.fulfill(new com.microsoft.playwright.Route.FulfillOptions().setStatus(503).setContentType("application/json").setBody("{\"status\":\"unavailable\"}"));
+            else route.resume();
+        });
+        selectWorldNode("one");
+        com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#visible-example")).isEnabled();
+        assertThat(failed.get()).isTrue();
         assertThat(pageErrors).isEmpty();
     }
 

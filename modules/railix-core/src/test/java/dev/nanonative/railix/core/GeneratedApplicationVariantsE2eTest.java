@@ -15,6 +15,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 final class GeneratedApplicationVariantsE2eTest {
     @Test
+    void metricMetadataUsesTheExistingPerStepGeneratedCodeBudget() {
+        final var builder = StepDefinition.named("text.lowercase", "1")
+                .primaryOutcome("ok").receive("value", ValueShape.STRING).returns("value", ValueShape.STRING);
+        for (int metric = 0; metric < 1_000; metric++) builder.metric(
+                dev.nanonative.railix.core.runtime.MetricDefinition.counter("counter_" + metric, "Counter " + metric, "count"));
+        final var replacement = builder.implementation(OverloadedProcess.class);
+        final var catalog = StepCatalog.of(CreatorFirstProjectCompilationE2eTest.contextCatalog().definitions().stream()
+                .map(step -> step.id().equals("text.lowercase") ? replacement : step).toArray(StepDefinition[]::new));
+        assertThat(ProjectCompiler.compileApplication(CreatorFirstProjectCompilationE2eTest.contextProject(), catalog))
+                .isInstanceOfSatisfying(CompileResult.Rejected.class, rejected ->
+                        assertThat(rejected.diagnostics()).anySatisfy(diagnostic ->
+                                assertThat(diagnostic.code()).isEqualTo("PROJECT_APPLICATION_STEP_LIMIT")));
+    }
+
+    @Test
     void compilerRejectsAnInaccessibleImplementationClassBeforeGeneratingJava() {
         assertThat(compileWith(InaccessibleProcess.class)).isInstanceOfSatisfying(CompileResult.Rejected.class,
                 rejected->assertThat(rejected.diagnostics()).anySatisfy(diagnostic->{
@@ -140,24 +155,24 @@ final class GeneratedApplicationVariantsE2eTest {
     }
 
     @Test
-    void productionApplicationExposesOnlyTheProductionRuntimeBoundary() {
+    void applicationWithoutExamplesExposesTheSharedObservedRuntimeBoundary() {
         final String source = compiled().productionApplicationSource();
 
         assertThat(source)
-                .contains("public final class RailixApplication implements RuntimeApplication")
+                .contains("public final class RailixApplication implements ObservedApplication")
                 .contains("public String projectId()")
                 .contains("public WorkflowRuntime.SourceResult runSource(")
                 .doesNotContain("DevelopmentRuntime");
     }
 
     @Test
-    void productionApplicationOmitsEveryObservationCapability() {
+    void applicationWithoutExamplesRetainsTheSameOperationalMetrics() {
         assertThat(compiled().productionApplicationSource())
+                .contains("RuntimeMetrics", "METRICS.startFlow(", "METRICS.startStep(",
+                        "METRICS.finishFlow(", "METRICS.finishStep(")
                 .doesNotContain(
                         "public RunResult run(",
                         "DevelopmentRuntime.Metrics",
-                        "startFlow(",
-                        "startStep(",
                         "TraceExecution",
                         " observe(",
                         "WorkflowRuntime.Capture",
@@ -170,10 +185,10 @@ final class GeneratedApplicationVariantsE2eTest {
     }
 
     @Test
-    void developmentApplicationOwnsMetricsOutsideStepHandlers() {
+    void applicationWithExamplesUsesTheSharedMetricsOutsideStepHandlers() {
         assertThat(compiled().developmentApplicationSource())
                 .contains(
-                        "DevelopmentRuntime.Metrics",
+                        "RuntimeMetrics",
                         "startFlow(",
                         "startStep("
                 )
@@ -221,7 +236,7 @@ final class GeneratedApplicationVariantsE2eTest {
 
         assertThat(compiled.productionApplicationSource())
                 .contains(
-                        "final int outcome = execution.call(",
+                        "outcome = execution.call(",
                         "private static int dispatch_",
                         "static int dispatch("
                 )
@@ -284,18 +299,17 @@ final class GeneratedApplicationVariantsE2eTest {
     }
 
     @Test
-    void developmentSelectsNormalOrTraceHandlersOnceAtTheFlowBoundary() {
+    void examplesAddValueCaptureWithoutChangingOrdinaryStepCalls() {
         final String source = compiled().developmentApplicationSource();
 
         assertThat(source)
                 .contains(
-                        "static final WorkflowRuntime.StepCall[] CALLS = new WorkflowRuntime.StepCall[]{",
-                        "static final WorkflowRuntime.StepCall[] TRACE_CALLS = new WorkflowRuntime.StepCall[]{",
-                        "(execution, 2, CALLS);",
-                        "(execution, 2, TRACE_CALLS));"
+                        "(execution, 2);",
+                        "(execution, 2));",
+                        "new TraceExecution("
                 )
                 .containsPattern("Handlers_\\d+\\.CALL_\\d+")
-                .containsPattern("Handlers_\\d+::trace_\\d+");
+                .doesNotContain("StepCall[] CALLS", "TRACE_CALLS", "calls[");
     }
 
     @Test
@@ -305,9 +319,13 @@ final class GeneratedApplicationVariantsE2eTest {
         final String executor = source.substring(start, source.indexOf("\n    }\n", start));
 
         assertThat(executor)
-                .contains("dispatch_1(execution, current, calls)")
+                .contains("dispatch_1(execution, current)")
                 .doesNotContain("DevelopmentRuntime.Trace", "TRACE_CALLS");
         assertThat(source).doesNotContain("traceExecute_");
+        final String withoutExamples = compiled().productionApplicationSource();
+        final int ordinaryStart = withoutExamples.indexOf("private static RunResult execute_1");
+        assertThat(executor).isEqualTo(withoutExamples.substring(ordinaryStart,
+                withoutExamples.indexOf("\n    }\n", ordinaryStart)));
     }
 
     @Test

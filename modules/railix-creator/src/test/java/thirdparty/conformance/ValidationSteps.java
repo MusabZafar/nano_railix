@@ -41,6 +41,18 @@ public final class ValidationSteps {
             return Optional.of("Validator was not loaded from the installed bundle.");
         }
         if (!CHECKED.add(value)) return Optional.of("Duplicate evaluation in the same batch.");
+        if (value.startsWith("gate:")) {
+            final var root = java.nio.file.Path.of(value.substring(5));
+            try {
+                java.nio.file.Files.writeString(root.resolve("ready"), "ready");
+                while (!java.nio.file.Files.exists(root.resolve("release"))) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(1_000_000L);
+                }
+            } catch (final java.io.IOException failure) {
+                throw new IllegalStateException(failure);
+            }
+            return Optional.empty();
+        }
         if (value.startsWith("await:")) {
             try {
                 java.nio.file.Files.writeString(java.nio.file.Path.of(value.substring(6)),

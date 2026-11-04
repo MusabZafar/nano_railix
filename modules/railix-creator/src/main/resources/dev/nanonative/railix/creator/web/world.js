@@ -301,6 +301,18 @@
       return this;
     }
 
+    /** Clear source-specific geometry and pending reads when changing the observed application version. */
+    resetScene() {
+      this._request?.abort();this._mapRequest?.abort();this._requestId++;
+      this._mapRequest=null;this._mapRevision=null;this._overviewContext=null;clearTimeout(this._mapRetry);
+      if(this._map)this._map.hidden=true;
+      this._cancelFlight();this._pendingFocus='app';this._groups=[];this._zoomEntry=null;
+      this._mapGrid=this._mapNodes=this._mapSelection=this._overview=null;
+      this._initialized=false;this._viewVersion++;
+      this.connection(null);
+      return this;
+    }
+
     async refresh() {
       if (this._disposed) return this;
       clearTimeout(this._requestTimer);
@@ -1533,7 +1545,7 @@
     }
 
     _minimap() {
-      if (!this._map || !this._scene || this._disposed || document.hidden) return;
+      if (!this._map || !this._scene || !this._overview || this._disposed || document.hidden) return;
       const context = JSON.stringify([this._scene.revision, new URLSearchParams(this._sceneQuery).get('inside')]);
       if (this._overviewContext !== context) return;
       this._map.hidden = false;
@@ -1865,6 +1877,7 @@
           element.dataset.coverage = look.coverage || "";
           element.dataset.error = String(Boolean(look.error));
           element.dataset.activity = look.activity || "";
+          element.classList.toggle('draft-removed',Boolean(look.removed));
           element.title = [look.label || node.name, look.description || look.detail].filter(Boolean).join('\n');
           if (node.kind === "region") {
             element.dataset.groupRegionLabel = node.id;

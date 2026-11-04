@@ -2349,15 +2349,16 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         exampleContext().press("Tab");
         waitForText("#build-state", "Built");
 
-        assertThat(page.evaluate("""
+        final var storedExample=com.google.gson.JsonParser.parseString((String)page.evaluate("""
                 async () => JSON.stringify(
                   (await (await fetch('/api/project')).json()).project.nodes
                     .find(node => node.use === 'railix.trigger.cli').examples[0]
                 )
-                """)).isEqualTo(
+                """)).getAsJsonObject();
+        assertThat(storedExample.remove("id").getAsString()).startsWith("example-");
+        assertThat(storedExample).isEqualTo(com.google.gson.JsonParser.parseString(
                 "{\"context\":{\"header\":{\"request\":\"local\"}},\"name\":\"no-arguments\","
-                        + "\"payload\":[\"arg1\",\"arg2\",\"arg3\"]}"
-        );
+                        + "\"payload\":[\"arg1\",\"arg2\",\"arg3\"]}"));
     }
 
     @Test
@@ -2966,6 +2967,10 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         chooseCustomPathFor("target", "payload", "lower");
         waitForText("#build-state", "Built");
         page.locator("#visible-example").selectOption(new com.microsoft.playwright.options.SelectOption().setIndex(1));
+        final Locator retry=page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Retry Example values").setExact(true));
+        page.waitForCondition(()->page.locator("#preview-source").isVisible() || retry.isVisible());
+        if(retry.isVisible())retry.click();
         page.locator("#preview-source").waitFor();
 
         page.locator("[data-input-name='source'] .path-button").click();
@@ -4905,7 +4910,8 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
     }
 
     @Test
-    void triggerExamplesAreAnEditableList() {
+    @Tag("responsive")
+    void triggerExamplesAreAnEditableList() throws IOException {
         addTrigger();
 
         assertThat(examplePayload().inputValue()).isEqualTo("[]");
@@ -4914,6 +4920,9 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
 
         assertThat(page.locator("#visible-example option[data-status]").count()).isEqualTo(4);
         assertThat(page.locator("#example-name").inputValue()).isEqualTo("example-4");
+        waitForText("#build-state", "Built");
+        PlaywrightAssertions.assertThat(page.locator("#visible-example")).hasValue(java.util.regex.Pattern.compile("example-[a-z0-9-]+"));
+        final String stableId = page.locator("#visible-example").inputValue();
 
         page.locator("#example-name").fill("empty-input");
         page.locator("#example-name").press("Tab");
@@ -4925,8 +4934,13 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
         assertThat(page.locator("#example-name").inputValue()).isEqualTo("no-arguments");
 
         chooseExampleIndex(3);
+        PlaywrightAssertions.assertThat(page.locator("#visible-example")).hasValue(stableId);
         assertThat(page.locator("#example-name").inputValue()).isEqualTo("empty-input");
         assertThat(exampleContext().inputValue()).contains("\"payload\": {}");
+        PlaywrightAssertions.assertThat(page.locator("#visible-example option:checked")).hasAttribute("data-status", "succeeded");
+        page.locator("#example-name").scrollIntoViewIfNeeded();
+        page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target", "screenshots"))
+                .resolve("example-document-" + page.viewportSize().width + ".png")));
     }
 
     @Test
@@ -6610,7 +6624,7 @@ abstract class RailixCreatorBrowserSupport {
                   headers: mutationHeaders(),
                   body: source
                 }).then(async response => response.status + ' ' + await response.text())
-                """, source);
+                """, ProjectFiles.identify(source, true));
         assertThat(response).startsWith("200 ");
         page.reload();
         page.waitForFunction("""
@@ -6817,7 +6831,9 @@ abstract class RailixCreatorBrowserSupport {
             page.locator("#visible-example").selectOption("");
         } else {
             final String trigger = page.locator("#edit-example").getAttribute("data-edit-trigger");
-            chooseVisibleExample(trigger + ":" + index);
+            final Locator option = page.locator("#visible-example option[data-trigger='" + trigger + "'][data-index='" + index + "']");
+            PlaywrightAssertions.assertThat(option).hasCount(1);
+            chooseVisibleExample(option.getAttribute("value"));
         }
     }
 

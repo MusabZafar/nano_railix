@@ -2,6 +2,30 @@
 
 ## Status
 
+Amended on 2026-11-03: execution and operational metrics MUST NOT vary by development,
+test or production labels. Explicit build capabilities may omit optional features. Examples
+are the execution exception: they inject Trigger output and may record per-Step values.
+They use the same operational metric implementation as real ingress. Creator alone evaluates
+assertions. This supersedes the blanket production-observation omission below.
+The protected local observation connection is enabled by default and can be disabled at build
+time, as selected on the same date. It does not select another execution or metric model.
+
+Clarified on 2026-11-03: one Creator workspace may observe a deployed version while editing,
+building and running a local version of the same project with Examples. The observed application
+remains read-only and independently owned. Local edits are not deployments. The
+[Creator contract](../specs/creator.md#live-application-and-local-changes) owns visible changes and
+restoration; [observation](../specs/observation.md#application-source-and-build-identity) owns exact
+source/build correspondence. The user selected an option to include the existing project
+documents in the build; otherwise matching project data must be available locally. No intermediate
+minimal description or second graph format is introduced. The owning observation contract now
+defines JAR source inclusion and normal local loading against an artifact. The first independent
+local attachment captures original source, then uses separate read-only Live and editable Draft
+views in the same workspace. Transient owner-only discovery records contain no graph. Shared
+bounded metric transport does not grant process ownership. Confirming a Live selection pauses
+only the owned local JVM and retains its compiled draft. Local execution resumes explicitly with
+`Start locally`, using the existing lifecycle. Ordinary Creator startup without a Live connection
+still auto-starts. No separate executor or dormant JVM is introduced.
+
 Accepted on 2026-07-29. Refined through 2026-09-01 to separate the flat functional graph from
 optional Creator metadata, remove compiler-expanded reusable flows, and add generic explicit
 flow-control inputs, continuous semantic zoom, and explicit Creator/compiler/generated-application
@@ -54,8 +78,10 @@ basic graph editing was stable. It has been removed.
 Keep one materialized functional graph and one generated application, with declarative
 Step contracts and no hidden group expansion. Compilation is structural; the generated
 application executes. Creator owns editing, building and child-process lifecycle.
-Groups, geometry and themes remain presentation only. Development observations belong to
-the generated application and are physically omitted from current production artifacts.
+Groups, geometry and themes remain presentation only. Operational observations belong to the
+generated application and share one implementation in every build that includes that capability.
+Example execution, recorded Example values and Creator assertions remain separate capabilities,
+not reasons to generate a slower ordinary execution path for local use.
 
 Creator may additionally copy and share a Step or group's functional contents. It resolves those edits
 into ordinary Steps and links before compilation; a deployed application never follows a live

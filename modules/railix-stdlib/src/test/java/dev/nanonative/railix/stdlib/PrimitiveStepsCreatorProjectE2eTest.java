@@ -83,12 +83,17 @@ class PrimitiveStepsCreatorProjectE2eTest {
         assertThat(definition.receives()).extracting(StepDefinition.Port::name)
                 .containsExactly("request");
         assertThat(definition.inputs()).extracting(StepDefinition.Field::name)
-                .containsExactly("host", "port", "target");
+                .containsExactly("host", "port", "next_free_port", "target");
         assertThat((StepDefinition.JsonInput) definition.inputs().getFirst().input())
                 .extracting(StepDefinition.JsonInput::defaultValue).isEqualTo(java.util.Optional.of(RailixValue.string("127.0.0.1")));
         final var port = (StepDefinition.JsonInput) definition.inputs().get(1).input();
         assertThat(port.defaultValue()).contains(RailixValue.number(8080));
         assertThat(port.range()).containsExactly(RailixValue.number(0), RailixValue.number(65535));
+        assertThat(((StepDefinition.JsonInput) definition.inputs().get(2).input()).defaultValue())
+                .contains(RailixValue.bool(true));
+        assertThat(definition.version()).isEqualTo("2");
+        assertThat(definition.metrics()).extracting(dev.nanonative.railix.core.runtime.MetricDefinition::name)
+                .containsExactly("preferred_port", "active_port");
         assertThat(definition.results()).extracting(StepDefinition.Result::name)
                 .containsExactly("body", "headers", "status");
     }
