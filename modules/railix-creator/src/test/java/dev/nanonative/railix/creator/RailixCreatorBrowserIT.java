@@ -722,10 +722,11 @@ final class RailixCreatorWorkspaceBrowserIT extends RailixCreatorBrowserSupport 
 
 final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     @ParameterizedTest
+    @Tag("browser-diagnostics")
     @ValueSource(ints={320,390})
-    void choiceSourceIsVisibleWithoutScrollingPastEmptyActionRows(final int width) {
+    void choiceSourceIsVisibleWithoutScrollingPastEmptyActionRows(final int width) throws Exception {
         page.setViewportSize(width,844);
-        openProject(branchProject("choice-mobile", "choice", "railix.choice", """
+        openProject(branchProject("choice-mobile", "choice", """
                 [[{"option":"literal","inputs":{"value":true},"when":{"transforms":[],
                   "all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]
                 """));
@@ -734,6 +735,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         openInspectorTab("inspect");
         final var content=page.locator("#inspector-content").boundingBox();
         final var source=page.locator(".matcher-row .candidate-source").boundingBox();
+        page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target", "screenshots"))
+                .resolve("branch-condition-" + width + ".png")));
         assertThat(source.y).isLessThan(content.y+100);
         assertThat(source.y+source.height).isLessThanOrEqualTo(content.y+content.height);
         final Locator remove=page.locator(".matcher-group-heading [data-remove-matcher-group]");
@@ -748,7 +751,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     @ValueSource(ints={320,390})
     void choiceMultipleConditionsAndAlternativesKeepAlignedWorkingActions(final int width) {
         page.setViewportSize(width,844);
-        openProject(branchProject("choice-multiple", "choice", "railix.choice", """
+        openProject(branchProject("choice-multiple", "choice", """
                 [[{"option":"literal","inputs":{"value":true},"when":{"transforms":[],"all":[]}},
                   {"option":"literal","inputs":{"value":false},"when":{"transforms":[],"all":[]}}],
                  [{"option":"literal","inputs":{"value":true},"when":{"transforms":[],"all":[]}}]]
@@ -772,10 +775,10 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     @ParameterizedTest
     @Tag("browser-diagnostics")
     @CsvSource({"1280,false","390,false","320,false","1280,true","390,true","320,true"})
-    void choiceComparisonAndExpectedValueStayAlignedAtSupportedWidths(final int width,final boolean jsonOperand) {
+    void choiceComparisonAndExpectedValueStayReadableAtSupportedWidths(final int width,final boolean jsonOperand) {
         page.setViewportSize(width,900);
         if(jsonOperand) {
-            openProject(branchProject("choice-json", "choice", "railix.choice", """
+            openProject(branchProject("choice-json", "choice", """
                     [[{"option":"literal","inputs":{"value":true},"when":{"transforms":[],
                       "all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]
                     """));
@@ -787,11 +790,12 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
                 select => {
                   const left=select.getBoundingClientRect();
                   const right=select.closest('[data-condition-predicate]').querySelector('[data-input-json]').getBoundingClientRect();
-                  return [left.bottom,right.bottom,right.height];
+                  return [left.left,left.bottom,right.left,right.top,right.height];
                 }
                 """);
-        assertThat(((Number) bounds.get(0)).doubleValue()).isCloseTo(((Number) bounds.get(1)).doubleValue(),within(1.0));
-        assertThat(((Number) bounds.get(2)).doubleValue()).isGreaterThanOrEqualTo(width<650?44:36);
+        assertThat(((Number) bounds.get(0)).doubleValue()).isCloseTo(((Number) bounds.get(2)).doubleValue(),within(1.0));
+        assertThat(((Number) bounds.get(1)).doubleValue()).isLessThanOrEqualTo(((Number) bounds.get(3)).doubleValue());
+        assertThat(((Number) bounds.get(4)).doubleValue()).isGreaterThanOrEqualTo(width<650?44:36);
         assertThat(page.evaluate("() => document.documentElement.scrollWidth<=innerWidth")).isEqualTo(true);
         assertThat(page.locator(".matcher-add").first().getAttribute("open")).isNull();
         assertThat(pageErrors).isEmpty();
@@ -900,30 +904,31 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(pageErrors).isEmpty();
     }
     @Test
-    void addingAFilterPersistsEveryDeclaredOutcomeConnection() {
-        addFilterAfterTrigger();
+    void addingABranchRoutePersistsEveryOutcomeConnection() {
+        addBranchAfterTrigger();
+        final String route = selectedRoute();
 
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const filter = project.nodes.find(node => node.use === 'railix.filter');
-                  return project.links.filter(link => link.from.startsWith(filter.id + '.'))
-                    .map(link => link.from.substring(filter.id.length) + ':' + link.to)
+                  const branch = project.nodes.find(node => node.use === 'railix.branch');
+                  return project.links.filter(link => link.from.startsWith(branch.id + '.'))
+                    .map(link => link.from.substring(branch.id.length) + ':' + link.to)
                     .sort().join('|');
                 }
-                """)).isEqualTo(".match:end|.otherwise:end");
+                """)).isEqualTo(".otherwise:end|." + route + ":end");
     }
 
     @Test
-    void filterRendersOneDeterministicLanePerOutcome() {
-        addFilterAfterTrigger();
+    void branchRendersOneDeterministicLanePerOutcome() {
+        addBranchAfterTrigger();
 
-        assertThat(branchOutcomes()).containsExactly("match", "otherwise");
+        assertThat(branchOutcomes()).containsExactlyInAnyOrder(selectedRoute(), "otherwise");
     }
 
     @Test
-    void filterInspectorAddsANormalStepToTheChosenOutcome() {
-        addFilterAfterTrigger();
+    void branchInspectorAddsANormalStepToTheChosenOutcome() {
+        addBranchAfterTrigger();
 
         clickOverview("[data-add-outcome='otherwise']");
         page.locator("#step-search").fill("field");
@@ -933,8 +938,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const filter = project.nodes.find(node => node.use === 'railix.filter');
-                  const branch = project.links.find(link => link.from === filter.id + '.otherwise');
+                  const step = project.nodes.find(node => node.use === 'railix.branch');
+                  const branch = project.links.find(link => link.from === step.id + '.otherwise');
                   const inserted = project.nodes.find(node => node.id === branch.to);
                   const terminal = project.links.find(link => link.from === inserted.id + '.next');
                   return inserted.use + ':' + terminal.to;
@@ -944,7 +949,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void branchLayoutIsStableAcrossReload() {
-        addFilterAfterTrigger();
+        addBranchAfterTrigger();
         page.evaluate("() => void state.world.fit()");
         final String before = positions();
 
@@ -956,8 +961,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void nestedFilterLayoutIsStableAcrossReload() {
-        addNestedFilterToMatchRoute();
+    void nestedBranchLayoutIsStableAcrossReload() {
+        addNestedBranchToFirstRoute();
         page.evaluate("() => void state.world.fit()");
         final String before = positions();
 
@@ -970,12 +975,15 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void nestedFiltersKeepEveryDeclaredOutcomeInTheScene() {
-        addNestedFilterToMatchRoute();
+    void nestedBranchesKeepEveryOutcomeInTheScene() {
+        addNestedBranchToFirstRoute();
         page.locator("#scope-overview").click();
         awaitScene();
 
-        assertThat(branchOutcomes()).containsExactlyInAnyOrder("match", "match", "otherwise", "otherwise");
+        final List<String> outcomes = branchOutcomes();
+        assertThat(outcomes).hasSize(4);
+        assertThat(outcomes).filteredOn("otherwise"::equals).hasSize(2);
+        assertThat(outcomes).filteredOn(outcome -> outcome.matches("route-[0-9a-f-]{36}")).hasSize(2);
     }
 
     @Test
@@ -1146,8 +1154,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void nestedFilterAddsANormalStepOnlyToItsSelectedRoute() {
-        addNestedFilterToMatchRoute();
+    void nestedBranchAddsANormalStepOnlyToItsSelectedRoute() {
+        addNestedBranchToFirstRoute();
 
         clickOverview("[data-add-outcome='otherwise']");
         page.locator("#step-search").fill("field");
@@ -1157,13 +1165,14 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const filters = project.nodes.filter(node => node.use === 'railix.filter');
-                  const outer = filters.find(filter => project.links.some(link =>
-                    link.from === filter.id + '.match' && filters.some(inner => inner.id === link.to)));
-                  const inner = filters.find(filter => filter.id !== outer.id);
+                  const branches = project.nodes.filter(node => node.use === 'railix.branch');
+                  const route = branch => branch.id + '.' + branch.inputs.routes[0].outcome;
+                  const outer = branches.find(branch => project.links.some(link =>
+                    link.from === route(branch) && branches.some(inner => inner.id === link.to)));
+                  const inner = branches.find(branch => branch.id !== outer.id);
                   const inserted = project.links.find(link => link.from === inner.id + '.otherwise')?.to;
                   return project.nodes.find(node => node.id === inserted)?.use + '|'
-                    + project.links.find(link => link.from === inner.id + '.match')?.to + '|'
+                    + project.links.find(link => link.from === route(inner))?.to + '|'
                     + project.links.find(link => link.from === outer.id + '.otherwise')?.to;
                 }
                 """)).isEqualTo("railix.field-manipulation|end|end");
@@ -1171,7 +1180,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void deletingANestedBranchLeafRestoresOnlyTheNestedOutcome() {
-        addNestedFilterToMatchRoute();
+        addNestedBranchToFirstRoute();
         clickOverview("[data-add-outcome='otherwise']");
         page.locator("#step-search").fill("field");
         page.locator("[data-add-step='railix.field-manipulation']").click();
@@ -1183,12 +1192,13 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const filters = project.nodes.filter(node => node.use === 'railix.filter');
-                  const outer = filters.find(filter => project.links.some(link =>
-                    link.from === filter.id + '.match' && filters.some(inner => inner.id === link.to)));
-                  const inner = filters.find(filter => filter.id !== outer.id);
+                  const branches = project.nodes.filter(node => node.use === 'railix.branch');
+                  const route = branch => branch.id + '.' + branch.inputs.routes[0].outcome;
+                  const outer = branches.find(branch => project.links.some(link =>
+                    link.from === route(branch) && branches.some(inner => inner.id === link.to)));
+                  const inner = branches.find(branch => branch.id !== outer.id);
                   return project.links.find(link => link.from === inner.id + '.otherwise')?.to + '|'
-                    + project.links.find(link => link.from === outer.id + '.match')?.to;
+                    + project.links.find(link => link.from === route(outer))?.to;
                 }
                 """)).asString().startsWith("end|step-");
     }
@@ -1212,28 +1222,9 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void addingAChoicePersistsEveryDeclaredOutcomeConnection() {
-        addChoiceAfterTrigger();
-
-        assertThat(page.evaluate("""
-                async () => {
-                  const project = (await (await fetch('/api/project')).json()).project;
-                  const choice = project.nodes.find(node => node.use === 'railix.choice');
-                  return project.links.filter(link => link.from.startsWith(choice.id + '.'))
-                    .map(link => link.from.substring(choice.id.length) + ':' + link.to)
-                    .sort().join('|');
-                }
-                """)).isEqualTo(".match:end|.otherwise:end");
-    }
-
-    @Test
-    void addingASwitchPersistsFlatCatalogDerivedRoutes() {
-        addSwitchAfterTrigger();
-        page.locator("[data-add-candidate='field']").click();
-        waitForText("#build-state", "Built");
-        page.locator(".candidate-add:not([open]) > summary").click();
-        page.locator("[data-add-candidate='literal']").click();
-        waitForText("#build-state", "Built");
+    void addingBranchRoutesPersistsFlatOpaqueRoutes() {
+        addBranchAfterTrigger();
+        addBranchRoute("literal");
         page.evaluate("() => void state.world.fit()");
         awaitScene();
 
@@ -1241,32 +1232,28 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
                 async () => {
                   const workspace = await (await fetch('/api/project')).json();
                   const project = workspace.project;
-                  const step = project.nodes.find(node => node.use === 'railix.switch');
-                  const cases = step.inputs.cases;
-                  const routes = project.links.filter(link => link.from.startsWith(step.id + '.'));
+                  const step = project.nodes.find(node => node.use === 'railix.branch');
+                  const routes = step.inputs.routes;
+                  const links = project.links.filter(link => link.from.startsWith(step.id + '.'));
                   const labels = workspace.creator.steps[step.id].outcomes;
-                  return cases.length + '|' + cases.map(item => labels[item.outcome]).join(',') + '|'
-                    + cases.every(item => !Object.hasOwn(item, 'label')) + '|'
-                    + cases.every(item => /^case-[0-9a-f-]{36}$/.test(item.outcome)) + '|'
-                    + routes.length + '|' + routes.every(link => link.to === 'end');
+                  return routes.length + '|' + routes.map(item => labels[item.outcome]).join(',') + '|'
+                    + routes.every(item => !Object.hasOwn(item, 'label')) + '|'
+                    + routes.every(item => /^route-[0-9a-f-]{36}$/.test(item.outcome)) + '|'
+                    + links.length + '|' + links.every(link => link.to === 'end');
                 }
-                """)).isEqualTo("2|Case 1,Case 2|true|true|3|true");
+                """)).isEqualTo("2|Route 1,Route 2|true|true|3|true");
         assertThat(branchOutcomes()).hasSize(3).contains("otherwise");
-        assertThat(page.locator("#world-labels").textContent()).contains("Case 1", "Case 2", "Otherwise");
+        assertThat(page.locator("#world-labels").textContent()).contains("Route 1", "Route 2", "Otherwise");
     }
 
     @Test
-    void renamingAndReorderingSwitchCasesPreservesOutcomeIdsAcrossReload() {
-        addSwitchAfterTrigger();
-        page.locator("[data-add-candidate='field']").click();
-        waitForText("#build-state", "Built");
-        page.locator(".candidate-add:not([open]) > summary").click();
-        page.locator("[data-add-candidate='literal']").click();
-        waitForText("#build-state", "Built");
+    void renamingAndReorderingBranchRoutesPreservesOutcomeIdsAcrossReload() {
+        addBranchAfterTrigger();
+        addBranchRoute("literal");
         final String before = String.valueOf(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  return project.nodes.find(node => node.use === 'railix.switch').inputs.cases
+                  return project.nodes.find(node => node.use === 'railix.branch').inputs.routes
                     .map(item => item.outcome).join('|');
                 }
                 """));
@@ -1274,35 +1261,33 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         page.locator("[data-candidate-label]").first().fill("Alpha");
         page.locator("[data-candidate-label]").first().press("Tab");
         waitForText("#build-state", "Built");
-        page.locator("[data-move-candidate='1'][data-direction='-1']").click();
+        page.locator(".route > .candidate-heading [data-move-candidate='1'][data-direction='-1']").click();
         waitForText("#build-state", "Built");
         page.reload();
         waitForText("#build-state", "Built");
         final String id = String.valueOf(page.evaluate("""
                 async () => (await (await fetch('/api/project')).json()).project.nodes
-                  .find(node => node.use === 'railix.switch').id
+                  .find(node => node.use === 'railix.branch').id
                 """));
         selectWorldNode(id);
 
         assertThat(page.evaluate("""
                 async () => {
                   const workspace = await (await fetch('/api/project')).json();
-                  const step = workspace.project.nodes.find(node => node.use === 'railix.switch');
+                  const step = workspace.project.nodes.find(node => node.use === 'railix.branch');
                   const labels = workspace.creator.steps[step.id].outcomes;
-                  return step.inputs.cases.map(item => item.outcome + ':' + labels[item.outcome]).join('|');
+                  return step.inputs.routes.map(item => item.outcome + ':' + labels[item.outcome]).join('|');
                 }
-                """)).isEqualTo(before.split("\\|")[1] + ":Case 2|" + before.split("\\|")[0] + ":Alpha");
+                """)).isEqualTo(before.split("\\|")[1] + ":Route 2|" + before.split("\\|")[0] + ":Alpha");
     }
 
     @Test
-    void changingSwitchCaseSourcePreservesItsOutcomeRoute() {
-        addSwitchAfterTrigger();
-        page.locator("[data-add-candidate='field']").click();
-        waitForText("#build-state", "Built");
+    void changingARouteMatcherSourcePreservesItsOutcomeRoute() {
+        addBranchAfterTrigger();
         final String outcome = String.valueOf(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  return project.nodes.find(node => node.use === 'railix.switch').inputs.cases[0].outcome;
+                  return project.nodes.find(node => node.use === 'railix.branch').inputs.routes[0].outcome;
                 }
                 """));
 
@@ -1312,30 +1297,28 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async outcome => {
                   const workspace = await (await fetch('/api/project')).json();
-                  const step = workspace.project.nodes.find(node => node.use === 'railix.switch');
-                  const candidate = step.inputs.cases[0];
+                  const step = workspace.project.nodes.find(node => node.use === 'railix.branch');
+                  const candidate = step.inputs.routes[0];
                   const route = workspace.project.links.find(link => link.from === step.id + '.' + outcome);
-                  return [candidate.outcome, candidate.option, route?.to,
+                  return [candidate.outcome, candidate.groups[0][0].option, route?.to,
                     workspace.creator.steps[step.id].outcomes[outcome]].join('|');
                 }
-                """, outcome)).isEqualTo(outcome + "|literal|end|Case 1");
+                """, outcome)).isEqualTo(outcome + "|literal|end|Route 1");
     }
 
     @Test
-    void removingATerminalSwitchCaseRemovesOnlyItsRoute() {
-        addSwitchAfterTrigger();
-        page.locator("[data-add-candidate='field']").click();
-        waitForText("#build-state", "Built");
+    void removingATerminalBranchRouteRemovesOnlyItsRoute() {
+        addBranchAfterTrigger();
 
-        page.locator("[data-remove-candidate='0']").click();
+        page.locator(".route > .candidate-heading [data-remove-candidate='0']").click();
         waitForText("#build-state", "Built");
 
         assertThat(page.evaluate("""
                 async () => {
                   const workspace = await (await fetch('/api/project')).json();
                   const project = workspace.project;
-                  const step = project.nodes.find(node => node.use === 'railix.switch');
-                  return step.inputs.cases.length + ':' + project.links
+                  const step = project.nodes.find(node => node.use === 'railix.branch');
+                  return step.inputs.routes.length + ':' + project.links
                     .filter(link => link.from.startsWith(step.id + '.'))
                     .map(link => link.from.substring(step.id.length + 1)).join('|') + ':'
                     + Object.keys(workspace.creator.steps[step.id]?.outcomes || {}).length;
@@ -1344,15 +1327,13 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void connectedSwitchCaseCannotBeRemoved() {
-        addSwitchAfterTrigger();
-        page.locator("[data-add-candidate='field']").click();
-        waitForText("#build-state", "Built");
+    void connectedBranchRouteCannotBeRemoved() {
+        addBranchAfterTrigger();
         final Map<?, ?> route = (Map<?, ?>) page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const step = project.nodes.find(node => node.use === 'railix.switch');
-                  return {id: step.id, outcome: step.inputs.cases[0].outcome};
+                  const step = project.nodes.find(node => node.use === 'railix.branch');
+                  return {id: step.id, outcome: step.inputs.routes[0].outcome};
                 }
                 """);
 
@@ -1362,7 +1343,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         waitForText("#build-state", "Built");
         selectWorldNode((String) route.get("id"));
 
-        assertThat(page.locator("[data-remove-candidate='0']").isDisabled()).isTrue();
+        assertThat(page.locator(".route > .candidate-heading [data-remove-candidate='0']").isDisabled()).isTrue();
         assertThat(page.evaluate("""
                 async route => {
                   const project = (await (await fetch('/api/project')).json()).project;
@@ -1376,7 +1357,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     void authoredRouteStepsAreNotOfferedInsideNestedPrograms() {
         preparePrimitiveSearch("{\"payload\":{\"value\":\"Railix\"}}", "switch");
 
-        assertThat(page.locator("#steps-options [data-add-nested='railix.switch']").count()).isZero();
+        assertThat(page.locator("#steps-options [data-add-nested='railix.branch']").count()).isZero();
         assertThat(page.locator("#steps-options").textContent()).contains("No compatible Step matches.");
     }
 
@@ -1439,18 +1420,18 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceAddsACompleteOrGroupAndPersistsItAcrossReload() {
-        addChoiceAfterTrigger();
+    void routeAddsACompleteOrGroupAndPersistsItAcrossReload() {
+        addRouteAfterTrigger();
 
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         page.reload();
         waitForText("#build-state", "Built");
-        final String choice = String.valueOf(page.evaluate("""
+        final String branch = String.valueOf(page.evaluate("""
                 async () => (await (await fetch('/api/project')).json()).project.nodes
-                  .find(node => node.use === 'railix.choice').id
+                  .find(node => node.use === 'railix.branch').id
                 """));
-        selectWorldNode(choice);
+        selectWorldNode(branch);
 
         assertThat(page.locator("[data-matcher-group='0']").count()).isEqualTo(1);
         assertThat(page.locator("[data-matcher-group='0'] [data-candidate-index='0'] select").inputValue())
@@ -1462,8 +1443,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceAddsAnAndMatcherToAnExistingGroup() {
-        addChoiceAfterTrigger();
+    void routeAddsAnAndMatcherToAnExistingGroup() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
 
@@ -1473,14 +1454,14 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  return project.nodes.find(node => node.use === 'railix.choice').inputs.conditions[0].length;
+                  return project.nodes.find(node => node.use === 'railix.branch').inputs.routes[0].groups[0].length;
                 }
                 """)).isEqualTo(2);
     }
 
     @Test
-    void choiceReordersAndMatchersInsideTheirGroup() {
-        addChoiceAfterTrigger();
+    void routeReordersAndMatchersInsideTheirGroup() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-matcher-group='0'] [data-add-candidate='literal']").click();
@@ -1495,15 +1476,15 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const first = project.nodes.find(node => node.use === 'railix.choice').inputs.conditions[0][0];
+                  const first = project.nodes.find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0];
                   return first.option + ':' + first.inputs.value;
                 }
                 """)).isEqualTo("literal:constant");
     }
 
     @Test
-    void reorderingChoiceMatchersClearsPositionBoundStepSearch() {
-        addChoiceAfterTrigger();
+    void reorderingRouteMatchersClearsPositionBoundStepSearch() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-matcher-group='0'] [data-add-candidate='field']").click();
@@ -1520,8 +1501,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceRemovesOneAndMatcherWithoutRemovingItsGroup() {
-        addChoiceAfterTrigger();
+    void routeRemovesOneAndMatcherWithoutRemovingItsGroup() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-matcher-group='0'] [data-add-candidate='field']").click();
@@ -1533,15 +1514,15 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const conditions = project.nodes.find(node => node.use === 'railix.choice').inputs.conditions;
+                  const conditions = project.nodes.find(node => node.use === 'railix.branch').inputs.routes[0].groups;
                   return conditions.length + ':' + conditions[0].length;
                 }
                 """)).isEqualTo("1:1");
     }
 
     @Test
-    void replacingARemovedChoiceMatcherDoesNotRestoreItsStepSearch() {
-        addChoiceAfterTrigger();
+    void replacingARemovedRouteMatcherDoesNotRestoreItsStepSearch() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-matcher-group='0'] [data-add-candidate='field']").click();
@@ -1558,8 +1539,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceReordersWholeOrGroupsWithoutChangingTheirMatchers() {
-        addChoiceAfterTrigger();
+    void routeReordersWholeOrGroupsWithoutChangingTheirMatchers() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-add-matcher-group='literal']").click();
@@ -1574,15 +1555,15 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const first = project.nodes.find(node => node.use === 'railix.choice').inputs.conditions[0][0];
+                  const first = project.nodes.find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0];
                   return first.option + ':' + first.inputs.value;
                 }
                 """)).isEqualTo("literal:constant");
     }
 
     @Test
-    void reorderingChoiceGroupsClearsPositionBoundStepSearch() {
-        addChoiceAfterTrigger();
+    void reorderingRouteGroupsClearsPositionBoundStepSearch() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-add-matcher-group='field']").click();
@@ -1597,8 +1578,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceRemovesOneWholeOrGroup() {
-        addChoiceAfterTrigger();
+    void routeRemovesOneWholeOrGroup() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-add-matcher-group='field']").click();
@@ -1610,14 +1591,14 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  return project.nodes.find(node => node.use === 'railix.choice').inputs.conditions.length;
+                  return project.nodes.find(node => node.use === 'railix.branch').inputs.routes[0].groups.length;
                 }
                 """)).isEqualTo(1);
     }
 
     @Test
-    void replacingARemovedChoiceGroupDoesNotRestoreItsStepSearch() {
-        addChoiceAfterTrigger();
+    void replacingARemovedRouteGroupDoesNotRestoreItsStepSearch() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
         visibleControl("[data-add-matcher-group='field']").click();
@@ -1633,8 +1614,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceDoesNotAllowAnEmptyAndGroup() {
-        addChoiceAfterTrigger();
+    void routeDoesNotAllowAnEmptyAndGroup() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
 
@@ -1643,8 +1624,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceMatcherOffersCompatibleOrdinaryBooleanSteps() {
-        addChoiceAfterTrigger();
+    void routeMatcherOffersCompatibleOrdinaryBooleanSteps() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
 
@@ -1656,8 +1637,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceProgramDistinguishesMatchersFromTransformsByContract() {
-        addChoiceAfterTrigger();
+    void routeProgramDistinguishesMatchersFromTransformsByContract() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
 
@@ -1670,8 +1651,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choiceProgramMakesItsStepSearchPurposeExplicit() {
-        addChoiceAfterTrigger();
+    void routeProgramMakesItsStepSearchPurposeExplicit() {
+        addRouteAfterTrigger();
         visibleControl("[data-add-matcher-group='field']").click();
         waitForText("#build-state", "Built");
 
@@ -1705,7 +1686,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
         assertThat(page.evaluate("""
                 async () => (await (await fetch('/api/project')).json()).project.nodes
-                  .find(node => node.use === 'railix.choice').inputs.conditions[0][0]
+                  .find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0]
                   .when.all[0][0].inputs.than
                 """)).isEqualTo(0);
     }
@@ -1733,7 +1714,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const when = (await (await fetch('/api/project')).json()).project.nodes
-                    .find(node => node.use === 'railix.choice').inputs.conditions[0][0].when;
+                    .find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0].when;
                   return JSON.stringify({
                     transforms: when.transforms.map(step => step.use),
                     predicates: when.all.map(program => [program[0].use, program[0].inputs.than])
@@ -1753,7 +1734,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => JSON.stringify(
                   (await (await fetch('/api/project')).json()).project.nodes
-                    .find(node => node.use === 'railix.choice').inputs.conditions[0][0]
+                    .find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0]
                     .when.all.map(program => program[0].use)
                 )
                 """)).isEqualTo("[\"number.less-than\",\"number.greater-than\"]");
@@ -1769,7 +1750,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => JSON.stringify(
                   (await (await fetch('/api/project')).json()).project.nodes
-                    .find(node => node.use === 'railix.choice').inputs.conditions[0][0]
+                    .find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0]
                     .when.all.map(program => program[0].use)
                 )
                 """)).isEqualTo("[\"number.less-than\"]");
@@ -1791,7 +1772,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => JSON.stringify(
                   (await (await fetch('/api/project')).json()).project.nodes
-                    .find(node => node.use === 'railix.choice').inputs.conditions[0][0]
+                    .find(node => node.use === 'railix.branch').inputs.routes[0].groups[0][0]
                     .when.all[0][0].inputs
                 )
                 """)).isEqualTo("{\"expected\":null}");
@@ -1816,7 +1797,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void builtApplicationExecutesAChoiceMatcherPipelineInOrder() {
-        openProject(branchProject("choice-pipeline", "choice", "railix.choice", """
+        openProject(branchProject("choice-pipeline", "choice", """
                 [[{
                   "option":"literal","inputs":{"value":["one","two"]},
                   "when":{"transforms":[
@@ -1835,7 +1816,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     @ParameterizedTest(name = "list size {0} routes to {1}")
     @CsvSource({"1,otherwise", "2,matched", "4,matched", "5,otherwise"})
     void builtApplicationRequiresEveryNumericMatcher(final int size, final String expected) {
-        openProject(branchProject("choice-bounds-" + size, "choice", "railix.choice", """
+        openProject(branchProject("choice-bounds-" + size, "choice", """
                 [[{
                   "option":"literal","inputs":{"value":%s},
                   "when":{
@@ -1922,13 +1903,13 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void nestedBranchRailsAreContinuousOrthogonalPaths() {
-        addNestedFilterToMatchRoute();
+        addNestedBranchToFirstRoute();
         page.locator("#scope-overview").click();
         awaitScene();
 
         assertThat(page.evaluate("""
                 () => {
-                  const rails = state.world.scene.links.filter(link => ['match', 'otherwise'].includes(link.outcome));
+                  const rails = state.world.scene.links.filter(link => link.outcome && !['start', 'next'].includes(link.outcome));
                   return rails.length === 4 && rails.every(link => link.points.length >= 2
                     && link.points.every((point, index, points) => {
                       if (index === 0) return true;
@@ -1979,18 +1960,6 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void choicePreviewShowsTheBooleanResolvedByTheBuiltApplication() {
-        openProject(choiceProject());
-        chooseVisibleExample("command:0");
-
-        selectWorldNode("choice");
-        page.locator("[data-preview-input-value='conditions']").waitFor();
-
-        assertThat(page.locator("[data-preview-input-value='conditions']").first().textContent())
-                .isEqualTo("true");
-    }
-
-    @Test
     void choicePreviewShowsTheBuiltMatcherPredicateStage() {
         openProject(choiceProject());
         chooseVisibleExample("command:0");
@@ -2004,36 +1973,34 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void insertingAFilterPreservesTheExistingPrimaryRoute() {
+    void insertingABranchPreservesTheExistingRouteAsItsPrimaryOutcome() {
         addTrigger();
         addManipulationAfterSelected();
         waitForText("#build-state", "Built");
         selectTrigger();
         clickOverview("#add-next-step");
-        page.locator("#step-search").fill("filter");
-        page.locator("[data-add-step='railix.filter']").click();
-        waitForText("#build-state", "Built");
+        addBranchFromPicker();
 
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const filter = project.nodes.find(node => node.use === 'railix.filter');
+                  const branch = project.nodes.find(node => node.use === 'railix.branch');
                   const manipulation = project.nodes.find(node => node.use === 'railix.field-manipulation');
-                  return project.links.find(link => link.from === filter.id + '.match')?.to === manipulation.id
-                    && project.links.find(link => link.from === filter.id + '.otherwise')?.to === 'end';
+                  return project.links.find(link => link.from === branch.id + '.otherwise')?.to === manipulation.id
+                    && project.links.filter(link => link.from.startsWith(branch.id + '.')).length === 1;
                 }
                 """)).isEqualTo(true);
     }
 
     @Test
-    void populatedBranchPreventsDeletingItsFilter() {
-        addStepToOtherwiseBranch();
-        final String filter = String.valueOf(page.evaluate("""
+    void populatedRoutePreventsDeletingItsBranch() {
+        addStepToRouteBranch();
+        final String branch = String.valueOf(page.evaluate("""
                 async () => (await (await fetch('/api/project')).json()).project.nodes
-                  .find(node => node.use === 'railix.filter').id
+                  .find(node => node.use === 'railix.branch').id
                 """));
 
-        selectWorldNode(filter);
+        selectWorldNode(branch);
 
         openInspectorTab("overview");
         assertThat(page.locator("#delete-step").isDisabled()).isEqualTo(true);
@@ -2041,7 +2008,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void deletingABranchLeafRestoresOnlyThatOutcomeToEnd() {
-        addStepToOtherwiseBranch();
+        addStepToRouteBranch();
 
         deleteAcceptedStep();
         waitForText("#build-state", "Built");
@@ -2049,15 +2016,15 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.evaluate("""
                 async () => {
                   const project = (await (await fetch('/api/project')).json()).project;
-                  const filter = project.nodes.find(node => node.use === 'railix.filter');
-                  return project.links.find(link => link.from === filter.id + '.otherwise')?.to;
+                  const branch = project.nodes.find(node => node.use === 'railix.branch');
+                  return project.links.find(link => link.from === branch.id + '.' + branch.inputs.routes[0].outcome)?.to;
                 }
                 """)).isEqualTo("end");
     }
 
     @Test
-    void deletingAnEmptyFilterReconnectsItsIncomingRoute() {
-        addFilterAfterTrigger();
+    void deletingAnEmptyBranchReconnectsItsIncomingRoute() {
+        addBranchAfterTrigger();
 
         deleteAcceptedStep();
         waitForText("#build-state", "Built");
@@ -2067,7 +2034,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
                   const project = (await (await fetch('/api/project')).json()).project;
                   const trigger = project.nodes.find(node => node.use === 'railix.trigger.cli');
                   return [
-                    project.nodes.some(node => node.use === 'railix.filter'),
+                    project.nodes.some(node => node.use === 'railix.branch'),
                     project.links.find(link => link.from === trigger.id + '.next')?.to
                   ].join('|');
                 }
@@ -2075,17 +2042,17 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    void deletingAFilterWithAPopulatedPrimaryRouteKeepsThatRouteConnected() {
-        addFilterAfterTrigger();
-        clickOverview("[data-add-outcome='match']");
+    void deletingABranchWithAPopulatedPrimaryRouteKeepsThatRouteConnected() {
+        addBranchAfterTrigger();
+        clickOverview("[data-add-outcome='otherwise']");
         page.locator("#step-search").fill("field");
         page.locator("[data-add-step='railix.field-manipulation']").click();
         waitForText("#build-state", "Built");
-        final String filter = String.valueOf(page.evaluate("""
+        final String branch = String.valueOf(page.evaluate("""
                 async () => (await (await fetch('/api/project')).json()).project.nodes
-                  .find(node => node.use === 'railix.filter').id
+                  .find(node => node.use === 'railix.branch').id
                 """));
-        selectWorldNode(filter);
+        selectWorldNode(branch);
 
         deleteAcceptedStep();
         waitForText("#build-state", "Built");
@@ -2095,7 +2062,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
                   const project = (await (await fetch('/api/project')).json()).project;
                   const trigger = project.nodes.find(node => node.use === 'railix.trigger.cli');
                   const target = project.links.find(link => link.from === trigger.id + '.next')?.to;
-                  return project.nodes.some(node => node.use === 'railix.filter') + '|'
+                  return project.nodes.some(node => node.use === 'railix.branch') + '|'
                     + project.nodes.find(node => node.id === target)?.use;
                 }
                 """)).isEqualTo("false|railix.field-manipulation");
@@ -2103,13 +2070,13 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void missingOutcomeLinkIsShownAsMissingInsteadOfEnd() {
-        addFilterAfterTrigger();
+        addBranchAfterTrigger();
         page.evaluate("() => void state.world.fit()");
         awaitScene();
 
         page.evaluate("""
                 () => {
-                  const filter = state.project.nodes.find(node => node.use === 'railix.filter');
+                  const filter = state.project.nodes.find(node => node.use === 'railix.branch');
                   state.project.links = state.project.links.filter(link =>
                     link.from !== filter.id + '.otherwise');
                   dirty(true);
@@ -2126,13 +2093,13 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void duplicateOutcomeLinksAreShownAsMultipleInsteadOfChoosingOne() {
-        addFilterAfterTrigger();
+        addBranchAfterTrigger();
         page.evaluate("() => void state.world.fit()");
         awaitScene();
 
         page.evaluate("""
                 () => {
-                  const filter = state.project.nodes.find(node => node.use === 'railix.filter');
+                  const filter = state.project.nodes.find(node => node.use === 'railix.branch');
                   state.project.links.push({from: filter.id + '.otherwise', to: 'end'});
                   dirty(true);
                 }
@@ -2147,11 +2114,11 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void duplicateOutcomeDisablesStepInsertion() {
-        addFilterAfterTrigger();
+        addBranchAfterTrigger();
 
         page.evaluate("""
                 () => {
-                  const filter = state.project.nodes.find(node => node.use === 'railix.filter');
+                  const filter = state.project.nodes.find(node => node.use === 'railix.branch');
                   state.project.links.push({from: filter.id + '.otherwise', to: 'end'});
                   dirty(true);
                 }
@@ -2164,13 +2131,13 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void unknownOutcomeTargetIsShownAsUnknownInsteadOfDisappearing() {
-        addFilterAfterTrigger();
+        addBranchAfterTrigger();
         page.evaluate("() => void state.world.fit()");
         awaitScene();
 
         page.evaluate("""
                 () => {
-                  const filter = state.project.nodes.find(node => node.use === 'railix.filter');
+                  const filter = state.project.nodes.find(node => node.use === 'railix.branch');
                   state.project.links.find(link => link.from === filter.id + '.otherwise').to = 'missing-step';
                   dirty(true);
                 }
@@ -2186,8 +2153,8 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void distinctOutcomesMayTargetTheSameStep() {
-        addFilterAfterTrigger();
-        clickOverview("[data-add-outcome='match']");
+        addBranchAfterTrigger();
+        clickOverview("[data-add-outcome='" + selectedRoute() + "']");
         page.locator("#step-search").fill("field");
         page.locator("[data-add-step='railix.field-manipulation']").click();
         waitForText("#build-state", "Built");
@@ -2196,8 +2163,9 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
         final String filter = String.valueOf(page.evaluate("""
                 () => {
-                  const filter = state.project.nodes.find(node => node.use === 'railix.filter');
-                  const target = state.project.links.find(link => link.from === filter.id + '.match').to;
+                  const filter = state.project.nodes.find(node => node.use === 'railix.branch');
+                  const target = state.project.links.find(link =>
+                    link.from === filter.id + '.' + filter.inputs.routes[0].outcome).to;
                   state.project.links.find(link => link.from === filter.id + '.otherwise').to = target;
                   dirty(true);
                   return filter.id;
@@ -2216,7 +2184,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     void deletingAFlowRemovesEveryBranchNode() {
-        addStepToOtherwiseBranch();
+        addStepToRouteBranch();
 
         selectTrigger();
         clickOverview("#delete-step");
@@ -2321,15 +2289,15 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         waitForText("#build-state", "Built");
         assertThat(page.locator("#target-path").textContent()).contains("context", "command");
         page.locator("#target-path").click();
-        assertThat(page.locator("[data-reset-path]").isEnabled()).isTrue();
+        assertThat(page.locator(".path-actions [data-reset-input]").isEnabled()).isTrue();
 
-        page.locator("[data-reset-path]").click();
+        page.locator(".path-actions [data-reset-input]").click();
         waitForText("#build-state", "Built");
 
         assertThat(page.locator("#target-path").textContent())
                 .contains("context", "payload", "arguments");
         page.locator("#target-path").click();
-        assertThat(page.locator("[data-reset-path]").count()).isZero();
+        assertThat(page.locator(".path-actions [data-reset-input]").count()).isZero();
         page.locator("#cancel-path").click();
     }
 
@@ -2358,9 +2326,9 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         assertThat(page.locator("[data-input-name='target'] .path-button").textContent())
                 .contains("context", "payload", "first");
         page.locator("[data-input-name='target'] .path-button").click();
-        assertThat(page.locator("[data-reset-path]").isEnabled()).isTrue();
+        assertThat(page.locator(".path-actions [data-reset-input]").isEnabled()).isTrue();
 
-        page.locator("[data-reset-path]").click();
+        page.locator(".path-actions [data-reset-input]").click();
         waitForText("#build-state", "Built");
 
         assertThat(page.locator("[data-input-name='target'] .path-button").textContent())
@@ -2381,15 +2349,16 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         exampleContext().press("Tab");
         waitForText("#build-state", "Built");
 
-        assertThat(page.evaluate("""
+        final var storedExample=com.google.gson.JsonParser.parseString((String)page.evaluate("""
                 async () => JSON.stringify(
                   (await (await fetch('/api/project')).json()).project.nodes
                     .find(node => node.use === 'railix.trigger.cli').examples[0]
                 )
-                """)).isEqualTo(
+                """)).getAsJsonObject();
+        assertThat(storedExample.remove("id").getAsString()).startsWith("example-");
+        assertThat(storedExample).isEqualTo(com.google.gson.JsonParser.parseString(
                 "{\"context\":{\"header\":{\"request\":\"local\"}},\"name\":\"no-arguments\","
-                        + "\"payload\":[\"arg1\",\"arg2\",\"arg3\"]}"
-        );
+                        + "\"payload\":[\"arg1\",\"arg2\",\"arg3\"]}"));
     }
 
     @Test
@@ -2998,6 +2967,10 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         chooseCustomPathFor("target", "payload", "lower");
         waitForText("#build-state", "Built");
         page.locator("#visible-example").selectOption(new com.microsoft.playwright.options.SelectOption().setIndex(1));
+        final Locator retry=page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("Retry Example values").setExact(true));
+        page.waitForCondition(()->page.locator("#preview-source").isVisible() || retry.isVisible());
+        if(retry.isVisible())retry.click();
         page.locator("#preview-source").waitFor();
 
         page.locator("[data-input-name='source'] .path-button").click();
@@ -3043,7 +3016,7 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
     }
 
     @Test
-    void filterFieldPickerUsesTheUnionOfRealPayloadExamples() {
+    void routeFieldPickerUsesTheUnionOfRealPayloadExamples() {
         addTrigger();
         chooseCustomPathFor("target", "payload");
         waitForText("#build-state", "Built");
@@ -3056,12 +3029,10 @@ final class RailixCreatorAuthoringBrowserIT extends RailixCreatorBrowserSupport 
         waitForText("#build-state", "Built");
         openInspectorTab("inspect");
         clickOverview("#add-next-step");
-        page.locator("#step-search").fill("filter");
-        page.locator("[data-add-step='railix.filter']").click();
-        waitForText("#build-state", "Built");
-        openInspectorTab("inspect");
+        addBranchFromPicker();
+        addBranchRoute("field");
 
-        page.locator("#conditions-0-field-path").click();
+        page.locator("#routes-0-groups-0-0-field-path").click();
         page.locator("[data-path-depth='0']").click();
         page.locator("[data-path-part='payload']").click();
 
@@ -3519,7 +3490,7 @@ final class RailixCreatorCompositionBrowserIT extends RailixCreatorBrowserSuppor
         createGroup(steps.get(0));
 
         selectWorldNode(steps.get(1));
-        openInspectorTab("appearance");
+        openInspectorTab("groups");
         page.locator("#choose-group").click();
         page.locator("#group-picker-search").fill("group 1");
 
@@ -3527,7 +3498,7 @@ final class RailixCreatorCompositionBrowserIT extends RailixCreatorBrowserSuppor
                 .containsExactly("No group", "Group 1");
         assertThat(page.locator("[data-assign-group] small").allTextContents())
                 .containsExactly("Remove the visual assignment", "1 Step");
-        assertThat(page.locator("#new-group").count()).isZero();
+        assertThat(page.locator("#group-dialog #new-group").count()).isZero();
     }
 
     @Test
@@ -3537,7 +3508,7 @@ final class RailixCreatorCompositionBrowserIT extends RailixCreatorBrowserSuppor
         createGroup(step);
 
         selectWorldNode(step);
-        openInspectorTab("appearance");
+        openInspectorTab("groups");
         page.locator("#choose-group").click();
         clickAndWaitForCreatorSave(() -> page.locator("[data-assign-group='']").click());
 
@@ -3617,7 +3588,8 @@ final class RailixCreatorCompositionBrowserIT extends RailixCreatorBrowserSuppor
         page.locator("#world-location [data-inspect-region]").click();
         page.locator("[data-inspector-mode=groups]").click();
 
-        assertThat(page.locator(".manager-heading .eyebrow").textContent()).isEqualTo("Group");
+        assertThat(page.locator("#inspector-identity small").textContent()).startsWith("Group");
+        assertThat(page.locator(".manager-heading").count()).isZero();
         assertThat(page.locator("[data-manage-group='" + group + "']").getAttribute("class"))
                 .contains("active");
     }
@@ -4938,7 +4910,8 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
     }
 
     @Test
-    void triggerExamplesAreAnEditableList() {
+    @Tag("responsive")
+    void triggerExamplesAreAnEditableList() throws IOException {
         addTrigger();
 
         assertThat(examplePayload().inputValue()).isEqualTo("[]");
@@ -4947,6 +4920,9 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
 
         assertThat(page.locator("#visible-example option[data-status]").count()).isEqualTo(4);
         assertThat(page.locator("#example-name").inputValue()).isEqualTo("example-4");
+        waitForText("#build-state", "Built");
+        PlaywrightAssertions.assertThat(page.locator("#visible-example")).hasValue(java.util.regex.Pattern.compile("example-[a-z0-9-]+"));
+        final String stableId = page.locator("#visible-example").inputValue();
 
         page.locator("#example-name").fill("empty-input");
         page.locator("#example-name").press("Tab");
@@ -4958,8 +4934,13 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
         assertThat(page.locator("#example-name").inputValue()).isEqualTo("no-arguments");
 
         chooseExampleIndex(3);
+        PlaywrightAssertions.assertThat(page.locator("#visible-example")).hasValue(stableId);
         assertThat(page.locator("#example-name").inputValue()).isEqualTo("empty-input");
         assertThat(exampleContext().inputValue()).contains("\"payload\": {}");
+        PlaywrightAssertions.assertThat(page.locator("#visible-example option:checked")).hasAttribute("data-status", "succeeded");
+        page.locator("#example-name").scrollIntoViewIfNeeded();
+        page.screenshot(new Page.ScreenshotOptions().setPath(Files.createDirectories(Path.of("target", "screenshots"))
+                .resolve("example-document-" + page.viewportSize().width + ".png")));
     }
 
     @Test
@@ -5672,6 +5653,14 @@ abstract class RailixCreatorBrowserSupport {
                       traceCases: state.traceCases, traceReadError: state.traceReadError,
                       compatibility, computedOptions, compatibilityError,
                       diagnostics: state.diagnostics, stepQueries: state.stepQueries,
+                      audio: {
+                        hidden:document.hidden, status:document.querySelector('#audio-status')?.textContent,
+                        effects:{state:state.audio?.context?.state,time:state.audio?.context?.currentTime,
+                          frequency:state.audio?.effectSession?.voices[0]?.voice.frequency?.value},
+                        music:{state:state.audio?.musicContext?.state,time:state.audio?.musicContext?.currentTime,
+                          gain:state.audio?.musicGain?.gain.value,paused:state.audio?.musicPaused,
+                          end:state.audio?.musicSession?.end}
+                      },
                       focused: document.activeElement?.id, optionsHovered: options?.matches(':hover'),
                       optionsPending: state.optionsPending, query: state.world?.query,
                       observationQuery: state.observations?.query,
@@ -5721,6 +5710,8 @@ abstract class RailixCreatorBrowserSupport {
             capturePlaywrightProcesses();
             browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
                     .setChannel(System.getenv().getOrDefault("RAILIX_BROWSER_CHANNEL", "chrome"))
+                    // Render real Web Audio without depending on the host's physical output clock.
+                    .setArgs(List.of("--disable-audio-output"))
                     .setHeadless(true));
             capturePlaywrightProcesses();
             // A fixed creation time keeps the fixture's procedural scenery repeatable.
@@ -6238,21 +6229,18 @@ abstract class RailixCreatorBrowserSupport {
     String createGroup(final String... steps) {
         assertThat(steps).isNotEmpty();
         selectWorldNode(steps[0]);
-        openInspectorTab("appearance");
-        page.locator("[data-inspector-mode=groups]").click();
+        openInspectorTab("groups");
         page.locator("#group-library > summary").click();
         clickAndWaitForCreatorSave(() -> page.locator("#new-group").click());
         final String group = String.valueOf(page.evaluate("""
                 async () => (await (await fetch('/api/project')).json()).creator.groups.at(-1).id
                 """));
-        page.locator("[data-inspector-mode=inspect]").click();
-        openInspectorTab("appearance");
         page.locator("#choose-group").click();
         clickAndWaitForCreatorSave(() -> page.locator("[data-assign-group='" + group + "']").click());
         for (int index = 1; index < steps.length; index++) {
             final String step = steps[index];
             selectWorldNode(step);
-            openInspectorTab("appearance");
+            openInspectorTab("groups");
             page.locator("#choose-group").click();
             clickAndWaitForCreatorSave(() -> page.locator("[data-assign-group='" + group + "']").click());
         }
@@ -6265,6 +6253,7 @@ abstract class RailixCreatorBrowserSupport {
         final Locator library = page.locator("#group-library");
         if (library.getAttribute("open") == null) library.locator(":scope > summary").click();
         page.locator("[data-manage-group='" + group + "']").click();
+        if (page.viewportSize().width <= 650) page.locator("#close-inspector").click();
         page.locator("#scope-overview").click();
         awaitScene();
         return group;
@@ -6380,18 +6369,7 @@ abstract class RailixCreatorBrowserSupport {
     }
 
     static String filterProject() {
-        return branchProject("filter-browser", "filter", "railix.filter", """
-                [{
-                  "option":"field","inputs":{"field":["context","payload","value"]},
-                  "when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"allow"}}
-                  ]]}
-                }]
-                """);
-    }
-
-    static String choiceProject() {
-        return branchProject("choice-browser", "choice", "railix.choice", """
+        return branchProject("filter-browser", "filter", """
                 [[{
                   "option":"field","inputs":{"field":["context","payload","value"]},
                   "when":{"transforms":[],"all":[[
@@ -6401,12 +6379,19 @@ abstract class RailixCreatorBrowserSupport {
                 """);
     }
 
-    static String branchProject(
-            final String projectId,
-            final String branchId,
-            final String branchStep,
-            final String conditions
-    ) {
+    static String choiceProject() {
+        return branchProject("choice-browser", "choice", """
+                [[{
+                  "option":"field","inputs":{"field":["context","payload","value"]},
+                  "when":{"transforms":[],"all":[[
+                    {"use":"value.equals","inputs":{"expected":"allow"}}
+                  ]]}
+                }]]
+                """);
+    }
+
+    /** One railix.branch with a single {@code match} route whose OR-of-AND groups are supplied. */
+    static String branchProject(final String projectId, final String branchId, final String groups) {
         return """
                 {"format":1,"id":"%s","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
@@ -6414,7 +6399,7 @@ abstract class RailixCreatorBrowserSupport {
                     {"name":"match","payload":[],"context":{"payload":{"value":"allow"}}},
                     {"name":"otherwise","payload":[],"context":{"payload":{"value":"deny"}}}
                   ]},
-                  {"id":"%s","use":"%s","inputs":{"conditions":%s}},
+                  {"id":"%s","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":%s}]}},
                   {"id":"matched","use":"railix.field-manipulation","inputs":{
                     "field":["context","result"],
                     "value":[{"option":"literal","inputs":{"literal":"matched"}}],"steps":[]}},
@@ -6432,8 +6417,7 @@ abstract class RailixCreatorBrowserSupport {
                 """.formatted(
                         projectId,
                         branchId,
-                        branchStep,
-                        conditions,
+                        groups,
                         branchId,
                         branchId,
                         branchId
@@ -6446,7 +6430,7 @@ abstract class RailixCreatorBrowserSupport {
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"example","payload":[],"context":{"payload":{}}}]},
-                  {"id":"filter","use":"railix.filter","inputs":{"conditions":[]}}
+                  {"id":"filter","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}}
                 """);
         final StringBuilder links = new StringBuilder("""
                 ],"links":[
@@ -6502,18 +6486,13 @@ abstract class RailixCreatorBrowserSupport {
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{
                     "name":"example","payload":[],"context":{"payload":{"value":"allow"}}
                   }]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[[{
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[{
                     "option":"field","inputs":{"field":["context","payload","value"]},
                     "when":{"transforms":[],"all":[[{
                       "use":"value.equals","inputs":{"expected":"allow"}
                     }]]}
-                  }]]}},
-                  {"id":"switch","use":"railix.switch","inputs":{"cases":[
-                    {"outcome":"one","option":"literal","inputs":{"value":1},"when":{"transforms":[],"all":[]}},
-                    {"outcome":"two","option":"literal","inputs":{"value":2},"when":{"transforms":[],"all":[]}},
-                    {"outcome":"three","option":"literal","inputs":{"value":3},"when":{"transforms":[],"all":[]}},
-                    {"outcome":"four","option":"literal","inputs":{"value":4},"when":{"transforms":[],"all":[]}}
-                  ]}}
+                  }]]}]}},
+                  {"id":"switch","use":"railix.branch","inputs":{"routes":[{"outcome":"one","inputs":{},"groups":[[{"option":"literal","inputs":{"value":1},"when":{"transforms":[],"all":[]}}]]},{"outcome":"two","inputs":{},"groups":[[{"option":"literal","inputs":{"value":2},"when":{"transforms":[],"all":[]}}]]},{"outcome":"three","inputs":{},"groups":[[{"option":"literal","inputs":{"value":3},"when":{"transforms":[],"all":[]}}]]},{"outcome":"four","inputs":{},"groups":[[{"option":"literal","inputs":{"value":4},"when":{"transforms":[],"all":[]}}]]}]}}
                 ],"links":[
                   {"from":"app.start","to":"command"},
                   {"from":"command.next","to":"choice"},
@@ -6549,34 +6528,49 @@ abstract class RailixCreatorBrowserSupport {
         openInspectorTab("inspect");
     }
 
-    void addFilterAfterTrigger() {
+    /** Adds a Branch after a new Trigger with one route whose first OR group reads the default field. */
+    void addBranchAfterTrigger() {
+        addEmptyBranchAfterTrigger();
+        addBranchRoute("field");
+    }
+
+    /** Adds a Branch with one route and no condition group yet. */
+    void addRouteAfterTrigger() {
+        addEmptyBranchAfterTrigger();
+        addBranchRoute();
+    }
+
+    void addEmptyBranchAfterTrigger() {
         addTrigger();
         openInspectorTab("inspect");
         clickOverview("#add-next-step");
-        page.locator("#step-search").fill("filter");
-        page.locator("[data-add-step='railix.filter']").click();
+        addBranchFromPicker();
+    }
+
+    void addBranchFromPicker() {
+        page.locator("#step-search").fill("branch");
+        page.locator("[data-add-step='railix.branch']").click();
         waitForText("#build-state", "Built");
         openInspectorTab("inspect");
     }
 
-    void addChoiceAfterTrigger() {
-        addTrigger();
-        openInspectorTab("inspect");
-        clickOverview("#add-next-step");
-        page.locator("#step-search").fill("choice");
-        page.locator("[data-add-step='railix.choice']").click();
+    void addBranchRoute() {
+        page.locator("[data-add-route]").click();
         waitForText("#build-state", "Built");
-        openInspectorTab("inspect");
     }
 
-    void addSwitchAfterTrigger() {
-        addTrigger();
-        openInspectorTab("inspect");
-        clickOverview("#add-next-step");
-        page.locator("#step-search").fill("switch");
-        page.locator("[data-add-step='railix.switch']").click();
+    /** Adds a route, then its first OR group from the named matcher source. */
+    void addBranchRoute(final String source) {
+        addBranchRoute();
+        page.locator(".route").last().locator(".matcher-group-add > summary").click();
+        page.locator(".route").last().locator("[data-add-matcher-group='" + source + "']").click();
         waitForText("#build-state", "Built");
-        openInspectorTab("inspect");
+    }
+
+    /** Returns the first authored route of the selected Branch. */
+    String selectedRoute() {
+        return String.valueOf(page.evaluate(
+                "() => state.project.nodes.find(node => node.id === state.selection.id).inputs.routes[0].outcome"));
     }
 
     void prepareSizeChoiceMatcher() {
@@ -6584,7 +6578,7 @@ abstract class RailixCreatorBrowserSupport {
     }
 
     void prepareSizeChoiceMatcher(final int size) {
-        openProject(branchProject("choice-size", "choice", "railix.choice", """
+        openProject(branchProject("choice-size", "choice", """
                 [[{
                   "option":"literal","inputs":{"value":%s},
                   "when":{"transforms":[],"all":[]}
@@ -6616,17 +6610,17 @@ abstract class RailixCreatorBrowserSupport {
         return size == 0 ? "[]" : "[" + "0,".repeat(size - 1) + "0]";
     }
 
-    void addNestedFilterToMatchRoute() {
-        addFilterAfterTrigger();
-        clickOverview("[data-add-outcome='match']");
-        page.locator("#step-search").fill("filter");
-        page.locator("[data-add-step='railix.filter']").click();
-        waitForText("#build-state", "Built");
+    void addNestedBranchToFirstRoute() {
+        addBranchAfterTrigger();
+        clickOverview("[data-add-outcome='" + selectedRoute() + "']");
+        addBranchFromPicker();
+        addBranchRoute("field");
     }
 
-    void addStepToOtherwiseBranch() {
-        addFilterAfterTrigger();
-        clickOverview("[data-add-outcome='otherwise']");
+    /** Populates the authored route, which is not the Branch's primary {@code otherwise} outcome. */
+    void addStepToRouteBranch() {
+        addBranchAfterTrigger();
+        clickOverview("[data-add-outcome='" + selectedRoute() + "']");
         page.locator("#step-search").fill("field");
         page.locator("[data-add-step='railix.field-manipulation']").click();
         waitForText("#build-state", "Built");
@@ -6640,7 +6634,7 @@ abstract class RailixCreatorBrowserSupport {
                   headers: mutationHeaders(),
                   body: source
                 }).then(async response => response.status + ' ' + await response.text())
-                """, source);
+                """, ProjectFiles.identify(source, true));
         assertThat(response).startsWith("200 ");
         page.reload();
         page.waitForFunction("""
@@ -6836,6 +6830,10 @@ abstract class RailixCreatorBrowserSupport {
         }
         if (!page.locator("#inspector").isVisible()) page.locator("#graph").press("e");
         page.locator("[data-inspector-mode='" + mode + "']").click();
+        page.waitForFunction("""
+                mode => document.querySelector(`[data-inspector-mode="${mode}"]`)?.getAttribute('aria-selected') === 'true'
+                  && !document.querySelector('#inspector-content .panel-loading')
+                """, mode);
     }
 
     void chooseExampleIndex(final int index) {
@@ -6843,7 +6841,9 @@ abstract class RailixCreatorBrowserSupport {
             page.locator("#visible-example").selectOption("");
         } else {
             final String trigger = page.locator("#edit-example").getAttribute("data-edit-trigger");
-            chooseVisibleExample(trigger + ":" + index);
+            final Locator option = page.locator("#visible-example option[data-trigger='" + trigger + "'][data-index='" + index + "']");
+            PlaywrightAssertions.assertThat(option).hasCount(1);
+            chooseVisibleExample(option.getAttribute("value"));
         }
     }
 

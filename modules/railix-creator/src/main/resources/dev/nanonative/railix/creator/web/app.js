@@ -11,10 +11,29 @@ window.fetch = (input, options = {}) => {
   const headers = new Headers(input instanceof Request ? input.headers : options.headers);
   new Headers(options.headers).forEach((value, name) => headers.set(name, value));
   headers.set("X-Railix-Creator-Token", creatorToken);
-  return browserFetch(input, { ...options, headers });
+  const versioned = /^\/api\/(editor|scene|application|metrics|catalog)(\/|$)/.test(url.pathname)
+    && (options.method || (input instanceof Request ? input.method : 'GET')) === 'GET';
+  const epoch = state.workspaceEpoch;
+  if (versioned && state.liveView) {
+    url.pathname = url.pathname.replace('/api/', '/api/live/');
+    input = input instanceof Request ? new Request(url,input) : url.href;
+  }
+  if(state.liveConnection?.instance) headers.set('X-Railix-Live-Instance',state.liveConnection.instance);
+  return browserFetch(input, { ...options, headers }).then(response => {
+    if (versioned && epoch !== state.workspaceEpoch) throw new DOMException('Workspace changed','AbortError');
+    return response;
+  });
 };
 
 const state = {
+  liveView: false,
+  liveConnection: null,
+  liveChanges: {},
+  workspaceEpoch: 0,
+  switchingWorkspace: false,
+  liveController: null,
+  liveCandidate: '',
+  restoreCommand: null,
   project: null,
   builtProject: null,
   savedCreator: null,
@@ -179,6 +198,8 @@ async function boot() {
     state.creatorVersion = project.creator_revision;
     state.application = project.application;
     state.workspace = project.workspace;
+    state.liveConnection = project.live_application || null;
+    state.liveChanges = project.comparison_instance===state.liveConnection?.instance ? project.changes || {} : {};
     state.diagnostics = project.diagnostics || [];
     state.catalog = catalog.steps;
     state.definitions = new Map(state.catalog.map(definition => [definition.id, definition]));
@@ -187,10 +208,11 @@ async function boot() {
     state.world = new RailixWorld(document.querySelector("#graph"), {
       selectNode: selectWorldNode,
       editingBusy: () => state.actionPending,
-      outputPorts: item => state.editor.full.includes(item.id) ? displayOutcomes(node(item.id)).map(outcome =>
+      outputPorts: item => !state.liveView && state.editor.full.includes(item.id) ? displayOutcomes(node(item.id)).map(outcome =>
         ({id:item.id+'.'+outcome,name:outcomeLabel(node(item.id),outcome)})) : [],
       connect: (from,to) => { void editorAction({kind:'connect',from,to}).then(result => { if (!result) state.world.connection(null); }); },
       insert: openBeltPicker,
+      onConnection: syncInspectorLayout,
       deselect: clearSelection,
       selectGroup: selectWorldGroup,
       appearance: worldAppearance,
@@ -260,6 +282,11 @@ function render() {
     return;
   }
   document.title = `${state.project.id} - Railix Creator`;
+  document.body.dataset.workspaceSource = state.liveView ? 'live' : 'draft';
+  document.querySelector('#workspace-source').hidden = !state.liveConnection && state.application.state !== 'ready';
+  for(const button of document.querySelectorAll('button[data-workspace-source],#show-live-changes'))button.hidden=!state.liveConnection;
+  for (const button of document.querySelectorAll('button[data-workspace-source]')) button.setAttribute('aria-pressed',String((button.dataset.workspaceSource === 'live') === state.liveView));
+  document.querySelector('#show-live-changes').textContent = count(Object.keys(state.liveChanges).length,'change');
   renderBuildStatus();
   renderWorldNavigation();
   renderExampleContext();
@@ -275,7 +302,8 @@ function render() {
   const builtAt = Number(state.application.built_at || 0);
   document.querySelector("#last-build").textContent = builtAt
     ? new Date(builtAt).toLocaleString()
-    : "Not built";
+    : state.liveView ? '' : "Not built";
+  document.querySelector('#last-build').closest('div').hidden=state.liveView && !builtAt;
   state.worldNodes = new Map(state.project.nodes.map(operation => [operation.id, operation]));
   state.worldGroups = new Map(state.creator.groups.map(group => [group.id, group]));
   updateWorldMarks(state.world?.scene);
@@ -290,6 +318,7 @@ function render() {
     ? document.activeElement : null;
   const draft = active?.id ? {id:active.id, value:active.value, start:active.selectionStart,
     end:active.selectionEnd, direction:active.selectionDirection, scroll:active.scrollTop} : null;
+  const focusedTab = document.activeElement.closest('#inspector-nav [data-inspector-mode]')?.dataset.inspectorMode;
   state.iconController?.abort();
   content.innerHTML = inspector();
   if (content.dataset.context !== context) content.scrollTop = 0;
@@ -298,6 +327,7 @@ function render() {
   const tabs = document.querySelector('#inspector-nav');
   if (navigation && tabs.firstElementChild?.outerHTML === navigation.outerHTML) navigation.remove();
   else tabs.replaceChildren(...(navigation ? [navigation] : []));
+  if (focusedTab) document.querySelector(`#inspector-tab-${focusedTab}`)?.focus({preventScroll:true});
   inspectorElement.dataset.selection = state.regionSelection?.id || state.selection.id;
   renderPreview();
   openDetails.forEach(id => {
@@ -324,6 +354,138 @@ function render() {
     else void state.world.refresh();
   }
   renderWorldStatus();
+  syncInspectorLayout();
+}
+
+async function showLiveConnections() {
+  const dialog=document.querySelector('#live-connections'), host=document.querySelector('#live-content'), message=document.querySelector('#live-message');
+  document.querySelector('#project-actions').hidePopover();
+  document.querySelector('#live-title').textContent='Live applications';
+  document.querySelector('#live-source-selection').hidden=true;
+  state.liveController?.abort();
+  const controller=state.liveController=new AbortController();
+  host.replaceChildren();message.textContent='Looking for local applications';dialog.showModal();
+  try {
+    const response=await fetch('/api/live',{signal:controller.signal});
+    const value=parseExact(await response.text());
+    if (!response.ok) throw Error(value.message || 'Applications could not be read.');
+    host.innerHTML=value.applications.map(app=>`<button type="button" data-live-instance="${html(app.instance)}"><strong>Application ${html(numberText(app.pid))}</strong><small>${html(app.artifact)}</small></button>`).join('');
+    message.textContent=value.applications.length ? '' : 'No running applications for this user.';
+  } catch(error) { if(!controller.signal.aborted) message.textContent=error.message; }
+}
+
+function reportWorkspaceFailure(message) {
+  const dialog=document.querySelector('#live-connections');
+  if(!dialog.open) {
+    document.querySelector('#live-title').textContent='Live application';
+    document.querySelector('#live-content').replaceChildren();
+    document.querySelector('#live-source-selection').hidden=true;
+    dialog.showModal();
+  }
+  document.querySelector('#live-message').textContent=message;
+}
+
+async function switchWorkspace(liveView,connection=state.liveConnection) {
+  if (state.switchingWorkspace || state.actionPending || state.writeActive || state.pendingProject || state.saveFailure) {
+    reportWorkspaceFailure('Finish or discard the local edit before changing versions.');return false;
+  }
+  const before=state.liveView, previousConnection=state.liveConnection;
+  let confirmed = false, confirming = false;
+  state.switchingWorkspace=true;state.actionPending=true;state.liveView=liveView;state.liveConnection=connection;state.workspaceEpoch++;
+  for(const name of ['applicationController','metricsController','observationController','groupMeanController','traceController','editorController']) state[name]?.abort();
+  clearTimeout(state.applicationPollTimer);clearTimeout(state.metricsPollTimer);clearTimeout(state.observationTimer);clearTimeout(state.groupMeanTimer);
+  state.editorRequest++;
+  try {
+    if (liveView) {
+      confirming=true;
+      const response=await fetch('/api/live',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({instance:connection.instance,confirm:true})});
+      const value=parseExact(await response.text());
+      if(!response.ok){confirming=false;throw Error(value.message || 'Connection could not be confirmed.');}
+      confirmed=true;confirming=false;
+    }
+    let payload,catalog,failure;
+    for(const view of liveView ? [true,false] : [false]) {
+      state.liveView=view;state.workspaceEpoch++;
+      try {
+        const [response,catalogResponse]=await Promise.all([fetch('/api/editor'),fetch('/api/catalog')]);
+        const next=parseExact(await response.text()), definitions=parseExact(await catalogResponse.text());
+        if(!response.ok || !catalogResponse.ok) throw Error(next.message || definitions.message || 'This version could not be opened.');
+        payload=next;catalog=definitions;break;
+      } catch(error) {
+        if(!view)throw error;
+        failure=error;
+      }
+    }
+    state.project=payload.project;state.builtProject=clone(payload.project);state.editor=payload.editor;state.history=payload.history;
+    state.creator=payload.creator;state.savedCreator=clone(payload.creator);state.projectVersion=payload.revision;state.creatorVersion=payload.creator_revision;
+    state.catalog=catalog.steps;state.definitions=new Map(catalog.steps.map(definition=>[definition.id,definition]));
+    state.workspace=payload.workspace;state.diagnostics=payload.diagnostics || [];state.localDiagnostics=[];state.liveChanges=payload.comparison_instance===state.liveConnection?.instance ? payload.changes || {} : {};
+    state.selection={type:'app',id:'app'};state.regionSelection=null;state.picker=state.pathPicker=state.groupPicker=null;state.groupDraft=null;
+    state.managedGroup='';state.selectedSteps.clear();state.inspectorMode='overview';state.evidenceView=null;
+    clearPreview();replaceApplication(payload.application);resetMetrics(true);state.observations=null;state.groupMeans.clear();
+    state.exampleFailures=[];state.worldIssues.clear();state.worldMarkedRegions.clear();state.build='Built';
+    state.world.resetScene();render();await state.world.refresh();showInspector(false);
+    if(failure) {reportWorkspaceFailure(failure.message);return false;}
+    document.querySelector('#live-connections').close();
+    return true;
+  } catch(error) {
+    reportWorkspaceFailure(error.message);
+    // After confirmation only the new instance may supply live values.
+    if(confirmed || confirming) {window.location.reload();return false;}
+    state.liveView=before;state.liveConnection=previousConnection;state.workspaceEpoch++;render();return false;
+  }
+  finally {state.switchingWorkspace=false;state.actionPending=false;renderBuildStatus();scheduleApplicationPoll(0);scheduleMetricsPoll(0);scheduleWorldObservations(0);}
+}
+
+async function startLocal() {
+  if(state.liveView || state.actionPending || state.writeActive || state.pendingProject || state.saveFailure)return;
+  state.actionPending=true;renderBuildStatus();
+  try {
+    const response=await fetch('/api/application',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'start',revision:state.projectVersion,creator_revision:state.creatorVersion})});
+    const value=parseExact(await response.text());
+    if(value.application)replaceApplication(value.application);
+    if(!response.ok)throw Error(value.message || 'Local application could not start.');
+    resetMetrics(true);render();
+  } catch(error) {reportWorkspaceFailure(error.message);}
+  finally {state.actionPending=false;renderBuildStatus();scheduleApplicationPoll(0);scheduleWorldObservations(0);}
+}
+
+async function connectLive(instance,project='') {
+  if(state.actionPending || state.writeActive || state.pendingProject || state.saveFailure) {
+    document.querySelector('#live-message').textContent='Finish or discard the local edit before connecting.';return;
+  }
+  state.liveCandidate=instance;
+  state.liveController?.abort();
+  const controller=state.liveController=new AbortController();
+  const message=document.querySelector('#live-message');
+  const buttons=[...document.querySelectorAll('#live-content button')];
+  buttons.forEach(button=>button.disabled=true);message.textContent='Connecting';
+  try {
+    const response=await fetch('/api/live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance,...(project?{project}:{})}),signal:controller.signal});
+    const value=parseExact(await response.text());
+    if(!response.ok) throw Error(value.message || 'Connection failed.');
+    if(controller.signal.aborted || !document.querySelector('#live-connections').open)return;
+    await switchWorkspace(true,value.application);
+  } catch(error) {if(!controller.signal.aborted){message.textContent=error.message;document.querySelector('#live-source-selection').hidden=!/PROJECT_SOURCE_(REQUIRED|MISMATCH)/.test(error.message);}}
+  finally {buttons.forEach(button=>button.disabled=false);}
+}
+
+async function showLiveChanges() {
+  const dialog=document.querySelector('#live-connections');
+  document.querySelector('#live-title').textContent='Live / Draft';
+  document.querySelector('#live-source-selection').hidden=true;
+  document.querySelector('#live-message').textContent='';
+  try {
+    const response=await fetch('/api/live/changes');
+    const value=parseExact(await response.text());
+    if(!response.ok) throw Error(value.message || 'Comparison unavailable.');
+    state.liveChanges=value;
+    document.querySelector('#live-content').innerHTML=Object.entries(state.liveChanges).map(([id,change])=>`<button type="button" data-live-change="${html(id)}"><span class="change-kind" data-kind="${html(change.state)}">${{added:'+',removed:'-',changed:'~'}[change.state]}</span><strong>${html(id)}</strong><small>${html(inputLabel(change.state))}</small></button>`).join('');
+    if(!Object.keys(state.liveChanges).length) document.querySelector('#live-message').textContent='Same functional version';
+    dialog.showModal();
+  } catch(error) {document.querySelector('#world-error').textContent=error.message;document.querySelector('#world-error').hidden=false;}
 }
 
 function updateWorldMarks(scene) {
@@ -353,6 +515,14 @@ function renderDock() {
   const operation = selectedOperation();
   const region = state.regionSelection;
   const dock = document.querySelector("#selection-overview");
+  if (state.liveView) {
+    const name = region?.name || stepPresentation(operation?.id).name || (operation && stepName(definitionFor(operation))) || state.project.id;
+    renderDockMarkup(document.querySelector('#inspector-identity'), `<div><small>Live / Read-only</small><h2>${html(name)}</h2></div>`);
+    renderDockMarkup(document.querySelector('#inspector-navigation'), '<button type="button" id="dock-focus" aria-label="Focus"><i class="hud-symbol" data-symbol="locate" aria-hidden="true"></i></button>');
+    document.querySelector('#inspector-footer').hidden = true;
+    document.querySelector('#inspector-connections').hidden = true;
+    return;
+  }
   if (!operation && !region) {
     return;
   }
@@ -375,8 +545,8 @@ function renderDock() {
     ? region.group ? `data-delete-region="${html(region.group)}"` : ''
     : `id="delete-step" ${trigger || removableStep(operation) ? '' : 'disabled'}`;
   const footer = document.querySelector('#inspector-footer');
-  renderDockMarkup(footer, deletion ? `<button type="button" ${deletion} class="danger" title="Delete ${html(name)}" aria-label="Delete ${html(name)}"><i class="hud-symbol" data-symbol="trash" aria-hidden="true"></i><span>Delete</span></button>` : '');
-  footer.hidden = !deletion;
+  renderDockMarkup(document.querySelector('#inspector-deletion'), deletion ? `<button type="button" ${deletion} class="danger" title="Delete ${html(name)}" aria-label="Delete ${html(name)}"><i class="hud-symbol" data-symbol="trash" aria-hidden="true"></i><span>Delete</span></button>` : '');
+  footer.hidden = !deletion && !phoneInspector.matches;
   const type = region ? 'Group' : app ? 'Application' : trigger ? 'Trigger'
     : definition.outcomes?.length > 1 ? stepName(definition) : 'Step';
   const identity = document.querySelector('#inspector-identity');
@@ -415,6 +585,7 @@ function exampleStatus(example) {
 
 function renderExampleContext() {
   const host = document.querySelector('#example-session');
+  if (state.liveView) { host.hidden=true; return; }
   const id = selectedExampleId(), example = selectedTraceCase();
   renderTimeScale();
   const scope = exampleScopeId();
@@ -423,8 +594,8 @@ function renderExampleContext() {
   const ready = Boolean(author) || !scope || scoped?.id === scope && scoped.key === exampleScopeKey(scope) && !scoped.error;
   const recorded = [...state.exampleIds.values()].flatMap(choices => [...choices.values()]);
   const inventory = author ? (author.examples || []).map((example,index)=>({...example,
-    ...recorded.find(candidate=>candidate.trigger===author.id && Number(candidate.index)===index),
-    name:example.name,id:author.id+':'+index,trigger:author.id,index})) : recorded;
+    ...recorded.find(candidate=>candidate.id===example.id),
+    name:example.name,id:example.id,trigger:author.id,index})) : recorded;
   const current = inventory.find(candidate => candidate.id === id);
   const cases = inventory
     .filter(candidate => author || !scope || ready && scoped.ids.has(candidate.id));
@@ -445,7 +616,7 @@ function renderExampleContext() {
     ${readError ? '<button type="button" data-retry-example aria-label="Retry Example values" title="Retry Example values">Retry</button>' : ''}
     ${failure ? `<button type="button" data-evidence-step="${html(failure.node)}" class="example-failure" aria-label="Show failing Step" title="${html(failure.message)}"><strong aria-hidden="true">!</strong></button>` : ''}
     ${id ? `<button type="button" data-locate-trigger="${html(state.exampleTrigger)}" aria-label="Locate Example trigger" title="Locate Example trigger"><i class="hud-symbol" data-symbol="locate" aria-hidden="true"></i></button>
-    <button type="button" data-clear-example aria-label="Clear Example" title="Clear Example"><i class="hud-symbol" data-symbol="close" aria-hidden="true"></i></button>` : ''}`);
+    <button type="button" data-clear-example aria-label="Clear Example" title="Clear Example"><i class="hud-symbol" data-symbol="close" aria-hidden="true"></i><span class="example-clear-label">Clear</span></button>` : ''}`);
   const output = host.querySelector('.example-context-state');
   output.title = readError;
   output.dataset.status = example?.status || '';
@@ -473,7 +644,7 @@ function exampleScopeKey(id) {
 
 async function refreshExampleScope(application, signal, examples) {
   const id = exampleScopeId(), key = exampleScopeKey(id);
-  if (!id || examples.state !== 'completed' || state.exampleScope?.key === key) return;
+  if (!id || examples.state !== 'completed' || state.exampleScope?.key === key && !state.exampleScope.retry) return;
   let response;
   try {
     response = await fetch(`/api/scene/observations?${new URLSearchParams({revision:state.world.scene.revision,cases:id})}`, {signal});
@@ -481,7 +652,10 @@ async function refreshExampleScope(application, signal, examples) {
     if (signal.aborted) throw error;
   }
   if (!response?.ok) {
-    if (key === exampleScopeKey(exampleScopeId())) { state.exampleScope={id,key,error:true}; renderExampleContext(); }
+    if (key === exampleScopeKey(exampleScopeId())) {
+      state.exampleScope={id,key,error:true,retry:!response || [202,409,502,503,504].includes(response.status)};
+      renderExampleContext();
+    }
     return;
   }
   const result = parseExact(await response.text());
@@ -537,6 +711,15 @@ function renderDockMarkup(element, source) {
 }
 
 function renderDockObservation() {
+  if(state.liveView) {
+    const tree=document.querySelector('#selection-evidence .context-children');
+    if(tree && state.evidenceView?.delta)renderDockMarkup(tree,contextRows(state.evidenceView.delta));
+    const metric=document.querySelector('.live-step-metrics');
+    if(metric)renderDockMarkup(metric,state.regionSelection
+      ? metricFacts('Live group metrics',metricRows(currentWorldObservations()?.nodes.get(state.regionSelection.id)?.metrics))
+      : metricsPanel());
+    return;
+  }
   refreshInspectorTabs();
   if (state.groupDraft) return;
   const slot = document.querySelector("#dock-observation");
@@ -568,9 +751,10 @@ function renderDockObservation() {
   } else if (example && !region && state.selection.type !== "app" && definitionFor(operation)?.kind !== 'trigger') {
     const observed = observedExampleContext(operation);
     const failed = failedRunStates.has(state.traceStep?.status);
-    const outcome=state.traceStep?.id===operation.id ? state.traceStep.outcome : '';
-    const route=!observed.status && !failed && outcome && displayOutcomes(operation).length>1
-      ? `<nav class="observed-route" aria-label="Observed route" data-observed-outcome="${html(outcome)}"><strong>${html(outcomeLabel(operation,outcome))}</strong>${stepDestination(outcomeConnection(operation,outcome))}</nav>` : '';
+    const outcomes=state.traceStep?.id===operation.id
+      ? state.traceStep.outcomes || (state.traceStep.outcome ? [state.traceStep.outcome] : []) : [];
+    const route=!observed.status && !failed && displayOutcomes(operation).length>1
+      ? outcomes.map(outcome => `<nav class="observed-route" aria-label="Observed route" data-observed-outcome="${html(outcome)}"><strong>${html(outcomeLabel(operation,outcome))}</strong>${stepDestination(outcomeConnection(operation,outcome))}</nav>`).join('') : '';
     values = selectionEvidence(example, observed.status ? null : failed ? {before:observed.root.context} : state.traceChanges,
       observed.status ? observed : {kind:failed ? 'failed' : 'succeeded',status:failed ? 'Stopped here' : 'Observed changes'}, failed
         ? `<div class="evidence-failure">${nodeIssues(operation.id).length ? issueList(operation.id,false)
@@ -616,7 +800,7 @@ function renderDockObservation() {
   }
 }
 
-function contextChanges(before, after) {
+function contextChanges(before, after, ownChanges) {
   const changed = new Map(), branches = new Set(), pending = [{path: [], before, after}];
   while (pending.length) {
     const item = pending.pop(), a = item.before, b = item.after;
@@ -636,7 +820,18 @@ function contextChanges(before, after) {
     changed.set(JSON.stringify(item.path), a === undefined ? 'Added' : b === undefined ? 'Removed' : 'Changed');
     for (let length = 0; length < item.path.length; length++) branches.add(JSON.stringify(item.path.slice(0, length)));
   }
-  return {before, after, changed, branches, count:changed.size};
+  const own = new Map();
+  if (Array.isArray(ownChanges)) {
+    changed.clear();
+    branches.clear();
+    for (const change of ownChanges) {
+      const token = JSON.stringify(change.path);
+      own.set(token, change);
+      changed.set(token, !Object.hasOwn(change,'before') ? 'Added' : !Object.hasOwn(change,'after') ? 'Removed' : 'Changed');
+      for (let length=0; length<change.path.length; length++) branches.add(JSON.stringify(change.path.slice(0,length)));
+    }
+  }
+  return {before, after, changed, branches, own, count:changed.size};
 }
 
 function contextValue(value, path, budget, side = 'after') {
@@ -670,7 +865,8 @@ function contextRows(delta, path = [],
   while (index < keys.length && index < limit && budget.left > 0) {
     budget.left--;
     const key = keys[index++], locator = [...path,key], token = JSON.stringify(locator);
-    const before = valueAt(a,[key]), after = valueAt(b,[key]), value = after === undefined ? before : after;
+    const commit = !snapshot && delta.own?.get(token);
+    const before = commit ? commit.before : valueAt(a,[key]), after = commit ? commit.after : valueAt(b,[key]), value = after === undefined ? before : after;
     const kind = snapshot ? '' : delta.changed.get(token) || (inherited
       ? before === undefined ? 'Added' : after === undefined ? 'Removed' : 'Changed' : '');
     const changed = Boolean(kind || !snapshot && delta.branches.has(token));
@@ -732,10 +928,14 @@ function focusRegion(regionId) {
 }
 
 function renderBuildStatus() {
+  const start=document.querySelector('#start-local');
+  start.hidden=state.liveView || !(state.application.state==='ready'
+    || state.liveConnection && state.application.state==='stopped');
+  start.disabled=state.actionPending || state.writeActive || Boolean(state.pendingProject || state.saveFailure);
   document.querySelector("#build-state").textContent = state.build === "Built"
     ? inputLabel(state.application.state || "running") : state.build;
   document.body.dataset.build = state.build.toLowerCase().replace(" ", "-");
-  for (const kind of ['undo','redo']) document.querySelector(`#editor-${kind}`).disabled = state.actionPending || state.writeActive || Boolean(state.saveFailure?.reload) || !state.history?.[kind];
+  for (const kind of ['undo','redo']) document.querySelector(`#editor-${kind}`).disabled = state.liveView || state.actionPending || state.writeActive || Boolean(state.saveFailure?.reload) || !state.history?.[kind];
   for (const selector of ['#inspector','#overlay','.world-ports']) {
     const element=document.querySelector(selector);
     if(element) element.inert=state.actionPending && !(selector==='#inspector' && state.projectImport.reload
@@ -743,9 +943,10 @@ function renderBuildStatus() {
   }
   document.querySelector('#project-menu').disabled=!state.project || state.actionPending && !state.projectImport.reload;
   document.querySelector('#open-settings').disabled=state.actionPending;
+  document.querySelector('#open-project-import').disabled=state.liveView;
   const selecting = Boolean(state.editorController && !state.editorController.signal.aborted
     && state.editorController.node && state.editorController.node !== (state.regionSelection ? 'app' : state.selection.id));
-  document.querySelector('#inspector').setAttribute('aria-busy',String(selecting));
+  document.querySelector('#inspector').setAttribute('aria-busy',String(selecting || state.inspectorMode === 'groups' && Boolean(state.editorController)));
   for (const selector of ['#inspector-content','#inspector-nav','#inspector-navigation','#inspector-connections','#inspector-footer']) {
     document.querySelector(selector).inert = selecting;
   }
@@ -758,13 +959,15 @@ function renderWorldNavigation() {
   host.hidden = false;
   document.querySelector('#leave-group').hidden = !locations.length;
   const path = [{name:state.project?.id || 'Application'}, ...locations];
-  renderDockMarkup(document.querySelector('#world-location'), `<ol aria-label="Location">${path.map((item,index) => {
-    const parent = path[index-1]?.name;
-    const name = parent && item.name.startsWith(parent+': ') ? item.name.slice(parent.length+2) : item.name;
-    return `<li>${index < locations.length ? `<button type="button" data-world-level="${index}" title="${html(item.name)}" aria-label="Back to ${html(item.name)}">${html(name)}</button>`
-      : index ? `<button type="button" data-inspect-region="${html(item.id)}" aria-current="location" title="Inspect ${html(item.name)}" aria-label="Inspect ${html(name)}">${html(name)} <small>(${count(item.count,'Step')})</small></button>`
-        : `<span aria-current="location" title="${html(item.name)}">${html(name)}</span>`}</li>`;
-  }).join('')}</ol>`);
+  const item = path.at(-1), parent = path.at(-2)?.name;
+  const name = parent && item.name.startsWith(parent+': ') ? item.name.slice(parent.length+2) : item.name;
+  renderDockMarkup(document.querySelector('#world-location'), `<ol aria-label="Location">${locations.length ? `
+    <li class="location-history"><button id="open-location-parents" type="button" popovertarget="location-parents"
+      aria-label="Parent areas" title="Parent areas">...</button>
+      <nav id="location-parents" popover aria-label="Parent areas">${path.slice(0,-1).map((item,index) =>
+        `<button type="button" data-world-level="${index}" title="${html(item.name)}" aria-label="Back to ${html(item.name)}">${html(item.name)}</button>`).join('')}</nav></li>` : ''}
+    <li>${locations.length ? `<button type="button" data-inspect-region="${html(item.id)}" aria-current="location" title="Inspect ${html(item.name)}" aria-label="Inspect ${html(name)}">${html(name)} <small>(${count(item.count,'Step')})</small></button>`
+      : `<span aria-current="location" title="${html(item.name)}">${html(name)}</span>`}</li></ol>`);
 }
 
 function attentionItems() {
@@ -827,9 +1030,10 @@ function inspectorTabs(modes) {
   const issues=nodeIssues(state.selection.id), failures=selectionFailures();
   const otherIssues=(state.worldIssues.get(state.selection.id)||[]).filter(issue=>issue.exampleId&&issue.exampleId!==selectedExampleId());
   const symbols={inspect:'configure',overview:'data',appearance:'appearance',groups:'groups'};
-  return `<nav class="inspector-tabs" aria-label="Inspector mode" style="--tab-count:${modes.length}">${modes.map(([mode,label])=>{
+  const selected = modes.some(([mode]) => state.inspectorMode === mode);
+  return `<nav class="inspector-tabs" role="tablist" aria-label="Inspector mode" style="--tab-count:${modes.length}">${modes.map(([mode,label],index)=>{
     const count=mode==='inspect' ? issues.length+otherIssues.length : mode==='overview' ? failures.length : 0;
-    return `<button type="button" data-inspector-mode="${mode}" aria-label="${label}" title="${label}${count ? `: ${count} issue${count===1?'':'s'}` : ''}"
+    return `<button type="button" role="tab" id="inspector-tab-${mode}" aria-controls="inspector-content" aria-selected="${state.inspectorMode===mode}" tabindex="${state.inspectorMode===mode || !selected && index===0?0:-1}" data-inspector-mode="${mode}" aria-label="${label}" title="${label}${count ? `: ${count} issue${count===1?'':'s'}` : ''}"
       data-has-error="${count>0}" class="${state.inspectorMode===mode?'active':''}"><i class="hud-symbol" data-symbol="${symbols[mode]}" aria-hidden="true"></i><span>${label}</span>${count?`<small class="tab-issue" aria-hidden="true">${count}</small>`:''}</button>`;
   }).join('')}</nav>`;
 }
@@ -907,6 +1111,7 @@ async function flushEdits() {
 }
 
 async function editorAction(command, preview = false) {
+  if (state.liveView) return null;
   cancelAttention();
   if (state.actionPending) return null;
   state.actionPending = true;
@@ -927,6 +1132,7 @@ async function editorAction(command, preview = false) {
     state.creatorVersion = payload.creator_revision;
     state.history = payload.history;
     state.workspace = payload.workspace;
+    state.liveChanges = payload.comparison_instance===state.liveConnection?.instance ? payload.changes || {} : {};
     replaceApplication(payload.application);
     state.localDiagnostics = [];
     if (command.kind === 'delete' && state.jsonDraft?.node === command.node) state.jsonDraft=null;
@@ -964,7 +1170,7 @@ async function selectWorldNode(id, event, request) {
   if (state.actionPending) return false;
   closeProjectImport(false);
   if (!request || state.attentionRequest !== request) cancelAttention();
-  if (event?.shiftKey) {
+  if (event?.shiftKey && !state.liveView) {
     state.groupDraft = null;
     const item = state.world?.scene?.nodes.find(node => node.id === id);
     if (item?.kind !== 'step') return false;
@@ -1031,6 +1237,7 @@ function selectWorldGroup(group, region) {
   resetMetrics(true);
   render();
   showInspector(true);
+  refreshApplicationSelection();
   state.world.repaint();
   if (group) void loadEditor('app', group).then(() => { renderDock(); state.world.repaint(); void requestSelectedTrace(); });
   else void requestSelectedTrace();
@@ -1170,7 +1377,8 @@ function worldAppearance(item) {
       && state.inspectorMode === "groups" && state.managedGroup === group.id) || state.selectedSteps.has(item.id),
     related: Boolean(state.world?.related(item)),
     editing: state.groupDraft?.nodes.includes(item.id) || false,
-    changed: state.worldChanges.has(item.id),
+    changed: state.worldChanges.has(item.id) || Boolean(state.liveChanges[item.id]),
+    removed: state.liveView && state.liveChanges[item.id]?.state === 'removed',
     error: issues.some(issue => issue.severity !== "warning") || !selectedExampleId() && !['app','trigger','region'].includes(item.kind)
       && Boolean(live && metricNumber(live.errors) > 0),
     warning: issues.some(issue => issue.severity === "warning") || item.kind === "app" && Boolean(state.themeError),
@@ -1335,10 +1543,11 @@ async function refreshWorldObservations() {
   state.observationTimer = 0;
   state.observationController?.abort();
   const status = document.querySelector("#status-observations");
-  if (document.hidden || state.build === "Building" || state.pendingProject || state.application.state !== "running" || !state.world?.scene) {
+  if (document.hidden || state.switchingWorkspace || state.build === "Building" || state.pendingProject || state.application.state !== "running" || !state.world?.scene) {
     state.observations = null;
     state.world?.repaint();
     status.hidden = true;
+    if(!document.hidden && !state.switchingWorkspace)renderDockObservation();
     return;
   }
   const example = selectedExampleId();
@@ -1398,6 +1607,7 @@ async function refreshWorldObservations() {
       state.observationController = null;
       if (repaint) state.world?.repaint();
       renderWorldStatus();
+      renderDockObservation();
       scheduleWorldObservations(1_000);
     }
   }
@@ -1429,7 +1639,8 @@ function renderWorldStatus() {
   const coverage = document.querySelector("#status-coverage");
   coverage.hidden = !measurable || total === 0;
   coverage.dataset.percent = `${Math.round(covered / Math.max(1, total) * 100)}%`;
-  coverage.textContent = `${coverage.dataset.percent} coverage`;
+  renderDockMarkup(coverage, `${coverage.dataset.percent}<span> coverage</span>`);
+  coverage.setAttribute('aria-label',`${coverage.dataset.percent} coverage`);
   coverage.title = `${covered} of ${total} executable Steps reached by completed Examples`;
   renderDock();
 }
@@ -1549,7 +1760,11 @@ function configuredSummary(operation, inputs, base) {
         summary.steps.push(...conditionSteps(candidate.when).map(step => stepName(definitionOf(step.use))));
       });
     } else if (input.type === "matcher_groups") {
-      (value || []).forEach((group, groupIndex) => group.forEach((matcher, matcherIndex) => {
+      const groups = input.authored_outcomes
+        ? (value || []).flatMap((route, routeIndex) => (Array.isArray(route?.groups) ? route.groups : [])
+          .map((group, groupIndex) => [group, [...locator, routeIndex, "groups", groupIndex]]))
+        : (value || []).map((group, groupIndex) => [group, [...locator, groupIndex]]);
+      groups.forEach(([group, groupLocator]) => group.forEach((matcher, matcherIndex) => {
         const option = input.options.find(available => available.name === matcher.option);
         if (!option) {
           return;
@@ -1558,7 +1773,7 @@ function configuredSummary(operation, inputs, base) {
         mergeSummary(summary, configuredSummary(
           operation,
           option.inputs,
-          [...locator, groupIndex, matcherIndex, "inputs"]
+          [...groupLocator, matcherIndex, "inputs"]
         ));
         summary.steps.push(...conditionSteps(matcher.when).map(step => stepName(definitionOf(step.use))));
       }));
@@ -1582,6 +1797,16 @@ function mergeSummary(target, source) {
 
 function inspector() {
   if (!state.selection.id && !state.regionSelection) return "";
+  if (state.liveView) {
+    if(state.regionSelection) return `<div class="live-step-metrics">${metricFacts('Live group metrics',metricRows(currentWorldObservations()?.nodes.get(state.regionSelection.id)?.metrics))}</div>`;
+    const operation=selectedOperation(), change=state.liveChanges[operation?.id];
+    const key=`live-draft:${state.liveConnection?.instance}:${operation?.id}`;
+    if (state.evidenceView?.key!==key) state.evidenceView={key,all:!change,open:new Map(),limits:new Map()};
+    const delta=contextChanges(change?.before || operation || {},change ? change.after || {} : operation || {});
+    state.evidenceView.delta=delta;
+    return `${change?.state==='removed'?`<button type="button" class="restore-draft" data-restore-live-step="${html(operation.id)}">Restore in draft</button>`:''}<section id="selection-evidence" aria-label="Live and draft comparison"><header><strong>${change ? inputLabel(change.state)+' in draft' : 'Live configuration'}</strong><button type="button" data-evidence-fields aria-label="${state.evidenceView.all?'Show changed fields only':'Show all fields'}" aria-pressed="${state.evidenceView.all}"><i class="hud-symbol" data-symbol="eye" aria-hidden="true"></i></button></header><div class="context-tree"><div class="context-children">${contextRows(delta)}</div></div></section>
+      <div class="live-step-metrics">${metricsPanel()}</div>`;
+  }
   if (state.regionSelection) {
     const region = state.regionSelection, group = state.creator.groups.find(group => group.id === region.group);
     if (!['appearance','groups'].includes(state.inspectorMode)) state.inspectorMode = "overview";
@@ -1652,7 +1877,7 @@ function appearanceInspector() {
         stepPresentation(operation.id),
         { name: stepName(definition) },
         "step:" + operation.id
-      )}${definition.kind === "step" ? groupAssignment(operation) : ""}`
+      )}`
     : appInspector(issueList("app"));
 }
 
@@ -1757,6 +1982,7 @@ function selectSettingsTab(tab) {
   for (const name of ['appearance', 'sound', 'music']) {
     const selected = name === tab;
     document.querySelector(`#settings-${name}-tab`).setAttribute('aria-selected', String(selected));
+    document.querySelector(`#settings-${name}-tab`).tabIndex = selected ? 0 : -1;
     document.querySelector(`#settings-${name}`).hidden = !selected;
   }
   if (tab === 'sound' || tab === 'music') state.audio?.setEditorKind(tab);
@@ -1904,6 +2130,10 @@ function themeStatus(message, error = true) {
 }
 
 function manageGroupsInspector() {
+  if (state.editorController) return '<div class="panel-loading" role="status" aria-label="Loading groups"></div>';
+  if (state.localDiagnostics.some(issue => issue.code === 'CREATOR_EDITOR_UNAVAILABLE' && issue.node === state.selection.id)) {
+    return `${issueList(state.selection.id)}<button type="button" data-inspector-mode="groups">Retry</button>`;
+  }
   const query = state.groupQuery.trim().toLowerCase();
   const available = state.creator.groups.filter(group => groupName(group).toLowerCase().includes(query));
   const inventory = groupInventory();
@@ -1914,9 +2144,12 @@ function manageGroupsInspector() {
   }
   const members = selected ? inventory.get(selected.id) || 0 : 0;
   const regions = Number(state.editor.groups[selected?.id]?.regions || 0);
+  const assignment = !state.regionSelection && selectedOperation() && definitionFor(selectedOperation())?.kind === 'step'
+    ? selectedOperation() : null;
+  const named = selected && (state.regionSelection?.group === selected.id || assignment && groupForStep(assignment.id)?.id === selected.id);
   return `
-    ${!state.regionSelection && selectedOperation() && definitionFor(selectedOperation())?.kind === 'step' ? groupAssignment(selectedOperation()) : ''}
-    ${selected ? `<header class="manager-heading">${inspectorHeader("Group", groupName(selected), "")}</header>` : ''}
+    ${assignment ? groupAssignment(assignment) : ''}
+    ${selected && !named ? `<header class="manager-heading">${inspectorHeader("Group", groupName(selected), "")}</header>` : ''}
     <details class="inspector-section" id="group-library" ${selected || state.selection.type !== 'app' && !state.regionSelection ? "" : "open"}>
       <summary>Browse groups (${state.editor.group_count})</summary>
       <input id="group-search" type="search" value="${html(state.groupQuery)}"
@@ -2067,8 +2300,11 @@ function diagnosticHint(diagnostic, operation) {
   const values=previewInputs(operation);
   const actual=input && values.has(input) ? previewValue(values.get(input)) : '';
   const mismatch=expected && expected!=='any' && input && values.has(input) && valueShape(values.get(input))!==expected;
+  const reportedMismatch=/^RUN_(NESTED_INPUT|STEP_RECEIVE)_INCOMPATIBLE$/.test(diagnostic.code)
+    && / requires ([a-z]+) but receives ([a-z]+)\.$/.exec(diagnostic.message || '');
   return {expected, input:mismatch ? input : undefined, text:diagnostic.code==='RUN_STEP_RECEIVE_REQUIRED' ? 'Missing field'
     : mismatch ? `${actual ? actual+' (expected ' : 'Expected '}${inputLabel(expected)}${actual?')':''}`
+      : reportedMismatch ? `${reportedMismatch[2]==='null' ? 'null' : inputLabel(reportedMismatch[2])} (expected ${inputLabel(reportedMismatch[1])})`
       : diagnosticMessage(diagnostic)};
 }
 
@@ -2226,6 +2462,7 @@ function appInspector(issues) {
 }
 
 function buildDetails() {
+  if(state.liveView) return `<header><strong>Live application / Read-only</strong><button type="button" popovertarget="application-status" popovertargetaction="hide" aria-label="Close build details">Close</button></header><dl class="facts"><div><dt>Artifact</dt><dd>${html(state.application.build_path || '')}</dd></div><div><dt>Source revision</dt><dd>${html(state.application.source_revision || '')}</dd></div><div><dt>Artifact digest</dt><dd>${html(state.application.artifact_digest || '')}</dd></div></dl>`;
   const builtAt = Number(state.application.built_at || 0);
   return `<header><strong>Application and build</strong>
       <button type="button" popovertarget="application-status" popovertargetaction="hide" aria-label="Close build details">Close</button></header>
@@ -2277,7 +2514,8 @@ function closeProjectImport(restore=true) {
   document.querySelector('#inspector').setAttribute('aria-label','Inspector');
   if(restore){
     showInspector(panel.dataset.returnInspector==='true');
-    document.querySelector('#project-menu').focus({preventScroll:true});
+    document.querySelector(phoneInspector.matches && !document.querySelector('#inspector').hidden
+      ? '#close-inspector' : '#project-menu').focus({preventScroll:true});
   }
   renderBuildStatus();
 }
@@ -2299,13 +2537,13 @@ function renderProjectImport() {
   renderDockMarkup(document.querySelector('#project-import-target'),`<small>Replaces ${html(state.project.id)}</small><code>${html(state.workspace.project_path)}</code><small>Cannot undo.</small>`);
 }
 
-function projectImportStatus(message, severity = '', diagnostics = []) {
+function projectImportStatus(message, severity = '', diagnostics = [], invalidField = '') {
   const status=document.querySelector('#project-import-status');
   status.textContent=message;
   if(severity)status.dataset.severity=severity;else delete status.dataset.severity;
   for(const id of ['project-import-source','project-import-file']) {
     const input=document.getElementById(id);
-    if(severity==='error')input.setAttribute('aria-invalid','true');else input.removeAttribute('aria-invalid');
+    if(id===invalidField)input.setAttribute('aria-invalid','true');else input.removeAttribute('aria-invalid');
   }
   const details=document.querySelector('#project-import-diagnostics');
   details.hidden=!diagnostics.length;
@@ -2326,19 +2564,20 @@ function clearProjectImport() {
 
 function updateProjectImportPreview() {
   const source=document.querySelector('#project-import-source').value;
+  const field=document.querySelector('#project-import-file').files.length ? 'project-import-file' : 'project-import-source';
   state.projectImport.preview=null;
   projectImportStatus('');
   if(source.trim()) {
     if(source.length > Number(state.workspace.source_limit_bytes)
         || new TextEncoder().encode(source).length > Number(state.workspace.source_limit_bytes)) {
-      projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error');
+      projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error', [], field);
     } else {
       let project;
-      try{project=parseExact(source);}catch{projectImportStatus('Invalid JSON.', 'error');}
+      try{project=parseExact(source);}catch{projectImportStatus('Invalid JSON.', 'error', [], field);}
       if(project!==undefined) {
         if(!plainObject(project) || typeof project.id!=='string' || !project.id.trim()
             || !Array.isArray(project.nodes) || !Array.isArray(project.links)) {
-          projectImportStatus('Expected a project with a name, Steps and connections.', 'error');
+          projectImportStatus('Expected a project with a name, Steps and connections.', 'error', [], field);
         } else state.projectImport.preview={id:project.id,steps:project.nodes.length,
           flows:project.nodes.filter(operation=>definitionOf(operation?.use)?.kind==='trigger').length};
       }
@@ -2357,7 +2596,7 @@ function readProjectImportFile(input) {
   state.projectImport.preview=null;
   projectImportStatus('');
   if(file.size > Number(state.workspace.source_limit_bytes)) {
-    projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error');
+    projectImportStatus(`Project exceeds ${formatBytes(state.workspace.source_limit_bytes)}.`, 'error', [], 'project-import-file');
     renderProjectImport();return;
   }
   const reader=state.projectImport.reader=new FileReader();
@@ -2367,14 +2606,14 @@ function readProjectImportFile(input) {
     try {
       document.querySelector('#project-import-source').value=new TextDecoder('utf-8',{fatal:true}).decode(reader.result);
     } catch {
-      projectImportStatus('File must contain UTF-8 JSON.', 'error');renderProjectImport();return;
+      projectImportStatus('File must contain UTF-8 JSON.', 'error', [], 'project-import-file');renderProjectImport();return;
     }
     updateProjectImportPreview();
   };
   reader.onerror=()=>{
     if(state.projectImport.reader!==reader)return;
     state.projectImport.reader=null;
-    projectImportStatus('Could not read this file.', 'error');renderProjectImport();
+    projectImportStatus('Could not read this file.', 'error', [], 'project-import-file');renderProjectImport();
   };
   renderProjectImport();
   reader.readAsArrayBuffer(file);
@@ -2798,11 +3037,12 @@ function candidatesInput(operation, input, locator, candidates, scopeInputs, sco
 }
 
 function matcherGroupsInput(operation, input, locator, groups, scopeInputs, scopeBase) {
+  if (input.authored_outcomes) return routesInput(operation, input, locator, groups, scopeInputs, scopeBase);
   const queryLocator = [...locator, "new-group"];
   const token = locatorToken(locator);
   return `
     <section class="inspector-section matcher-groups" data-input-name="${html(input.name)}">
-      <div class="section-heading"><strong>${html(inputLabel(input.name))}</strong></div>
+      <div class="section-heading"><strong>${html(input.label || inputLabel(input.name))}</strong></div>
       <div class="matcher-group-list">
         ${groups.map((group, index) => matcherGroupEditor(
           operation,
@@ -2813,10 +3053,10 @@ function matcherGroupsInput(operation, input, locator, groups, scopeInputs, scop
           groups.length,
           scopeInputs,
           scopeBase
-        )).join("") || '<p class="empty-options">No condition group configured.</p>'}
+        )).join("")}
       </div>
-      <details class="matcher-group-add" id="${html(inputId(locator))}-alternative" ${groups.length?'':'open'}>
-        <summary>Add alternative (OR)</summary>
+      <details class="matcher-group-add" id="${html(inputId(locator))}-alternative">
+        <summary>${groups.length ? 'Add alternative (OR)' : 'Add condition'}</summary>
         <input type="search" value="${html(queryAt(state.candidateQueries, queryLocator))}"
                data-matcher-group-query="${token}" data-input-meta="${metaToken(input)}"
                placeholder="Search value sources" autocomplete="off">
@@ -2864,6 +3104,36 @@ function matcherGroupEditor(operation, input, locator, group, index, size, scope
       </div>
       </details>
     </article>`;
+}
+
+function routesInput(operation, input, locator, routes, scopeInputs, scopeBase) {
+  return `<section class="inspector-section candidate-input route-input" data-input-name="${html(input.name)}">
+    ${routes.length === 1 ? '' : `<div class="section-heading"><strong>${html(inputLabel(input.name))}</strong></div>`}
+    <div class="candidate-list">${routes.map((route, index) => {
+      const routeLocator = [...locator, index];
+      const id = inputId(routeLocator);
+      const conditions = { ...input, name: input.name + "[" + index + "].groups", label: "Conditions",
+        authored_outcomes: false, route_inputs: undefined };
+      const removable = Boolean(route?.outcome) && outcomeTarget(operation, route.outcome) === "end";
+      const heading = `<div class="candidate-heading route-heading">
+          <input id="${html(id)}-label" type="text" value="${html(outcomeLabel(operation, route?.outcome, ''))}"
+            aria-label="Route ${index + 1} label" placeholder="Route ${index + 1}"
+            data-candidate-label="${locatorToken(locator)}" data-candidate-index="${index}" autocomplete="off">
+          ${orderedActions('candidate', index, routes.length,
+            `data-candidate-locator="${locatorToken(locator)}" data-input-meta="${metaToken(input)}"`, removable)}</div>
+        `;
+      return `<article class="candidate route" data-candidate-index="${index}" data-route-outcome="${html(route?.outcome || '')}"
+        data-setting-path="${html(inputDiagnosticPath(operation.id, routeLocator))}" tabindex="-1">
+        ${routes.length > 1 ? heading : ''}
+        ${matcherGroupsInput(operation, conditions, [...routeLocator, "groups"],
+          Array.isArray(route?.groups) ? route.groups : [], scopeInputs, scopeBase)}
+        ${routes.length === 1 ? heading : ''}
+        ${inputFields(operation, input.route_inputs || [], [...routeLocator, "inputs"])}
+      </article>`;
+    }).join("")}</div>
+    <div class="inspector-actions"><button type="button" class="button" data-add-route="${locatorToken(locator)}"
+      data-input-meta="${metaToken(input)}">Add route</button></div>
+  </section>`;
 }
 
 function candidateEditor(
@@ -3130,12 +3400,22 @@ function matcherGroupOptions(input, locator) {
 
 function jsonInput(operation, input, locator, value) {
   const present = hasAt(operation, locator);
+  const optional = !input.required && (input.inherited || !Object.hasOwn(input, "default"));
+  const resettable = !input.inherited && Object.hasOwn(input, "default") && (present
+    || state.jsonDraft?.node === operation.id && samePath(state.jsonDraft.locator, locator));
   const id = inputId(locator);
   const path = inputDiagnosticPath(operation.id, locator);
   const issues = allDiagnostics().filter(issue => issue.path === path && diagnosticOwner(issue) === operation.id);
   const feedback = issues.length ? `<p id="${html(id)}-error" class="input-error" role="alert">${
     issues.map(issue => html(issue.message)).join(" ")}</p>` : "";
-  if (!input.required && !present) {
+  if (input.shape === 'boolean' && typeof input.default === 'boolean' && !input.inherited) {
+    return `<section class="inspector-section compact" data-input-name="${html(input.name)}">
+      <label class="check-line" for="${html(id)}-value"><input id="${html(id)}-value" type="checkbox"
+        data-input-json="${locatorToken(locator)}" data-input-meta="${metaToken(input)}"
+        ${(value ?? input.default) ? 'checked' : ''}${issues.length ? ` aria-invalid="true" aria-describedby="${html(id)}-error"` : ''}>
+        <span>${html(input.label || inputLabel(input.name))}</span></label>${feedback}</section>`;
+  }
+  if (optional && !present) {
     return `
       <section class="inspector-section compact" data-input-name="${html(input.name)}">
         <label class="check-line">
@@ -3146,14 +3426,14 @@ function jsonInput(operation, input, locator, value) {
         ${feedback}
       </section>`;
   }
-  const optional = !input.required ? `
+  const toggle = optional ? `
     <label class="check-line" id="${html(id)}-label">
       <input id="${html(id)}-present" type="checkbox" checked
              data-toggle-input="${locatorToken(locator)}" data-input-meta="${metaToken(input)}" aria-label="Use ${html(inputLabel(input.name).toLowerCase())}">
       <span>${html(inputLabel(input.name))}</span>
     </label>` : "";
   const attributes = `id="${html(id)}-value" ${input.required ? 'aria-required="true"' : ''} data-input-json="${locatorToken(locator)}"
-                      data-input-meta="${metaToken(input)}"${!input.required?` aria-labelledby="${html(id)}-label"`:''}${issues.length
+                      data-input-meta="${metaToken(input)}"${optional?` aria-labelledby="${html(id)}-label"`:''}${issues.length
     ? ` aria-invalid="true" aria-describedby="${html(id)}-error"` : ""}`;
   let control;
   if (input.shape === "string") {
@@ -3172,15 +3452,18 @@ function jsonInput(operation, input, locator, value) {
       <option value="false" ${value === false ? "selected" : ""}>false</option>
     </select>`;
   } else {
-    control = `<textarea rows="${input.shape === "any" ? 4 : 3}" spellcheck="false" ${attributes}>${html(
-      value === undefined ? "" : jsonEditorValue(locator, value)
-    )}</textarea>`;
+    const scalar = value !== undefined && (value === null || typeof value !== 'object' || exactNumber(value));
+    const source = value === undefined ? '' : jsonEditorValue(locator, value);
+    control = scalar && source.length <= 120 ? `<input type="text" spellcheck="false" ${attributes} value="${html(source)}">`
+      : `<textarea rows="${input.shape === 'any' ? 4 : 3}" spellcheck="false" ${attributes}>${html(source)}</textarea>`;
   }
   return `
-    <section class="inspector-section${input.required ? "" : " compact"}"
+    <section class="inspector-section${optional ? " compact" : ""}"
              data-input-name="${html(input.name)}">
-      ${optional}
-      ${input.required?`<label for="${html(id)}-value">${html(input.label || inputLabel(input.name))}</label>`:''}
+      ${toggle}
+      ${!optional?`<div class="section-heading input-heading"><label for="${html(id)}-value">${html(input.label || inputLabel(input.name))}</label>
+        ${resettable ? `<button type="button" class="input-reset" data-reset-input="${locatorToken(locator)}"
+          data-input-meta="${metaToken(input)}" title="Use default value">Reset</button>` : ''}</div>`:''}
       ${control}
       ${feedback}
       ${input.required && input.shape === "string" && !present ? `
@@ -3403,7 +3686,7 @@ function pathBrowser(input, operation, locator) {
         </div>
         <div class="path-actions" role="group" aria-label="${html(inputLabel(input.name))} actions">
           <div class="path-action-buttons">
-            ${resettable ? `<button class="path-reset" type="button" data-reset-path="${locatorToken(locator)}" data-input-meta="${metaToken(input)}">Reset</button>` : ''}
+            ${resettable ? `<button class="input-reset" type="button" data-reset-input="${locatorToken(locator)}" data-input-meta="${metaToken(input)}">Reset</button>` : ''}
             <button class="path-cancel" id="cancel-path" type="button">Cancel</button>
             <button id="apply-path" type="button" ${usable ? "" : "disabled"}>Use this path</button>
           </div>
@@ -3537,6 +3820,7 @@ function openPicker(mode, anchor, outcome = "") {
 }
 
 async function openBeltPicker(id, outcome, arrivals = []) {
+  if (state.liveView) return;
   const source=state.world.scene.nodes.find(item=>item.id===id);
   if (arrivals.length > 1 || arrivals.length===1 && (!source || source.kind==='region')) {
     state.picker?.controller?.abort();
@@ -3700,7 +3984,7 @@ function addCatalogStep(id) {
       id: triggerId,
       use: definition.id,
       inputs: defaultInputs(definition.inputs),
-      examples: clone(definition.examples)
+      examples: clone(definition.examples).map(example => ({...example, id: opaqueId("example")}))
     });
     state.project.links.push(
       { from: "app." + primaryOutcome(node("app")), to: triggerId },
@@ -3898,10 +4182,9 @@ function selectExample(index, trigger = node(state.selection.id), {deferObservat
   state.exampleIndex = Math.max(-1, Math.min(index, (trigger.examples?.length ?? state.exampleIds.get(trigger.id)?.size ?? 0) - 1));
   state.application.example = state.exampleIds.get(trigger.id)?.get(state.exampleIndex) || null;
   state.exampleDraft = null;
-  state.applicationController?.abort('selection');
   clearPreview(true, false);
   render();
-  scheduleApplicationPoll(0);
+  refreshApplicationSelection();
   if (deferObservation) return Promise.resolve();
   const trace = requestSelectedTrace();
   if (sourceChanged && !state.editorController && !state.regionSelection && state.selection.id
@@ -3926,6 +4209,7 @@ function addExample() {
     index++;
   }
   trigger.examples.push({
+    id: opaqueId("example"),
     name: "example-" + index,
     payload: clone(template.payload),
     ...(plainObject(template.context) ? { context: clone(template.context) } : {})
@@ -4012,7 +4296,7 @@ function cancelPath() {
   render();
 }
 
-function resetPath(locator, input) {
+function resetInput(locator, input) {
   const fallback = defaultInput(input);
   if (fallback === undefined) {
     return;
@@ -4022,6 +4306,8 @@ function resetPath(locator, input) {
   } else {
     deleteAt(editableOperation(locator), locator);
   }
+  state.jsonDraft = null;
+  state.localDiagnostics = [];
   closePathPicker();
   dirty();
 }
@@ -4141,10 +4427,25 @@ function authoredCandidate(option, input = {}) {
   };
 }
 
-function nextCaseLabel(operation) {
+function addRoute(locator, input) {
+  const operation = editableOperation(locator);
+  let routes = valueAt(operation, locator);
+  if (!Array.isArray(routes)) {
+    routes = [];
+    setAt(operation, locator, routes);
+  }
+  const route = { outcome: opaqueId("route"), groups: [], inputs: defaultInputs(input.route_inputs || []) };
+  const label = nextCaseLabel(operation, "Route");
+  routes.push(route);
+  state.project.links.push({ from: operation.id + "." + route.outcome, to: "end" });
+  setOutcomeLabel(operation.id, route.outcome, label);
+  dirty();
+}
+
+function nextCaseLabel(operation, prefix = "Case") {
   const labels = new Set(Object.values(stepPresentation(operation.id).outcomes || {}));
   for (let index = 1; ; index++) {
-    const label = "Case " + index;
+    const label = prefix + " " + index;
     if (!labels.has(label)) {
       return label;
     }
@@ -4713,7 +5014,7 @@ function configuredInputShape(operation, input, locator, scopeInputs, scopeBase)
     return shapes.size === 1 ? [...shapes][0] : shapes.size ? "mixed" : "";
   }
   if (input.type === "matcher_groups") {
-    return "boolean";
+    return input.authored_outcomes ? "" : "boolean";
   }
   return "";
 }
@@ -4758,7 +5059,7 @@ function configuredInputValues(operation, input, locator, scopeInputs, scopeBase
     });
     return resolved;
   }
-  if (input.type === "matcher_groups") {
+  if (input.type === "matcher_groups" && !input.authored_outcomes) {
     const previews = state.previewCases.filter(preview => preview.step === operation.id);
     return previews.length === count
       ? previews.map(preview => Object.hasOwn(preview.inputs || {}, input.name)
@@ -4919,13 +5220,18 @@ function scheduleApplicationPoll(delay = 250) {
   state.applicationPollTimer = window.setTimeout(refreshApplication, delay);
 }
 
+function refreshApplicationSelection() {
+  state.applicationController?.abort('selection');
+  scheduleApplicationPoll(0);
+}
+
 function observationRetryDelay() {
   return document.hidden ? 2_000 : 500;
 }
 
 async function refreshApplication() {
   state.applicationPollTimer = 0;
-  if (state.applicationRefreshing) {
+  if (state.applicationRefreshing || state.switchingWorkspace) {
     return;
   }
   let nextDelay;
@@ -4946,6 +5252,7 @@ async function refreshApplication() {
       if (application.state !== "running") {
         return;
       }
+      if (state.liveView) { refreshApplicationFacts(); return; }
       const cachedExampleId = selectedExampleId();
       const [examplesResponse, exampleResponse] = await Promise.all([
         fetch("/api/examples/status", { cache: "no-store", signal }),
@@ -5028,7 +5335,7 @@ async function refreshApplication() {
       else refreshNestedOptions();
     }
     const running = ["queued", "running"].includes(state.application.examples?.state);
-    scheduleApplicationPoll(nextDelay ?? (document.hidden ? 2_000 : running ? 100 : 500));
+    scheduleApplicationPoll(nextDelay ?? (document.hidden ? 2_000 : state.liveView ? 1_000 : running ? 100 : 500));
   }
 }
 
@@ -5104,6 +5411,7 @@ async function refreshExampleCoverage(application, examples, signal) {
 }
 
 function selectedExampleId() {
+  if (state.liveView) return '';
   return state.exampleIds.get(state.exampleTrigger)?.get(state.exampleIndex)?.id || "";
 }
 
@@ -5115,8 +5423,8 @@ function refreshApplicationFacts() {
     "build-path": state.application.build_path || "",
     "application-build-state": state.build,
     "application-run-state": inputLabel(state.application.state || "unavailable"),
-    "last-build": builtAt ? new Date(builtAt).toLocaleString() : "Not built",
-    "application-last-build": builtAt ? new Date(builtAt).toLocaleString() : "Not built",
+    "last-build": builtAt ? new Date(builtAt).toLocaleString() : state.liveView ? '' : "Not built",
+    "application-last-build": builtAt ? new Date(builtAt).toLocaleString() : state.liveView ? '' : "Not built",
     "example-suite-state": inputLabel(state.application.examples?.state || "unavailable"),
     "example-suite-progress": exampleProgress(),
     "example-trace-storage": formatBytes(state.application.examples?.storage_bytes)
@@ -5157,7 +5465,7 @@ function metricsSetting(operation) {
 }
 
 function metricTarget() {
-  return !state.regionSelection && state.inspectorMode === "inspect" && ["trigger", "step"].includes(state.selection.type)
+  return !state.regionSelection && (state.liveView || state.inspectorMode === "inspect") && ["trigger", "step"].includes(state.selection.type)
     ? state.selection.id : "app";
 }
 
@@ -5181,7 +5489,7 @@ function resetMetrics(poll = false) {
 async function refreshMetrics() {
   state.metricsPollTimer = 0;
   const target = metricTarget();
-  if (document.hidden || state.build !== "Built" || state.pendingProject) {
+  if (document.hidden || state.switchingWorkspace || state.build !== "Built" || state.pendingProject) {
     scheduleMetricsPoll(500);
     return;
   }
@@ -5234,7 +5542,7 @@ async function refreshMetrics() {
 }
 
 function renderMetrics() {
-  const panel = document.querySelector("#metrics-panel");
+  const panel = document.querySelector(state.liveView && !state.regionSelection ? ".live-step-metrics" : "#metrics-panel");
   if (panel) {
     renderDockMarkup(panel, metricsPanel());
   }
@@ -5275,7 +5583,8 @@ function metricsPanel() {
   }
   const steps = Array.isArray(state.metrics.steps) ? state.metrics.steps : [];
   const flows = Array.isArray(state.metrics.flows) ? state.metrics.flows : [];
-  const step = steps.find(candidate => candidate.id === target)?.metrics;
+  const measuredStep = steps.find(candidate => candidate.id === target);
+  const step = measuredStep?.metrics;
   const flow = flows.find(candidate => candidate.id === target)?.metrics;
   if (!step && !flow) {
     return "";
@@ -5283,6 +5592,10 @@ function metricsPanel() {
   const rows = [];
   if (step) {
     rows.push(...metricRows(step, flow ? "Step" : ""));
+    (measuredStep.placements || []).forEach((placement, index) => {
+      const separate = Object.fromEntries(Object.entries(placement.metrics || {}).filter(([id]) => !Object.hasOwn(step, id)));
+      rows.push(...metricRows(separate).map(([label, value, id]) => [`${label} (${index + 1})`, value, id, placement.id]));
+    });
     rows.push(
       [flow ? "Step sampled average" : "Sampled average", averageNanos(step)]
     );
@@ -5306,6 +5619,7 @@ function metricRows(values, prefix = "") {
       : definition.unit === "ns" ? formatNanos(value)
       : definition.unit === "ms" ? formatMillis(value)
       : definition.unit === "ppm" ? formatPercentPpm(value)
+      : definition.unit === "port" ? numberText(value)
       : definition.unit === "count" ? formatInteger(value) : `${numberText(value)} ${definition.unit || ""}`.trim();
     return [prefix ? `${prefix} ${label[0].toLowerCase()}${label.slice(1)}` : label, formatted, id];
   });
@@ -5314,7 +5628,7 @@ function metricRows(values, prefix = "") {
 function metricFacts(title, rows) {
   const facts = rows
     .filter(([_label, value]) => value !== null && value !== undefined)
-    .map(([label, value, id]) => `<div${id ? ` data-metric-id="${html(id)}"` : ""}><dt>${html(label)}</dt><dd>${html(value)}</dd></div>`)
+    .map(([label, value, id, placement]) => `<div${id ? ` data-metric-id="${html(id)}"` : ""}${placement ? ` title="${html(placement)}"` : ""}><dt>${html(label)}</dt><dd>${html(value)}</dd></div>`)
     .join("");
   if (!facts) return "";
   return `<section class="inspector-section facts runtime-metrics">
@@ -5335,9 +5649,11 @@ function metricNumber(value) {
 
 function formatInteger(value) {
   const source = String(numberText(value === undefined ? 0 : value));
-  const sign = source.startsWith("-") ? "-" : "";
-  const digits = sign ? source.slice(1) : source;
-  return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const point = source.indexOf(".");
+  const integer = point < 0 ? source : source.slice(0, point);
+  const sign = integer.startsWith("-") ? "-" : "";
+  const digits = sign ? integer.slice(1) : integer;
+  return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (point < 0 ? "" : source.slice(point));
 }
 
 function formatBytes(value) {
@@ -5388,7 +5704,7 @@ function formatPercentPpm(value) {
 }
 
 async function requestSelectedTrace() {
-  if (state.build === "Building" || !state.application.pid || state.jsonDraft || state.exampleDraft
+  if (document.hidden || state.build === "Building" || !state.application.pid || state.jsonDraft || state.exampleDraft
       || state.editorController && state.editorController.node !== state.selection.id) {
     return;
   }
@@ -5409,7 +5725,8 @@ async function requestSelectedTrace() {
   const observation = operation ? observationFor(operation) : null;
   if (!observation) {
     if (state.traceSummaryKey === summaryKey && state.traceSummary || state.traceKey === summaryKey
-        && (state.traceController || state.traceReadError?.key === summaryKey)) return;
+        && (state.traceController || state.traceReadError?.key === summaryKey && !state.traceReadError.retry)) return;
+    const retrying = state.traceKey === summaryKey && state.traceReadError?.retry === true;
     state.traceController?.abort();
     const controller = state.traceController = new AbortController();
     state.traceKey = summaryKey;
@@ -5426,7 +5743,8 @@ async function requestSelectedTrace() {
       refreshTraceView();
     } catch (error) {
       if (error.name !== 'AbortError' && state.traceController === controller) {
-        state.traceReadError = {key:summaryKey, message:error.message};
+        state.traceReadError = {key:summaryKey, message:error.message,
+          retry:!retrying && (error.retryable === true || error instanceof TypeError)};
         renderExampleContext();
       }
     } finally {
@@ -5445,10 +5763,11 @@ async function requestSelectedTrace() {
     operation.id
   ].join(":");
   const key = summaryKey + ":" + casesKey;
-  if (state.traceKey === key && (state.traceController || state.traceReadError?.key === summaryKey
+  if (state.traceKey === key && (state.traceController || state.traceReadError?.key === summaryKey && !state.traceReadError.retry
       || state.traceSummary && state.traceCasesKey === casesKey)) {
     return;
   }
+  const retrying = state.traceKey === key && state.traceReadError?.retry === true;
   state.traceController?.abort();
   const controller = new AbortController();
   state.traceController = controller;
@@ -5501,7 +5820,7 @@ async function requestSelectedTrace() {
       ? selected.projection
       : null;
     state.traceChanges = state.traceStep && plainObject(state.traceStep.input_context) && plainObject(state.traceStep.context)
-      ? contextChanges(state.traceStep.input_context, state.traceStep.context) : null;
+      ? contextChanges(state.traceStep.input_context, state.traceStep.context, state.traceStep.own_changes) : null;
     state.previewCases = matchesBuilt && observation.context === "input"
       ? state.traceCases.flatMap(candidate => plainObject(candidate.projection)
       ? [{
@@ -5521,7 +5840,8 @@ async function requestSelectedTrace() {
     }
     state.traceController = null;
     state.traceStep = null;
-    state.traceReadError = {key:summaryKey, message:error.message};
+    state.traceReadError = {key:summaryKey, message:error.message,
+      retry:!retrying && (error.retryable === true || error instanceof TypeError)};
     state.traceCases = [];
     state.traceCasesKey = "";
     state.traceCasesPid = 0;
@@ -5543,7 +5863,8 @@ async function requestRegionTrace(example) {
   const region = state.regionSelection, revision = state.world?.scene?.revision;
   if (!region || !revision) return;
   const summaryKey = exampleSummaryKey(example), key = `${summaryKey}:${revision}:${region.id}`;
-  if (state.regionTrace?.key === key) return;
+  if (state.regionTrace?.key === key && (state.traceController || !state.traceReadError?.retry)) return;
+  const retrying = state.regionTrace?.key === key && state.traceReadError?.retry === true;
   state.traceController?.abort();
   const controller = state.traceController = new AbortController();
   state.regionTrace = {key, region:region.id, example:example.id, kind:'pending', status:'Loading Example'};
@@ -5583,7 +5904,8 @@ async function requestRegionTrace(example) {
   } catch (error) {
     if (current()) {
       state.regionTrace = {key, region:region.id, example:example.id, kind:'unavailable', status:error.message || 'Example data unavailable'};
-      state.traceReadError = {key:summaryKey, message:state.regionTrace.status};
+      state.traceReadError = {key:summaryKey, message:state.regionTrace.status,
+        retry:!retrying && (error.retryable === true || error instanceof TypeError)};
       renderExampleContext();
       renderDockObservation();
     }
@@ -5595,12 +5917,14 @@ async function requestRegionTrace(example) {
 async function readExampleProjection(path, signal) {
   const response = await fetch(path, { cache: "no-store", signal });
   const source = await response.text();
-  if (!response.ok) {
+  if (!response.ok || response.status === 202) {
     const failure = parseExact(source);
-    throw new Error(response.status === 409 ? 'Example changed. Retry after the update.'
+    const error = new Error(response.status === 409 ? 'Example changed. Retry after the update.'
       : response.status === 413 ? 'Example values exceed the display limit.'
       : response.status === 503 ? 'Application is updating or busy. Retry when ready.'
       : failure.message || 'Recorded Example values could not be read.');
+    error.retryable = [202,409,502,503,504].includes(response.status);
+    throw error;
   }
   const projection = parseExact(source);
   if (!plainObject(projection)) {
@@ -5738,6 +6062,7 @@ function exampleCoverage(encoded, project) {
 }
 
 function renderPreview() {
+  if(state.liveView)return;
   renderDockObservation();
   const operation = selectedOperation();
   if (!operation) return;
@@ -5783,6 +6108,21 @@ function refreshCandidateSelection() {
     if (status) {
       status.textContent = (selected ? "Selected, " : "")
         + status.dataset.candidateDefaultStatus;
+    }
+  });
+  const operation = selectedOperation();
+  const preview = state.preview?.step === operation?.id ? state.preview : null;
+  const outcomes = preview && !failedRunStates.has(preview.status) && !observedExampleContext(operation).status
+    ? preview.outcomes || (preview.outcome ? [preview.outcome] : []) : [];
+  document.querySelectorAll('.route[data-route-outcome]').forEach(route => {
+    const selected = outcomes.includes(route.dataset.routeOutcome);
+    route.classList.toggle('selected-candidate', selected);
+    if (selected) {
+      route.dataset.observedOutcome = route.dataset.routeOutcome;
+      route.setAttribute('aria-description', 'Observed route');
+    } else {
+      delete route.dataset.observedOutcome;
+      route.removeAttribute('aria-description');
     }
   });
 }
@@ -5998,6 +6338,7 @@ async function drainWrites() {
 }
 
 async function save(revision, projectChanged, projectSource, creatorSource) {
+  if (state.liveView) return;
   if (revision !== state.revision) {
     state.pendingProject ||= projectChanged;
     return false;
@@ -6331,7 +6672,7 @@ function authoredOutcomes(candidate) {
 
 function authoredOutcomeInput(definition) {
   return (definition?.inputs || [])
-    .find(field => field.type === "candidates" && field.authored_outcomes);
+    .find(field => field.authored_outcomes);
 }
 
 function outcomeLabel(candidate, outcome, fallback = inputLabel(outcome)) {
@@ -6471,9 +6812,11 @@ async function openGroupManager(id = "") {
   state.groupQuery = "";
   state.groupPicker = null;
   state.inspectorMode = "groups";
-  if (await loadEditor(state.selection.id, state.managedGroup, "") !== "loaded") return;
+  const pending = loadEditor(state.selection.id, state.managedGroup, "");
   showInspector(true);
   render();
+  if (await pending === 'loaded') state.localDiagnostics = state.localDiagnostics.filter(issue => issue.code !== 'CREATOR_EDITOR_UNAVAILABLE');
+  if (state.inspectorMode === 'groups') render();
 }
 
 function createGroup() {
@@ -6573,7 +6916,8 @@ function editableOperation(locator) {
       }
       inputSlot = false;
     } else if (part === 'inputs') {
-      fields = definitionOf(cursor.use)?.inputs || input?.options?.find(option => option.name === cursor.option)?.inputs;
+      fields = definitionOf(cursor.use)?.inputs || input?.options?.find(option => option.name === cursor.option)?.inputs
+        || (input?.type === 'matcher_groups' && input.authored_outcomes ? input.route_inputs : undefined);
       if (fields && !Object.hasOwn(cursor,part)) cursor[part] = {};
       inputSlot = true;
     } else if (cursor === operation && ['receives','returns'].includes(part) && !Object.hasOwn(cursor,part)) {
@@ -6586,6 +6930,7 @@ function editableOperation(locator) {
 
 function selectStep(id) {
   clearPreview();
+  refreshApplicationSelection();
   resetMetrics();
   state.exampleDraft = null;
   state.selection = { type: "step", id };
@@ -6793,9 +7138,48 @@ function html(value) {
     .replaceAll("'", "&#039;");
 }
 
+const phoneInspector = window.matchMedia('(max-width: 650px)');
+
+// Responsive editing reuses the same controls, drafts and event owners.
+function syncInspectorLayout() {
+  const inspector = document.querySelector('#inspector');
+  const suspended = phoneInspector.matches && !inspector.hidden && Boolean(state.picker || document.querySelector('.connection-status:not([hidden])'));
+  const full = phoneInspector.matches && !inspector.hidden && !suspended;
+  const canvas = document.querySelector('.canvas-panel');
+  const changed = canvas.inert !== full;
+  const example = document.querySelector('#example-session');
+  const exampleHost = document.querySelector(full ? '#inspector-example' : '.workbench-header');
+  if (example.parentElement !== exampleHost) exampleHost.append(example);
+  const history = document.querySelector('#history-controls');
+  const historyHost = document.querySelector(full ? '#inspector-history' : '.canvas-tools');
+  if (history.parentElement !== historyHost) historyHost.prepend(history);
+  const settings = document.querySelector('#open-settings');
+  const settingsHost = document.querySelector(full ? '#inspector-history' : '#workbench-actions .topbar');
+  if (settings.parentElement !== settingsHost) {
+    if (full) settingsHost.append(settings); else settingsHost.prepend(settings);
+  }
+  for (const surface of document.querySelectorAll('.workbench-header,.canvas-panel,.status-rail')) surface.inert = full;
+  document.body.classList.toggle('inspector-full', full);
+  document.body.classList.toggle('inspector-suspended', suspended);
+  if (changed) state.world?.repaint();
+  if (full) { inspector.setAttribute('role','dialog'); inspector.setAttribute('aria-modal','true'); }
+  else { inspector.removeAttribute('role'); inspector.removeAttribute('aria-modal'); }
+  document.querySelector('#inspector-footer').hidden = !phoneInspector.matches && !document.querySelector('#inspector-deletion').childElementCount;
+  const tab = document.querySelector('#inspector-nav [aria-selected=true]');
+  const content = document.querySelector('#inspector-content');
+  if (tab) { content.setAttribute('aria-labelledby', tab.id); content.removeAttribute('aria-label'); }
+  else { content.removeAttribute('aria-labelledby'); content.setAttribute('aria-label',state.inspectorMode === 'examples' ? 'Examples' : 'Inspector content'); }
+  if (full && !inspector.contains(document.activeElement) && !document.querySelector('#overlay > *')) {
+    document.querySelector(!document.querySelector('#audio-panel').hidden ? '#close-settings'
+      : !document.querySelector('#project-import-panel').hidden ? '#close-project-import' : '#close-inspector').focus({preventScroll:true});
+  }
+}
+phoneInspector.addEventListener('change', syncInspectorLayout);
+
 function showInspector(open) {
   if(!open){closeSettings(false);closeProjectImport(false);}
   document.querySelector("#inspector").hidden = !open;
+  syncInspectorLayout();
   if (!open) {
     state.iconController?.abort();
     document.querySelector("#graph").focus({ preventScroll: true });
@@ -6821,6 +7205,7 @@ function clearSelection() {
   state.inspectorMode = "inspect";
   state.picker = state.groupPicker = state.pathPicker = null;
   clearPreview();
+  refreshApplicationSelection();
   resetMetrics(true);
   showInspector(false);
   render();
@@ -6843,9 +7228,50 @@ document.addEventListener('toggle', event => {
   renderDockObservation();
 }, true);
 
+document.querySelector('#live-source-selection').addEventListener('submit',event=>{event.preventDefault();if(state.liveCandidate)void connectLive(state.liveCandidate,document.querySelector('#live-source-path').value.trim());});
+document.querySelector('#live-connections').addEventListener('close',()=>{state.liveController?.abort();state.restoreCommand=null;});
+
 document.addEventListener("click", event => {
   if (event.target.closest('#creator-retry')) { window.location.reload(); return; }
   const target = event.target;
+  if(target.closest('#open-live-connections')) {void showLiveConnections();return;}
+  if(target.closest('#start-local')) {void startLocal();return;}
+  if(target.closest('[data-close-live]')) {state.liveController?.abort();document.querySelector('#live-connections').close();return;}
+  const connection=target.closest('[data-live-instance]');
+  if(connection){void connectLive(connection.dataset.liveInstance);return;}
+  const restoration=target.closest('[data-restore-live-step]');
+  if(restoration){const id=restoration.dataset.restoreLiveStep;void (async()=>{
+    if(!await switchWorkspace(false))return;
+    const command={kind:'restore',node:id},preview=await editorAction(command,true);
+    if(!preview)return;
+    const nodes=Object.keys(preview.project_changes?.nodes || {});
+    if(nodes.length<2){await editorAction(command);return;}
+    state.restoreCommand={command,revision:state.projectVersion,creator:state.creatorVersion};
+    document.querySelector('#live-title').textContent=`Restore ${nodes.length} connected Steps`;
+    document.querySelector('#live-content').innerHTML=`<ul>${nodes.map(id=>`<li>${html(id)}</li>`).join('')}</ul><button type="button" data-confirm-restore>Restore in draft</button>`;
+    document.querySelector('#live-message').textContent='';document.querySelector('#live-source-selection').hidden=true;
+    document.querySelector('#live-connections').showModal();
+  })();return;}
+  if(target.closest('[data-confirm-restore]')) {
+    const request=state.restoreCommand;
+    if(request && request.revision===state.projectVersion && request.creator===state.creatorVersion) {
+      document.querySelector('#live-connections').close();void editorAction(request.command);
+    } else document.querySelector('#live-message').textContent='Draft changed. Select the Step again.';
+    return;
+  }
+  const version=target.closest('button[data-workspace-source]');
+  if(version){const live=version.dataset.workspaceSource==='live';if(live!==state.liveView)void switchWorkspace(live);return;}
+  if(target.closest('#show-live-changes')) {void showLiveChanges();return;}
+  const difference=target.closest('[data-live-change]');
+  if(difference){
+    const id=difference.dataset.liveChange;
+    void (async()=>{
+      const change=state.liveChanges[id];
+      if(change && await switchWorkspace(change.state!=='added')) {
+        await selectWorldNode(id);state.world.focus(id,.5);
+      }
+    })();return;
+  }
   const icon=target.closest('[data-select-icon]');
   if(icon) {
     const selected=state.icons?.find(item=>item.id===icon.dataset.selectIcon);
@@ -6999,10 +7425,14 @@ document.addEventListener("click", event => {
   const exampleTrigger = target.closest("[data-locate-trigger]");
   if (exampleTrigger) {
     const id = exampleTrigger.dataset.locateTrigger;
-    void selectWorldNode(id).then(selected => { if (selected) state.world.focus(id,.5); });
+    void selectWorldNode(id).then(selected => { if (selected) {
+      if (phoneInspector.matches) showInspector(false);
+      state.world.focus(id,.5);
+    } });
     return;
   }
   if (target.closest("#dock-focus")) {
+    if (phoneInspector.matches) showInspector(false);
     state.world?.focus(state.regionSelection?.id || state.selection.id, state.regionSelection ? .5 : undefined);
     return;
   }
@@ -7150,11 +7580,11 @@ document.addEventListener("click", event => {
     openPathPicker(openPath.dataset.openPath, openPath.dataset.inputMeta);
     return;
   }
-  const resetPathButton = target.closest("[data-reset-path]");
-  if (resetPathButton) {
-    resetPath(
-      parseToken(resetPathButton.dataset.resetPath),
-      parseToken(resetPathButton.dataset.inputMeta)
+  const resetInputButton = target.closest("[data-reset-input]");
+  if (resetInputButton) {
+    resetInput(
+      parseToken(resetInputButton.dataset.resetInput),
+      parseToken(resetInputButton.dataset.inputMeta)
     );
     return;
   }
@@ -7165,6 +7595,11 @@ document.addEventListener("click", event => {
       parseToken(emptyJson.dataset.inputMeta),
       ""
     );
+    return;
+  }
+  const addRouteButton = target.closest("[data-add-route]");
+  if (addRouteButton) {
+    addRoute(parseToken(addRouteButton.dataset.addRoute), parseToken(addRouteButton.dataset.inputMeta));
     return;
   }
   const addCandidateButton = target.closest("[data-add-candidate]");
@@ -7398,7 +7833,7 @@ document.addEventListener("change", event => {
     setJsonValue(
       parseToken(target.dataset.inputJson),
       parseToken(target.dataset.inputMeta),
-      target.value
+      target.type === 'checkbox' ? String(target.checked) : target.value
     );
   } else if (target.matches("[data-toggle-input]")) {
     toggleInput(
@@ -7474,6 +7909,20 @@ document.addEventListener("keydown", event => {
     return;
   }
   if (event.ctrlKey || event.metaKey) return;
+  if (event.target.matches('#inspector-nav [role=tab]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
+    const tabs = [...document.querySelectorAll('#inspector-nav [role=tab]')];
+    const current = tabs.indexOf(event.target);
+    const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+      : (current + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+    event.preventDefault(); tabs[index].focus(); tabs[index].click(); return;
+  }
+  if (event.key === 'Tab' && document.body.classList.contains('inspector-full') && !state.groupPicker && !state.picker) {
+    const fields = [...document.querySelectorAll('#inspector button:not(:disabled),#inspector input:not(:disabled),#inspector select:not(:disabled),#inspector textarea:not(:disabled),#inspector summary,#inspector [tabindex="0"]')]
+      .filter(field => field.tabIndex >= 0 && field.getClientRects().length);
+    if (event.target === (event.shiftKey ? fields[0] : fields.at(-1))) {
+      event.preventDefault(); (event.shiftKey ? fields.at(-1) : fields[0])?.focus(); return;
+    }
+  }
   if (event.key === 'Tab' && state.groupPicker) {
     const fields = [...document.querySelectorAll('#group-dialog button:not(:disabled),#group-dialog input:not(:disabled)')]
       .filter(field => field.getClientRects().length);

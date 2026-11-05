@@ -1046,3 +1046,636 @@ Latest scenery-atlas evidence: `railix-scenery-retina-package-smoke.log` and
 the current descriptor choices; it no longer runs the removed Standard variants.
 The original captured sprite strips can be reproduced separately with `railix.sprite.export=true`;
 no screenshot converter runs in the shipped Creator.
+
+## Unified Branching, 2026-10-31
+
+The local reactor `./mvnw test` passed 871 core, 77 standard-library and 1,787 Creator tests.
+The final lazy-allocation adjustment was rechecked with `StepContractJsonE2eTest`,
+`PrimitiveStepsCreatorProjectE2eTest` and `BranchingFlowE2eTest`: 134 tests passed.
+The branching regressions exercise generated production JARs, installed implementations and
+validators, independent failures, atomic writes and rollback, split snapshots, nested-program
+entry snapshots, retained-handle rejection, per-path traces and physical worker drain.
+
+Thirteen selected desktop/narrow browser scenarios passed through the existing JUnit/Playwright
+stack. They cover Branch settings, route/condition edits, save/reopen, Undo/Redo, previews,
+connected-route deletion protection, the 167-node authoring fixture, the 155-node grouped fixture
+and the 1,237-node system with live ingress, Examples and reuse. Narrow navigation was checked at
+430 and 320 pixels. Screenshot captures are local ignored build evidence, not source assets.
+`./mvnw -DskipTests package` built the Creator app image. Its CLI ran a real parallel Branch
+application and printed `"BRANCH_OK"` with exit status zero, without Node.js.
+The complete `clean verify` browser/package/soak matrix and remote CI were not run for this checkpoint.
+
+A production-JAR probe compared baseline `b22fc6c09bca5c97fce669c60cfb2f50be02caf6` with this
+increment through `RuntimeApplication.runSource`. The workload is CLI arguments -> Lowercase ->
+result, with an optional literal-true first-match Choice/Branch before Lowercase. Every response
+is checked. Same local Java 25.0.1 JVM, `-Xms128m -Xmx128m`, one caller, 100,000 warmup calls and
+seven 100,000-call rounds. Values below are medians of the final five rounds. Allocation uses
+the calling thread's JDK allocation counter. Timing is advisory, not a throughput guarantee.
+
+| Workload | Time per call | Allocated bytes per call |
+| --- | --- | --- |
+| Baseline ordinary flow | 0.989 us | 4,272 |
+| New ordinary flow | 1.008 us | 4,304 |
+| Baseline first-match Choice | 1.157 us | 4,968 |
+| Unified first-match Branch | 1.480 us | 6,872 |
+
+The ordinary path adds 32 allocated bytes, not a scheduler or worker. Unified Branch still costs
+more than the old single-purpose Choice. Removing unused snapshot preparation and stream-based
+route copying reduced its probe from 1.743 us / 8,000 bytes to 1.480 us / 6,872 bytes. Parallel,
+large-payload, sustained-load and multi-host costs are not established by this small probe.
+
+### Branch Performance Follow-Up
+
+The first-match path no longer prepares worker/result lists before a continuation is actually
+started. Route matching shares the ordinary matcher-group evaluator without a temporary Boolean
+result map. Route-map copying and the first-match handler avoid unused intermediate collections.
+The public continuation API, atomic commits, copy snapshots and worker ownership are unchanged.
+
+The same production-JAR probe was repeated with five fresh JVMs per version and workload,
+interleaving the versions. Each JVM used the warmup and seven measured rounds described above.
+The table reports the median of the five per-JVM medians of the final five rounds.
+
+| Workload | Before | After | Allocated bytes before / after |
+| --- | --- | --- | --- |
+| First-match Branch | 1.471 us | 1.385 us | 6,872 / 6,144 |
+| Installed Step with eight value inputs | 1.260 us | 1.282 us | 4,816 / 4,816 |
+
+Branch saves 728 bytes per call, about 11%, with about 6% lower measured latency. The multi-input
+control has overlapping timing ranges and unchanged allocation. These are local probes, not a
+general throughput claim. Branch remains more expensive than the earlier single-purpose Choice.
+An attempted generic singleton-map optimization was rejected after a five-JVM control showed
+about 5% higher latency for the multi-input Step without saving allocations. Ordinary input-map
+construction is unchanged. The retained singleton-map optimization applies only to route inputs.
+
+The full browser run exposed narrow-layout and feedback defects missed by the earlier selected
+scenarios. The condition source is now visible without scrolling on 320/390-pixel screens.
+Recorded outcomes mark the actual routes in Configure and Data, including multiple outcomes.
+Type conflicts remain readable when recorded values cannot be loaded. Declared JSON defaults
+are directly editable, scalar JSON uses one row, and explicit Reset restores omission without
+treating empty strings as missing. Reset also clears an invalid unsaved draft consistently with
+other edit actions. Public browser regressions reproduced the feedback/reset defects before fixes.
+
+Local ignored probes and review evidence are under `.railix/branch-performance-evidence/`.
+
+The final `./mvnw clean verify` passed on 2026-10-31 in 25 minutes 38 seconds, without command-line
+test exclusions or fork overrides. It ran in an identical source snapshot under
+`.railix/branch-clean-verify/` so cleaning did not remove pre-existing active previews. All source
+files matched the working tree at that checkpoint. The later Inspector/HUD changes are verified
+separately below.
+
+| Verification layer | Discovered | Failures / errors | Skipped |
+| --- | --- | --- | --- |
+| Core Java | 871 | 0 / 0 | 0 |
+| Standard-library Java | 77 | 0 / 0 | 0 |
+| Creator Java | 1,790 | 0 / 0 | 0 |
+| Desktop browser | 792 | 0 / 0 | 1 |
+| Package and runtime soak | 43 | 0 / 0 | 0 |
+| Narrow browser | 81 | 0 / 0 | 0 |
+
+The single skip is the explicitly opt-in renderer comparison, gated by
+`railix.renderer.comparison`. The normal scene, animation, navigation and browser performance
+scenarios ran. A separate final app-image CLI check executed the parallel Branch fixture and
+printed `"BRANCH_OK"` with exit status zero. Review findings were fixed and rechecked. Owned test
+and helper processes finished. Remote CI and publication have not run for this working tree.
+
+### Inspector And HUD Review
+
+The 2026-11-02 review applied Apple's guidance on
+[toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars),
+[sheets](https://developer.apple.com/design/human-interface-guidelines/sheets) and
+[accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility)
+to the existing web interface, not a new renderer or native UI stack.
+
+Phone editing now occupies the screen. The same Example, history and Settings controls move
+with it. Covered canvas motion pauses, while the application and observations continue.
+Grouping owns assignment and has immediate loading feedback, explicit retry and no late tab,
+focus or reopen side effects. Empty condition catalogs stay collapsed. Scalar JSON controls,
+source/operand alignment, symbol disclosure, import error ownership and narrow footer labels
+were corrected without changing Step execution or adding dependencies or saved preferences.
+
+Ten new public browser journeys cover the changes. The complete responsive selection passed
+all 90 cases, including touch, short landscape layouts, keyboard, examples, errors, connections,
+insertion, groups, settings, import and undo/redo. The 320-pixel condition form keeps its complete
+Expected field above the footer. A real DOM measurement found a 51-pixel spacing defect caused
+by stacked padding/margins and baseline alignment; the corrected gap is 22 pixels.
+
+Manual in-app-browser checks used a saved 1,238-node application with successful and failing
+Examples. The automatic viewport/heap scenario also exercised 6,003 nodes. Independent visual
+and source review findings were corrected and rechecked. Evidence is in the ignored
+`.railix/ui-ux-audit/` directory, with screenshots under `target/screenshots/inspector-*`.
+
+The final `./mvnw verify` passed on 2026-11-02 in 24 minutes 16 seconds, without test
+exclusions or fork overrides. Earlier runs exposed obsolete split-panel/group-entry journeys
+and a zoom test that continued on a rounded percentage before the Home flight finished.
+The journeys now follow the visible controls and wait for the settled camera, retaining their
+execution, data, focus and exact zoom assertions.
+
+| Verification layer | Discovered | Failures / errors | Skipped |
+| --- | --- | --- | --- |
+| Core Java | 871 | 0 / 0 | 0 |
+| Standard-library Java | 77 | 0 / 0 | 0 |
+| Creator Java | 1,790 | 0 / 0 | 0 |
+| Desktop browser | 802 | 0 / 0 | 1 |
+| Package and runtime soak | 43 | 0 / 0 | 0 |
+| Narrow browser | 90 | 0 / 0 | 0 |
+
+The skip is the same opt-in renderer comparison described above. The full log is
+`.railix/ui-ux-audit/verify-confirmed.log`. Current reactor screenshots are in
+`modules/railix-creator/target/screenshots/inspector-*`. Relative to the preceding Branch
+checkpoint, the production browser changes add 167 lines and remove 55, a net addition of 112
+across four existing files. Ten new browser journeys and updated existing journeys cover the
+new behavior. There is no new dependency, persisted mode or duplicate control owner.
+
+This is not Apple certification or proof of every possible interface state. Real-device Safari,
+iOS and VoiceOver were not tested. No new graphics family or audio composition is part of this
+follow-up. The split phone layout and duplicated membership entry point were removed rather
+than retained as alternative modes.
+
+### Radar And Navigation Follow-Up
+
+The follow-up reproduced caption clicks moving the camera into empty space, ignored radar
+input during a camera flight, focus loss after tab visibility changes, overlapping nested
+breadcrumbs and a failing Example name compressed to 91 pixels. The fixes retain the same
+select and action controls, keep every ancestor reachable through one native popover, cancel
+camera flights on radar input and reuse a current overview after returning to the tab.
+
+Further review found detached popovers, overflow with a valid 61-character project id and
+overlapping radar/timing controls in 320/390 by 360-pixel viewports. Native CSS positioning
+anchors the parent popover without a JavaScript positioning loop, following the
+[WebKit anchor-positioning guidance](https://webkit.org/blog/17240/a-gentle-introduction-to-anchor-positioning/).
+The short layout wraps the timing scale beside the radar. Return placement is refreshed after
+the scale changes. Timing membership uses the canvas bounds rather than HUD occlusion, removing
+the legend's show/hide feedback dependency. No extra redraw loop is retained.
+
+Seven new browser scenarios add thirteen parameterized cases per viewport. Their regressions
+include controlled camera time, tab visibility changes, keyboard return, repeated settled
+refreshes, combined Example/read failures and Retry recovery. The selected responsive run at
+390 pixels passed all 103 cases, also exercising explicitly selected 320, 823 and 1280-pixel
+layouts. Manual checks used the saved 1,238-node application with nested groups, failing Examples,
+all four Inspector tabs and the radar. Screenshots are ignored build evidence, not theme assets.
+The packaged Creator JAR was checked separately with that saved application and an isolated
+home directory. Desktop and phone navigation, the failing Example and the parent popover
+worked without browser errors. Task-owned preview servers and browser tabs were then closed.
+
+The final targeted Inspector/HUD run passed all 23 cases. Full-run testing also exposed
+regression-harness defects: a text assertion compared layout newlines rather than the accessible
+measurement label, and a one-millisecond virtual-clock pause point could be overtaken under
+parallel browser load. The assertions retain the visible scale and stable measurement checks.
+The pause point now leaves virtual time for the protocol round-trip, without a real-time sleep
+or a production behavior change. The short arrival-picker test no longer requires station labels
+behind its open panel to be visible. It still checks insertion, undo, route selection, button
+bounds and hit targets. Two existing navigation journeys now open the parent menu before
+choosing an ancestor, retaining the camera-restoration, selected-Example and delayed-focus checks.
+
+The final plain `./mvnw verify` passed on 2026-11-02 in 24 minutes 28 seconds, with no test
+exclusions or fork overrides. Of 3,699 discovered cases, 3,698 passed and the opt-in renderer
+comparison was skipped. Core Java ran 871 cases, the standard library 77, Creator Java 1,790,
+desktop browsers 815, package/runtime checks 43 and narrow browsers 103. There were no failures
+or errors. The complete log is `.railix/ui-ux-audit/radar-verify-final-state.log`.
+
+The combined Inspector/HUD production diff against the preceding Branch checkpoint now adds
+221 lines and removes 82, a net addition of 139 across four existing browser files. No runtime
+dependency, persisted mode, duplicate control owner or second graph model was introduced.
+Evidence and review logs are under `.railix/ui-ux-audit/radar-*`. Real Safari/iOS and VoiceOver
+remain unverified. Browser checks do not establish Apple certification or exhaustive state coverage.
+
+### Shared Runtime Observation
+
+The 2026-11-03 follow-up removes environment-dependent ordinary dispatch, runtime context and
+metric instrumentation. Both generated outputs use direct handler references and one
+`RuntimeMetrics` implementation. Example execution and recorded values remain optional.
+Normal ingress returns the same complete context, including `runtime.test=false`.
+
+`ApplicationMetricsParityE2eTest` builds both real JARs, calls their ordinary ingress and hosts
+the same authenticated metric HTTP handler. It checks exact counters, rejected unauthenticated
+reads, invalid queries and closed admission. The no-Example JAR omits Example execution and
+tracing, but retains the shared metric classes. Existing installed-bundle, lifecycle, failure,
+cancellation, trace and concurrency tests exercise the common implementation.
+
+Review reproduced slow query bodies consuming metric-reader admission: two unfinished requests
+made a normal metric read return 503. `MetricsEndpointE2eTest` first failed through real HTTP.
+Separate body and reader admission restores 200 responses without removing either budget or
+the body deadline. Ordinary convergence remains independent per arrival, without waiting or
+context merging, as clarified by the user on this date.
+
+The plain `./mvnw clean verify` passed in 24 minutes 33 seconds in an isolated source snapshot,
+protecting existing previews. There were no fork overrides, test exclusions, failures or errors.
+The final whitespace-only cleanup was followed by another successful 872-case core run.
+
+| Verification layer | Discovered | Passed | Skipped |
+| --- | --- | --- | --- |
+| Core Java | 872 | 872 | 0 |
+| Standard-library Java | 77 | 77 | 0 |
+| Creator Java | 1,792 | 1,792 | 0 |
+| Desktop browser | 815 | 814 | 1 |
+| Package and runtime soak | 43 | 43 | 0 |
+| Narrow browser | 103 | 103 | 0 |
+
+The skip is the existing opt-in renderer comparison. The million-call run completed with a
+64 MiB heap. The 129-Step baseline measured 68,199 ns per invocation and 87,784 allocated bytes
+per invocation. Browser tests exercised the saved 6,003-node fixture at 1280 and 320 pixels.
+Its overview is collapsed, not 6,003 simultaneously rendered stations. No UI redesign was made.
+
+An additional serial comparison built the same two-Step CLI project from the preceding commit
+`765f6baa1836c89755fcb34447124316510e1ce8` and from this change. Each artifact ran three separate
+JVMs with a 64 MiB heap, 100,000 warmup calls and 15 batches of 20,000 measured real-ingress calls.
+The table reports the median of each JVM's batch median. No browser tests ran concurrently.
+
+| Artifact | Wall ns/call | Calling-thread CPU ns/call | Calling-thread allocated bytes/call |
+| --- | --- | --- | --- |
+| Previous ordinary artifact, without metrics | 995.9 | 970.2 | 4,304 |
+| Shared runtime, without Examples | 1,058.6 | 1,035.7 | 4,440 |
+| Shared runtime, with Example capability, ordinary ingress | 1,005.3 | 982.6 | 4,440 |
+
+The no-Example artifact costs about 63 ns and 136 bytes more than the previous unobserved
+artifact in this small scenario. This includes all changed execution/context behavior, not an
+isolated measurement of metric recording. The two new artifacts allocate identically here.
+The short timing comparison is not proof of equal latency for every project or a throughput
+certificate. Capturing Example values and external I/O were not timed by this comparison.
+
+The Java production diff adds 1,517 lines and removes 1,347, net +170. Java tests add 254 and
+remove 75, net +179. Most metric and HTTP code was moved, not eliminated. The removed maintenance
+obligations are separate ordinary call tables/trace wrappers and environment-specific metric
+generation. No runtime dependency, second interpreter or legacy metric alias was added.
+
+Evidence is under ignored `.railix/runtime-parity/`: `clean-final.log`, `core-final.log`,
+`slow-body-before.log`, `slow-body-after.log`, benchmark sources and `benchmark-results.jsonl`.
+The snapshot retains JUnit reports and screenshots. Task-owned helper processes were stopped.
+Automatic standalone listener/discovery, final explicit build options, Creator assertions and
+real-traffic tracing remain open work. The HTTP probe does not prove automatic Creator attachment.
+
+### Stateless Creator Assertions
+
+The subsequent 2026-11-03 increment adds authenticated Creator checks over a selected ordinary
+Step's recorded context. Equality is structural and numerically exact. Absence is not JSON null.
+Checking retained evidence does not execute a Step, write project files or change Step counters.
+Installed third-party Steps use the same boundary. A later failing Step does not invalidate a
+completed earlier snapshot or make the application itself stopped.
+
+Review reproduced truncated recording being mistaken for an unvisited Step. Example summaries
+now identify complete recording, and Step projections expose their visit count. Incomplete evidence
+is unavailable, and repeated visits are rejected as ambiguous until their selection policy is
+agreed. Checks share the existing response admission, a single 30-second deadline and bounded
+request/result sizes. Source revision, artifact and application PID guard evidence freshness.
+
+`./mvnw test` passed all 2,774 Java cases: 872 core, 77 standard-library and 1,825 Creator cases.
+The Creator count includes 33 new public-HTTP assertion cases. A separate reactor invocation
+compiled the current sources and ran Data Workbench, Branch and Inspector browser journeys with
+both Failsafe executions and their verification goals. All 90 desktop and 28 narrow cases passed.
+No exclusions or fork overrides were added. These runs followed, and do not replace, the preceding
+full clean gate. The full clean gate has not been repeated after this assertion increment.
+
+Relative to that checkpoint, Java production code adds 272 lines and removes six, net +266.
+The regression suite adds 292 lines. This is additional validation behavior, not a code-reduction
+claim. It reuses existing evidence, authentication, admission and lifecycle owners rather than
+introducing an assertion runtime in generated applications.
+
+Evidence is under ignored `.railix/assertions-local/`: `assertions-before.log`,
+`incomplete-before.log`, `all-java.log` and `browser-regression.log`. There is no new dependency,
+background evaluator, retained assertion-result cache or second Step execution path. Test-owned
+JVMs and browser helpers have exited. Existing preview processes were left alone.
+
+No assertion UI or persistence migration is delivered by this increment. Saved expectations,
+stable Example identity, suite validation, standalone listener/discovery and the final build-option
+surface remain open. The user selected local observation enabled by default with a build-time
+opt-out. That decision is recorded, not yet an implemented connection.
+
+### Separate Example Storage
+
+The next 2026-11-03 increment moves authored cases and optional expectations together into
+`railix.examples.json`. Creator imports embedded cases once, preserves their IDs and allocates
+opaque IDs for new cases. The Flow file no longer stores them. The existing compiler consumes a
+transient combined input without expectations. Installed and built-in Triggers still use the same
+definition contracts. Saved-check edits do not rebuild the application or enter its JAR resources.
+
+Independent review and public tests exposed lost expectations during Undo/rollback, an orphan
+Example file being overwritten by a new empty project, ambiguous recovery and stale positional
+IDs in the selector. The existing journal now records before/planned-after documents and owns
+the three-file transaction. History restores affected checks. Recovery and pre-write checks
+preserve observed outside edits. A successful real source activation followed by an outside
+metadata edit now rejects the conflicting editor action and restores the accepted Flow/artifact.
+One-file expectation edits retain atomic replacement and content-hash conflicts without creating
+another transaction manager. A no-op preserves file bytes, revision and Undo state.
+
+The plain `./mvnw test` passed all 2,788 cases: 872 core, 77 standard-library and 1,839 Creator.
+After the final journal guard/refinement, another same-reactor run passed 14 storage cases,
+18 complete-editor cases, 13 installed-source lifecycle cases and the core/standard-library
+prerequisites. The new concurrent-write case verifies exactly one accepted save and one conflict.
+The final saved-case/selection browser journey passed again at 1280 and 320 pixels.
+
+The broader Data Workbench, Branch and Inspector run passed all 90 desktop and 29 narrow cases.
+The saved 6,003-node world then passed both viewport runs with 60 measured navigation requests
+each. Request p95 was 1.905 ms at 1280 pixels and 1.838 ms at 320 pixels, excluding input debounce.
+The world uses collapsed and culled representations, not 6,003 simultaneous glyphs. The short
+post-GC series grew by about 244/263 KiB and does not establish leak freedom or GPU utilization.
+No new graphics family was introduced. Screenshots include `example-document-1280.png`,
+`example-document-320.png` and the two `world-6003-*` series in the snapshot's ignored screenshots.
+
+Relative to the stateless-assertion checkpoint, Java production adds 632 lines and removes 119,
+net +513. Java tests add 417 and remove 36, net +381. Browser production adds four lines and
+removes three. This is additional storage and recovery behavior, not a code-reduction claim.
+It replaces duplicated raw project read/write helpers and extends the existing journal/history
+rather than retaining a second writable Example source or another execution engine.
+
+Evidence is under ignored `.railix/assertions-local/`: `example-files-complete-java.log`,
+`example-owner-final.log`, `example-browser-final-state.log`, `example-large-world-final.log`
+and the independent review. All test-owned JVMs, browser drivers and review helpers exited.
+Existing previews were left alone. The sources match the tested isolated snapshot.
+
+The earlier full clean gate predates this storage increment and has not been repeated for it.
+No publication or merge readiness is claimed. Saved-check API/storage is complete for this slice;
+the JSON-field authoring UI, whole-suite validation/release policy, standalone observation
+connection and final build-option surface remain separate open work.
+
+### Project Documents In Application JARs
+
+The 2026-11-03 source-portability increment adds `build --include-project` and
+`creator --application`. Both embedded and local documents use the existing project formats,
+compiler and installed bundle contracts. No reduced graph description or persisted scene is added.
+The source revision belongs in the standard JAR manifest. Source inclusion does not enable
+Example execution or application-side assertions in the standalone JAR.
+
+Public CLI and artifact tests verify original document bytes, deterministic separate build keys,
+byte-identical executable classes with/without source, real JAR execution, and Creator opening.
+They cover missing/mismatched projects, reserved dependency entries, malformed archives, UTF-8,
+tampered inflated sizes, actual JAR signature failures and the agreed 64 MiB document limit.
+Installed bundles work in both variants. Missing artifacts reject restoration without publishing
+a workspace. Captured lock bytes remain paired with compiled code after a later disk replacement.
+A controlled installed validator proves that a source change during compilation rejects publication.
+Expected compilation and stale-input rejections retain `CompileResult.Rejected` rather than
+throwing exceptions only to print their messages.
+
+The broad `./mvnw package` checkpoint passed 2,817 Java cases: 872 core, 77 standard-library and
+1,868 Creator, and built the native Creator image. After the final capture/result refinements,
+a same-reactor targeted package run passed all 139 selected/prerequisite cases. Five native
+launcher cases passed, including both source variants with system Java removed from PATH and
+CLI argument/missing-project behavior. Four Chrome journeys passed at 1280 and 320 pixels with the
+saved 155-Step project, three Examples and four linked audit uses. Original data, group selection
+and recorded group field changes remained available in both source variants.
+
+The sample's three documents total 51,375 bytes. Its JAR is 332,845 bytes without source and
+337,270 bytes with source, a 4,425-byte compressed increase. The 64 MiB cap is a safety bound,
+not a target size. No source capture, metric history, rendered topology or default expansion is
+saved as another project document. One existing snapshot test no longer requires a request to
+stay unfinished until a later status poll. Its saturation, frozen old status and fresh completed
+projection checks remain intact.
+
+Relative to the separate-storage checkpoint, Java production adds 335 lines and removes 50,
+net +285. Tests add 547 and remove 14, net +533. This is feature growth, not a code-reduction claim.
+Captured originals replace the competing lock reread as package input, and both catalog entry
+forms share the same parser. No new runtime dependency or Step execution path is introduced.
+
+Evidence is under ignored `.railix/project-packaging/`: `package-verified.log`,
+`capture-race-red.log`, `source-final-verified.log`, `native-desktop-complete.log`,
+`mobile-complete.log` and review outputs. Screenshots are the snapshot's `project-source-*` series.
+The complete `clean verify` gate has not been repeated for this increment. Disk-full and cleanup
+faults were not injected, and Grype was unavailable. Independent application attachment and the
+simultaneous deployed/local comparison remain open, not delivered by this source-loading feature.
+The current source files match the tested snapshot. Task-owned test and review processes exited;
+the pre-existing previews were left untouched. No commit, push or pull-request update was made.
+
+### Readonly Live Connection And Draft Comparison
+
+The 2026-11-03 attachment increment connects an independently started application through the
+same `MetricsEndpoint` used by Creator-owned execution. Ordinary builds enable an authenticated
+loopback listener. `build --no-observation` disables only that connection. Normal `build` and
+`creator` need no new arguments. Project actions select the running application in the UI.
+Project sources remain either the original embedded documents or matching local files. No reduced
+graph format, saved comparison, process-control endpoint or new runtime dependency was added.
+
+Public tests launch real application JARs, authenticate observation, read real HTTP ingress metrics,
+reject control routes, and verify that closing Creator leaves the observed application alive.
+They cover both source variants, stale process registrations, unsafe credential permissions,
+CLI exit with observation disabled, staged/cancelled selection, instance-pinned reads and restores,
+independent local edits, connected-section restoration and ordinary Undo. Restoration uses the
+declared primary outcome, including a route with a secondary terminal exit, not built-in Step IDs.
+
+The saved 156-node branch-heavy application opens through the real connection menu with linked
+groups and local Examples preserved in Draft. Live has no Example execution or mutation controls.
+Browser tests inspect a removed Step with its old connections and restore it in Draft. Separate
+regressions forward a live catalog request, fail its response after server selection, and verify
+Draft recovery plus a subsequent selection of the correct live instance. Header-triggered failures
+must be visible too. Simultaneous app startup exposed and removed a directory-creation race.
+
+Five earlier clean gates were not accepted as green. Corrections retain
+durable Example IDs in authoring checks, remove an old test fixture's competing Example document,
+and let the existing poll retry transient scope reads while permanent rejections still require
+an explicit retry. Converging routes no longer each claim the common destination's full count.
+The third run exposed a desktop-only test action against the intentionally hidden mobile header.
+The test now follows the reachable narrow-screen path. A real-HTTP regression also found stale
+selected-group metrics. Groups now use the same live metric refresh container as individual Steps.
+The existing observation cycle notifies the Inspector after a read and when discarding its
+snapshot. Real HTTP requests update both selected groups and Steps. Unchanged facts retain their
+DOM. A completed-read shutdown regression verifies that stopped processes leave no stale Live
+metric rows while the selected Step and its read-only configuration remain available.
+The fourth run found one Authoring test assuming Example values could never be temporarily busy.
+It now follows the existing explicit Retry control before checking that a Step cannot offer its
+own returned field as an input. The projection remains read-only and does not rerun the Example.
+The user subsequently approved one automatic retry for transient recorded-value failures. Summary,
+Step and section reads now use the existing visible-page poll for that one retry. A second failure
+waits for Retry. Permanent failures do not retry automatically and no new timer was added.
+The fifth run found a Settings ordering test polling fresh reads while waiting for its write.
+It now observes the actual successful POST and its edited value before releasing newer held
+snapshots. Final saved preferences and the untouched volume are still checked through the public
+API. All four response-order cases pass in the focused follow-up. Product Settings behavior did
+not change.
+
+The sixth exact `./mvnw clean verify` passed at 21:57 on 2026-11-03, before the subsequently approved
+explicit-local-start and one-retry changes. It executed 3,802 passing tests and skipped only the
+optional renderer comparison benchmark. That checkpoint does not verify the subsequent changes.
+
+The user also approved pausing only the owned local application when a Live connection is confirmed.
+A compiled build holds a separate lease without running a JVM. Draft edits still compile and persist.
+`Start locally` uses the existing start/activate lifecycle and leaves revisions and history unchanged.
+Public tests cover an occupied trigger port, failed start retaining the ready build, successful
+explicit start, completed local Examples and idempotent reconnection. The independently running app
+remains available throughout. Normal Creator startup without a Live connection still auto-starts.
+The follow-up review found an unused-build leak after a failed paused edit. A real 512-Step build
+with an outside source change reproduces the retained folder. The prepared candidate now takes
+ownership before the publication lease is released, so ordinary discard removes the failed build.
+Recovery preserves the outside file and the prior ready build. All ten Live API scenarios and the
+focused six desktop/three narrow browser cases pass. The independent read-only follow-up reported
+no further actionable findings. These focused checks do not replace the final clean gate.
+The subsequent gate exposed an obsolete test that rejected all application POSTs and a discovery
+test that could read the temporary registration file before atomic publication. The method check
+now uses PUT, while invalid start POSTs remain rejected. Discovery waits through the public
+connection reader and inspects only its published record. No production discovery policy changed.
+The complete browser pass then found one more old zero-retry assertion. Its actual two reads match
+the approved initial read plus one retry. The updated assertion passes through the real browser.
+An additional public `CreatorServer.start` probe with a real occupied loopback application port
+reproduces an initial-start limitation: Creator closes before offering Live selection. Whether to
+open a ready draft after an initial activation failure is awaiting the user's decision. It is not
+silently folded into the confirmed-connection pause policy.
+
+Final verification of the approved additions passed on 2026-11-03 at 23:33 CET. The exact
+`./mvnw clean verify` finished in 26:02 with 3,805 passing tests and one skipped optional renderer
+comparison benchmark. Counts are 872 core, 77 standard-library, 1,880 Creator unit/API, 823 desktop
+browser (including that skip), 45 package/soak and 109 narrow browser cases. The earlier zero-retry
+assertion was corrected, not suppressed. The final source tree matched the isolated snapshot.
+The aggregate report has 92.70% line and 84.26% branch coverage, below the non-gating 95%/90% goals.
+Remaining observation gaps include malformed discovery variants, filesystem/lease cleanup failures
+and unsupported protection paths. Ready-owner read fallbacks are also unexercised because public
+routes reject non-running owners before dispatch. Grype was unavailable and raw-header saturation
+was not fuzzed. These checks do not establish full release or security certification.
+Task-owned build, browser, probe and review processes have ended. Existing unrelated previews were
+preserved. Evidence is retained under ignored `.railix/live-connection/`, including failure
+reproductions, review outputs, screenshots and the final `clean-verify-bounded-retry.log`.
+Screenshots are the snapshot's `live-workspace-*`, `live-comparison-*` and `live-draft-ready-*` series.
+The initial-start fallback decision remains open as described above. Remote attachment, deployment,
+real-traffic payload recording and a full release-readiness claim are outside this increment.
+
+## Step-Defined Application Metrics
+
+The 2026-11-04 increment extends the existing [application metric contract](specs/observation.md#development-observation).
+Step definitions declare fixed counters and gauges. The generated application owns their storage
+and publishes them through its existing endpoint. Static Step functions obtain prebound handles
+in PRE, PROCESS and POST. No Step-owned server, listener, timer or request-derived registration
+was added. Unused measurements share no-op handles. A gauge uses one atomic slot, including its
+unobserved state, rather than a value plus a separately coordinated flag.
+
+Focused checks pass through authenticated HTTP and actual generated JARs with and without Examples.
+`StepMetricsApplicationE2eTest` installs a real external bundle and drives concurrent real ingress.
+It verifies independent placements, repeated nested functions, lifecycle counts and disabled
+measurements. `StepMetricsE2eTest` verifies 160,000 concurrent increments, overflow saturation,
+validation, absent gauges, group aggregation, preserved placement details and exact text exports.
+The review found and resolved lost nonaggregatable nested gauges, ambiguous Prometheus family
+names and missing placement details in Live. The final read-only review found no actionable issue
+in this slice.
+
+Browser checks use the existing Inspector in a saved branch-heavy project with Examples and
+linked groups, plus an independently running HTTP app. Both desktop and 320-pixel layouts show
+custom measurements. Live values update after real requests and disappear when that instance
+exits. Repeated nested gauges remain separate. Screenshots and review logs are retained in ignored
+`.railix/live-connection/` evidence, not committed generated artifacts.
+
+Local public-API measurements observed 7.20 ns per enabled counter update and 3.33 ns
+for a disabled update, including the context/name lookup. Both measured 0 additional allocated
+bytes per update. These are warmed, uncontended measurements, not a concurrency-throughput claim.
+The final-source probe used GraalVM CE 25.0.1 without a coverage agent, five warmup blocks and nine
+measured blocks of two million updates. It also checks the resulting counter to prevent measuring
+discarded work. Its source and output are retained with the ignored evidence.
+Three fresh-JVM comparisons of the unchanged CLI-to-lowercase generated app measured median
+1.035 microseconds before and 1.036 microseconds after the extension, with 4,440 allocated bytes
+per complete invocation in both. Each JVM used five warmup and nine measured 100,000-call blocks.
+The observed spread was larger than the timing difference, so this does not establish a speedup.
+
+The additional scale review reproduced two generator-boundary failures. Metric declarations could
+bypass the existing per-Step source budget, and count-only array partitioning could emit an
+oversized Java initializer. Both regressions fail before the correction. The existing source
+budget now includes metric metadata, and constant arrays also partition by content size. A real
+installed-bundle JAR with 96 Steps and 100 declarations each now builds and executes successfully.
+The first full `./mvnw clean verify` completed in 26:44 with one existing desktop source-selection
+case blocked on a disabled Example picker. It did not include the final generator correction.
+A deterministic browser regression holds the old application-status GET while selecting another
+Step. It fails before the fix. Follow-up cases reproduce the same delay when opening a group or
+its Inspector. All selection paths now cancel the old read and request an immediate refresh through
+the existing owner. The three cases pass on desktop and narrow layouts, as do both shared-source
+selection cases. No new reader, timer or retry policy was added. A second clean gate was stopped
+when the group cases exposed that incomplete correction, rather than reported as successful.
+Another browser regression reproduces incorrect thousands grouping inside decimal gauge values.
+The common number formatter now groups only the integer part and preserves the fraction.
+The final focused run passes all four generated-bundle cases, seven desktop browser cases and five
+narrow cases, along with the affected core tests. The final read-only follow-up found no actionable
+issue in these corrections.
+
+The final exact `./mvnw clean verify` passed on 2026-11-04 at 21:01 CET in 26:46. XML reports
+confirm 3,829 passing tests, zero failures/errors and one skipped optional renderer comparison.
+Counts are 884 core, 77 standard-library, 1,884 Creator unit/API, 827 desktop browser (including
+the skip), 45 package/soak and 113 narrow browser cases. Application code and tests match the
+isolated snapshot. Aggregate coverage is 92.73% line and 84.17% branch, below the non-gating
+95%/90% goals. Some metric-declaration rejection combinations, observation protection/cleanup and
+other existing failure branches remain uncovered. This is not complete release or security certification.
+
+Fresh desktop and narrow screenshots were inspected for both Draft and Live. Task-owned test,
+browser, probe and review processes have ended. Existing previews were left alone. The redundant
+scale-only snapshot was removed after checking ownership and references. The final build, failing
+regressions, review logs, benchmark sources/results and screenshots remain under ignored
+`.railix/live-connection/`, including `step-metrics-clean-verify-complete.log` and
+`evidence/step-metrics-*`.
+HTTP next-free-port selection and the preferred/active-port display remain separate, unimplemented
+work under HT-002/009.
+
+## HTTP Port Selection
+
+The following 2026-11-04 increment closes the port-selection gap named above. HTTP definition
+version 2 adds a default-enabled `next_free_port` input and two fixed gauges through the existing
+Step contract. One server tries actual binds in order on the resolved address. Unknown errors,
+invalid addresses, strict mode, interruption and range exhaustion do not continue searching.
+No availability-probe race, wrap-around, extra metric server or HTTP-specific compiler/Creator
+branch is introduced. The runtime now attributes activation failure to the source's graph Step.
+Only the HTTP Step reports its own native bind reason; arbitrary third-party exception messages
+remain excluded from generic lifecycle results.
+
+The new real-JAR port cases first failed on missing fallback/measurements. Another regression
+reproduced the empty Trigger identity on startup failure. Cases cover both artifact variants,
+free and occupied ports, strict mode, OS-selected port zero, an unavailable address, exhaustion
+at 65535 and two simultaneously active applications. Real requests and listener release are checked.
+An old Live test assumed its preferred port remained free while another test bound it. It now
+uses the authenticated active-port measurement rather than guessing. Native unavailable-address
+wording differs between Linux and macOS; the failure-output check accepts either JDK wording.
+The final focused API/generated-JAR run passes 170 Creator cases plus 11 core and 77 library cases.
+Responsive saved-project and readonly Live journeys exercise the generic Inspector and the real
+installed socket source's own port gauge on desktop and at 320 pixels (four passing browser cases).
+The generic startup report also retains the source's graph Step identity in the Example-enabled
+launcher. An additional public regression reproduces and fixes a late completion callback racing
+with shutdown cleanup. A completed source cannot replace its final status or throw solely because
+cleanup already ended. Ordinary conflicting completion reports are still rejected while active.
+
+Creator activation failures reuse the existing 16 KiB process-output buffer and its existing
+bounded drainer join, rather than introducing a log reader or status API. Only authenticated,
+origin-checked local mutation responses receive that owned-process diagnostic. Observed remote
+output is not read. The first-buffer retention policy can omit a late diagnostic after verbose PRE
+output. It is bounded diagnostic evidence, not complete logging or automatic secret redaction.
+The final read-only follow-up found no introduced actionable findings. Grype and Gitleaks are
+unavailable on the verification host. A local changed-file scan found no credential-pattern matches,
+and all 28 added relative documentation links resolve.
+
+The exact final `./mvnw clean verify` passed on 2026-11-04 at 22:16 CET in 26:44. XML reports
+confirm 3,850 passing cases, zero failures/errors and one skipped optional renderer comparison.
+Counts are 884 core, 77 standard-library, 1,903 Creator unit/API, 828 desktop browser (including
+the skip), 45 package/soak and 114 narrow browser cases. The isolated snapshot matches the
+application source and tests. Fresh desktop/narrow Draft and Live port screenshots were inspected
+and retained under ignored `evidence/http-active-port-*`. Task-owned test/browser/review processes
+ended without touching existing previews. Final-source public-API counter measurements observed
+7.81 ns/update enabled and 4.55 ns/update disabled, both with zero additional measured allocated
+bytes, under the same warmed uncontended protocol as above. These are observations, not a speedup.
+Aggregate coverage is 93.01% line and 84.25% branch, below the non-gating 95%/90% goals. Uncovered
+rejection/protection and cleanup-failure combinations remain a verification gap. The full log is
+retained as `publication-clean-verify.log`; GitHub checks remain separate publication evidence.
+
+Unknown native occupancy message languages fail closed and are not verified. The existing broader
+HTTPS/CORS and real-traffic payload-recording work remains outside this increment.
+
+The first GitHub run for `fb087d1` failed one desktop timing-label assertion after the local gate
+passed. It measured a fractional relative-position change while the font/camera refresh could
+still be settling. No runtime defect was demonstrated by that assertion. The test-only correction
+waits for fonts, the public scene refresh and its rendered frames, then reads both rectangles in
+one browser evaluation. Every arrow direction must visibly move the station and apply a fresh
+scene before comparison. The original 0.1-pixel tolerance is unchanged. Failure diagnostics are
+now retained for this case. The four affected desktop cases and the generated-JAR metric/port
+checks pass, and the final read-only review found no actionable issue in this correction.
+The focused log is retained as `publication-layout-final-focused.log`. The complete local
+follow-up is recorded below. A new GitHub check remains required before merging.
+
+The follow-up clean gate completed on 2026-11-05 at 00:05 CET with three real-time audio timeouts,
+not a successful result. All three reproduce in isolation. Failure snapshots show visible pages
+with running audio contexts still at 0.00533 seconds after the 30-second waits. Offline synthesis
+passes. Headless browser tests now use Chromium's `--disable-audio-output` switch to isolate the
+physical output device while preserving real Web Audio rendering, scheduling and autoplay rules.
+Chromium selects an [output-only substitute](https://github.com/chromium/chromium/blob/main/media/audio/audio_manager_base.cc)
+whose [worker requests real audio buffers](https://github.com/chromium/chromium/blob/main/media/audio/fake_audio_output_stream.cc).
+No player code, score, timeout or expected value was weakened. The volume case additionally
+requires the audio clock to advance before checking its controls. All three cases then pass.
+Audio clock/state/gain details and traces are retained on failure. These automated checks do not
+verify physical speakers or audible device recovery. Reproduction and corrected logs are
+`publication-audio-reproduction.log` and `publication-audio-isolated.log`.
+
+The corrected exact `./mvnw clean verify` passed on 2026-11-05 at 00:37 CET in 25:55. XML reports
+confirm 3,850 passed, zero failures/errors and one skipped optional renderer comparison, with the
+same suite counts as above. Source and tests match the isolated snapshot. Aggregate coverage is
+93.04% line and 84.25% branch, still below the non-gating goals. The final follow-up review found
+no actionable issue. Task-owned test, browser and review processes have ended. Fresh desktop and
+narrow port screenshots are retained in ignored `evidence/publication-followup/`; the full log is
+`publication-followup-final-clean-verify.log`. No product code changed in this follow-up.
+The initial published `fb087d1` GitHub check failed. The local gate does not replace the required
+green GitHub check on the corrected commit before merging.

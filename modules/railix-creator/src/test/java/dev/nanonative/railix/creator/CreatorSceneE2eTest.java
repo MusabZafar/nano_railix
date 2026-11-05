@@ -169,7 +169,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"left","payload":[],"context":{"left":true}},
                     {"name":"right","payload":[],"context":{"left":false}}]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[[{"option":"field","inputs":{"field":["context","left"]},"when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]}},
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[{"option":"field","inputs":{"field":["context","left"]},"when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]}]}},
                   {"id":"a","use":"railix.field-manipulation","inputs":{"field":["context","route"],"value":[{"option":"literal","inputs":{"literal":"a"}}],"steps":[]}},
                   {"id":"b","use":"railix.field-manipulation","inputs":{"field":["context","route"],"value":[{"option":"literal","inputs":{"literal":"b"}}],"steps":[]}},
                   {"id":"merge","use":"railix.field-manipulation","inputs":{"field":["context","done"],"value":[{"option":"literal","inputs":{"literal":true}}],"steps":[]}}],
@@ -296,7 +296,9 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     void unequalSubtreesStillHaveSymmetricChoiceSocketsAndBeltLengths() throws Exception {
         final Path project = directory.resolve("railix.project.json");
         final String source = branchGroupProject()
-                .replace("\"id\":\"matched\",\"use\":\"railix.field-manipulation\"", "\"id\":\"matched\",\"use\":\"railix.choice\"")
+                .replace("\"id\":\"matched\",\"use\":\"railix.field-manipulation\",\"inputs\":{}",
+                        "\"id\":\"matched\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":["
+                                + "{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}")
                 .replace("{\"from\":\"matched.next\",\"to\":\"end\"}",
                         "{\"from\":\"matched.match\",\"to\":\"end\"},{\"from\":\"matched.otherwise\",\"to\":\"end\"}");
         Files.writeString(project, source);
@@ -584,7 +586,8 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     @Test
     void tallBranchGroupEntersAtItsOriginRatherThanItsTopmostBranch() throws Exception {
         final String nodes = IntStream.range(0, 15).mapToObj(index ->
-                "{\"id\":\"branch-" + index + "\",\"use\":\"railix.choice\",\"inputs\":{\"conditions\":[]}}")
+                "{\"id\":\"branch-" + index + "\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":["
+                        + "{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}}")
                 .collect(java.util.stream.Collectors.joining(","));
         final String links = IntStream.range(0, 15).mapToObj(index ->
                 "{\"from\":\"branch-" + index + ".match\",\"to\":\"" + (index < 7 ? "branch-" + (index * 2 + 1) : "end") + "\"},"
@@ -647,8 +650,8 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
                 .replace("\"nodes\":[", "\"nodes\":[" + corridorNodes)
                 .replace("\"links\":[", "\"links\":[" + corridorLinks)
                 .replace("{\"id\":\"route\"", "{\"id\":\"normalize\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},"
-                        + "{\"id\":\"guard\",\"use\":\"railix.choice\",\"inputs\":{}},"
-                        + "{\"id\":\"limit\",\"use\":\"railix.choice\",\"inputs\":{}},"
+                        + "{\"id\":\"guard\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}},"
+                        + "{\"id\":\"limit\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}},"
                         + "{\"id\":\"disabled\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},"
                         + "{\"id\":\"rejected\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},"
                         + "{\"id\":\"route\"")
@@ -958,9 +961,9 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         final String outputs = IntStream.range(0, steps).mapToObj(index ->
                 "{\"id\":\"output-" + index + "\",\"use\":\"railix.field-manipulation\",\"inputs\":{}}")
                 .collect(java.util.stream.Collectors.joining(","));
-        final String cases = IntStream.range(0, steps - 1).mapToObj(index ->
-                "{\"outcome\":\"case-" + index + "\",\"option\":\"literal\",\"inputs\":{\"value\":1},"
-                        + "\"when\":{\"transforms\":[],\"all\":[]}}")
+        final String routes = IntStream.range(0, steps - 1).mapToObj(index ->
+                "{\"outcome\":\"case-" + index + "\",\"inputs\":{},\"groups\":[[{\"option\":\"literal\","
+                        + "\"inputs\":{\"value\":1},\"when\":{\"transforms\":[],\"all\":[]}}]]}")
                 .collect(java.util.stream.Collectors.joining(","));
         final String links = IntStream.range(0, steps).mapToObj(index ->
                 "{\"from\":\"route." + (index == steps - 1 ? "otherwise" : "case-" + index)
@@ -971,9 +974,9 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
                 {"format":1,"id":"branch-lanes","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{"name":"example","payload":[]}]},
-                  {"id":"route","use":"railix.switch","inputs":{"cases":[%s]}},%s
+                  {"id":"route","use":"railix.branch","inputs":{"routes":[%s]}},%s
                 ],"links":[{"from":"app.start","to":"command"},{"from":"command.next","to":"route"},%s]}
-                """.formatted(cases, outputs, links));
+                """.formatted(routes, outputs, links));
         final String groups = IntStream.range(0, steps).mapToObj(index ->
                 "\"output-" + index + "\":{\"group\":\"reply\"}")
                 .collect(java.util.stream.Collectors.joining(","));
@@ -1165,7 +1168,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         final StringBuilder nodes = new StringBuilder("""
                 {"id":"app","use":"railix.app","inputs":{}},
                 {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{"name":"empty","payload":[]}]},
-                {"id":"choice","use":"railix.choice","inputs":{"conditions":[]}}
+                {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}}
                 """);
         final StringBuilder links = new StringBuilder("""
                 {"from":"app.start","to":"command"},{"from":"command.next","to":"choice"}

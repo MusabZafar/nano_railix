@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.net.InetSocketAddress;
+import java.net.BindException;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -50,7 +51,7 @@ public final class HttpStepHandlers {
         /**
          * Prepares one listener; binding starts through the same source capability available to bundles.
          *
-         * @param configuration compiled host and port settings; zero port selects a free port
+         * @param configuration compiled host, preferred port and occupied-port fallback settings
          * @param context payload-free lifecycle context with this Trigger's source
          * @return primary lifecycle outcome after registering activation and cleanup
          * @throws UncheckedIOException when the listener cannot be prepared
@@ -59,8 +60,12 @@ public final class HttpStepHandlers {
             final StepInput.Source source = context.source();
             final String host = configuration.string("host");
             final int port = ((RailixValue.NumberValue) configuration.value("port")).value().intValueExact();
+            final boolean nextFree = ((RailixValue.BooleanValue) configuration.value("next_free_port")).value();
             final InetSocketAddress address = new InetSocketAddress(host, port);
             try {
+                if (address.isUnresolved()) throw new java.net.UnknownHostException(host);
+                context.gauge("preferred_port").set(port);
+                final var activePort = context.gauge("active_port");
                 final HttpServer server = HttpServer.create();
                 source.onClose(() -> server.stop(0));
                 final var executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -69,15 +74,34 @@ public final class HttpStepHandlers {
                 server.setExecutor(executor);
                 source.onStart(() -> {
                     try {
-                        server.bind(address, 0);
+                        for (int candidate = port; ; candidate++) {
+                            if (Thread.currentThread().isInterrupted())
+                                throw new java.io.InterruptedIOException("HTTP activation interrupted.");
+                            try {
+                                server.bind(new InetSocketAddress(address.getAddress(), candidate), 0);
+                                break;
+                            } catch (final BindException failure) {
+                                // JDK also uses BindException for denied/unavailable addresses. Retry only known occupancy.
+                                if (!nextFree || candidate == 0 || failure.getMessage() == null
+                                        || !failure.getMessage().startsWith("Address already in use")) throw failure;
+                                if (candidate == 65535) throw new IOException(
+                                        "No available HTTP port from " + port + " through 65535 on " + host + ".", failure);
+                            }
+                        }
                         server.start();
-                        System.out.println("Railix HTTP http://" + host + ":" + server.getAddress().getPort() + "/");
+                        activePort.set(server.getAddress().getPort());
+                        final String uriHost = host.indexOf(':') >= 0 && !host.startsWith("[") ? "[" + host + "]" : host;
+                        System.out.println("Railix HTTP http://" + uriHost + ":" + server.getAddress().getPort() + "/");
                     } catch (final IOException exception) {
+                        System.err.println("Railix HTTP listener failed: " + (exception.getMessage() == null
+                                ? exception.getClass().getSimpleName() : exception.getMessage()));
                         throw new UncheckedIOException("Cannot bind configured HTTP listener.", exception);
                     }
                 });
                 return StepResult.outcome(context.primaryOutcome());
             } catch (final IOException exception) {
+                System.err.println("Railix HTTP preparation failed: " + (exception.getMessage() == null
+                        ? exception.getClass().getSimpleName() : exception.getMessage()));
                 throw new UncheckedIOException("Cannot prepare HTTP listener.", exception);
             }
         }
@@ -119,6 +143,10 @@ public final class HttpStepHandlers {
                 throws IOException {
             switch (source.result()) {
                 case RunResult.Succeeded ignored -> send(exchange,
+                        status(source.responses().get("status")),
+                        source.responses().getOrDefault("body", RailixValue.nullValue()),
+                        source.responses().getOrDefault("headers", RailixValue.object(Map.of())));
+                case RunResult.Completed ignored -> send(exchange,
                         status(source.responses().get("status")),
                         source.responses().getOrDefault("body", RailixValue.nullValue()),
                         source.responses().getOrDefault("headers", RailixValue.object(Map.of())));

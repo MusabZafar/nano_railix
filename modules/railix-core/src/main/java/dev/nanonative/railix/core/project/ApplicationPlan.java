@@ -62,7 +62,7 @@ record ApplicationPlan(
     }
 
     sealed interface Binding permits JsonBinding, PathBinding, ChoiceBinding, CandidatesBinding,
-            MatcherGroupsBinding, StepsBinding {
+            MatcherGroupsBinding, RoutesBinding, StepsBinding {
     }
 
     record JsonBinding(List<RailixValue> value) implements Binding {
@@ -98,6 +98,18 @@ record ApplicationPlan(
     record MatcherGroupsBinding(List<List<CandidatePlan>> groups) implements Binding {
         MatcherGroupsBinding {
             groups = groups.stream().map(List::copyOf).toList();
+        }
+    }
+
+    record RoutesBinding(List<RoutePlan> routes, String path) implements Binding {
+        RoutesBinding {
+            routes = List.copyOf(routes);
+        }
+    }
+
+    record RoutePlan(String outcome, MatcherGroupsBinding condition, Map<String, Binding> inputs) {
+        RoutePlan {
+            inputs = Collections.unmodifiableMap(new LinkedHashMap<>(inputs));
         }
     }
 

@@ -14,11 +14,26 @@ streaming are explicitly deferred. Configuration is compiled and separate from c
 manager is not a prerequisite. CORS is an independent server option, not the client's TLS
 "allow all" option. Optional client/resource sharing is provided by the common lifecycle.
 
+Accepted on 2026-11-04: the preferred application port is configured through Creator using the
+ordinary HTTP Step inputs. By default, an occupied preferred port selects the next available
+higher port. The user can disable that fallback and require the exact port. This applies equally
+to Creator-owned execution and standalone builds. It adds no required CLI parameters and does not
+select ports for the Creator UI or its private observation listener.
+Creator must distinguish the saved preferred port from the actual bound port. The latter is
+runtime information, not another saved project setting. Port selection and its shared measurements
+are implemented and passed the full clean verification gate on 2026-11-04.
+Step-supplied measurements use Railix's existing metric catalog and endpoint, as specified in
+[Observation](observation.md#step-defined-metrics). They do not require another server or port.
+The shared registration API passed the clean verification gate on 2026-11-04. The same contract
+now supplies the preferred and active ports to the existing Draft and Live Inspectors.
+
 ## Current Baseline
 
 `railix.trigger.http` is a singleton source `application.http`. `railix run` and standalone JAR
 launch activate all configured sources through their common lifecycle. Host and port are ordinary
-Step inputs, defaulting to `127.0.0.1` and `8080`; explicit port `0` selects a free port. The old
+Step inputs, defaulting to `127.0.0.1` and `8080`; explicit port `0` selects a free port. Version `2`
+adds `next_free_port`, enabled by default. It tries successively higher ports after a recognized
+occupied-port error, without changing the saved port. Disabling it requires the exact port. The old
 `railix serve` and `--railix-http` mode selection are removed. Projects need no automatic rewrite:
 omitted settings take the declared defaults; previous command-line bind overrides must move into
 the HTTP Step's `host`/`port` inputs. Requests expose `method`, decoded
@@ -38,6 +53,27 @@ implementation; CLI output/status handling belongs to its own Step. Step-owned J
 Incoming HTTPS, parsed query/language/auth fields and configurable admission/time budgets are
 not implemented. Generic optional resource sharing is available. The built-in HTTP launcher exception is removed; registered
 static Step calls remain, as for any other implementation class.
+
+### Port Selection And Measurements
+
+The host is resolved once. Each attempt binds the same unbound server on that address, without
+a separate availability probe. Interruptions, invalid hosts, unavailable addresses, permission
+errors and other I/O failures stop startup. Exhausting port `65535` fails without wrapping.
+The [JDK native implementation](https://github.com/openjdk/jdk25u/blob/master/src/java.base/unix/native/libnio/ch/Net.c)
+reports occupancy, unavailable addresses and denied access using the same exception type.
+There is no public errno accessor. Only its recognized native `Address already in use` message
+permits retry; unknown messages fail closed. Other native message languages are not verified.
+The Step writes its own native bind reason or exhausted-range reason to stderr. The common
+lifecycle identifies the failing Trigger without exposing arbitrary third-party exception messages.
+
+The ordinary Step definition declares fixed `preferred_port` and `active_port` gauges. PRE records
+the compiled preference. Successful activation records the actual bound port. Before successful
+activation the active gauge is absent. The shared numeric `port` unit displays without digit
+grouping or a suffix for any installed Step. The configured host remains visible through the
+normal form or readonly configuration. No compiler/Creator branch on the HTTP definition ID,
+runtime-status API, extra listener or additional polling owner is required. Disabling the node's
+metrics also disables these gauges. Creator never substitutes the preference for an unavailable
+active measurement. Examples do not bind, move or duplicate the business listener.
 
 ## Shared HTTP Data Rules
 
@@ -67,13 +103,14 @@ permits them. Cookie and path-template helper representations remain to be speci
 | ID | Required behavior |
 | --- | --- |
 | HT-001 | The Trigger MUST acquire and release its listener through the common Step lifecycle. Submitting a request and receiving its result MUST use the same generic ingress capability available to third-party Triggers. |
-| HT-002 | Bind address, port and certificate settings MUST be authored as ordinary immutable Step configuration, available during PRE without payload/context lookup. A configured occupied port MUST fail clearly; only explicit automatic-port selection may choose a different port. |
+| HT-002 | Bind address, preferred port, occupied-port fallback and certificate settings MUST be ordinary immutable Step configuration, editable through the normal Creator form and available during PRE. Fallback is enabled by default. An occupied preferred port MUST try higher ports in order on the same bind address, using the actual bind rather than a separate availability probe. Disabled fallback MUST require the configured port. Port `0` retains OS-selected free-port behavior. Invalid addresses or configuration and unrelated startup failures MUST not be hidden by port searching. Exhausting the remaining TCP port range MUST fail clearly, without wrapping to lower ports. |
 | HT-003 | Incoming HTTPS MUST be supported in the next HTTP delivery. Invalid/missing selected TLS material MUST prevent readiness, not silently fall back to HTTP or another certificate. Certificate/key loading MUST not require shelling out to OpenSSL. |
 | HT-004 | Each admitted request MUST have its own PROCESS payload/context. Routing and product authorization MUST remain ordinary Steps; the HTTP Trigger MUST not grow a second Flow language. |
 | HT-005 | The Flow MUST be able to supply response status, headers and JSON/text/no-body data through ordinary context fields. Client disconnects and cancelled execution MUST preserve lifecycle cleanup and explicit failure semantics. |
 | HT-006 | Request byte/time limits, admission capacity and overload behavior MUST be declared and configurable at the appropriate boundary. Numeric defaults and shutdown drain budgets MUST be agreed and measured, not inferred from a million-Step graph target. |
 | HT-007 | The HTTP server Step MUST offer independent, configurable automatic CORS handling. When enabled, it MUST answer valid preflight requests without executing business PROCESS code and apply the selected CORS response policy to normal and error responses. It MUST not alter TLS trust settings. |
 | HT-008 | Normal development-app startup MUST start the configured HTTP listener. Trigger Examples MUST supply output directly to the compiled continuation, without sending an HTTP request, invoking Trigger PROCESS or changing listener lifetime. This uses the generic [LC-7 contract](system-model.md#accepted-lifecycle-decisions), not an HTTP-specific Example mode. |
+| HT-009 | With Step measurements enabled, Creator MUST show the active bound port alongside its preferred port for the selected running instance; the host remains ordinary Step configuration. Missing or disabled measurements MUST NOT be replaced with the preferred port. Runtime values MUST NOT overwrite the preferred project setting. Step-supplied measurements MUST use the shared metric contract and existing Railix endpoint, with no Step-owned metric listener or Creator/compiler branch on the HTTP Step ID. Port selection MUST use the same implementation in local and standalone execution. |
 
 ### Certificates And CORS
 
@@ -119,6 +156,7 @@ The following are planned checks, not claimed passes:
 | --- | --- |
 | HT-001, SYS-012 | Build a third-party source using the same lifecycle; serve concurrent requests, stop it and inspect generated source/dependency closure for privileged HTTP branches. |
 | HT-002/003 | Bind requested/free/occupied ports; serve with trusted and untrusted certificates; reject broken keys, expired certificates and invalid startup configuration without HTTP fallback. |
+| HT-002/009 | Occupy consecutive loopback ports, start the real application and send a request to the successfully bound higher port. Check strict mode, port `0`, concurrent startups and rejection at the upper port boundary. Through Creator, inspect the normal Step setting and preferred versus actual values in Draft and readonly Live, and confirm that startup never persists the observed port. Prove the same information path with an installed third-party Step. Final verification is tracked in the [port-selection evidence](../verification.md#http-port-selection). |
 | HTTP-001 to HTTP-005 | Send duplicate query/header values, encoded paths, malformed escapes, weighted language/media preferences and malformed/valid authorization; inspect ordinary Flow fields and redacted evidence. |
 | HTTP-006/007, HT-005 | Return exact text, JSON strings, JSON null and no body; exercise HEAD/204/304, invalid status/header values and a disconnected caller. |
 | HT-004/006, SYS-006 | Prove request isolation, defined overload behavior, byte/time limits and draining cleanup under sustained concurrent load. |
@@ -131,3 +169,6 @@ HTTP semantics follow [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html).
 The JDK [HttpsServer](https://docs.oracle.com/en/java/javase/25/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpsServer.html)
 supports TLS ingress. Its bounded [stop behavior](https://docs.oracle.com/en/java/javase/25/docs/api/jdk.httpserver/com/sun/net/httpserver/HttpServer.html#stop(int))
 does not by itself prove that all downstream application work has drained.
+The JDK's [BindException](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/net/BindException.html)
+can also indicate an unavailable local address. A port fallback must not interpret every bind
+exception as proof that a port is occupied.

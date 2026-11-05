@@ -147,8 +147,9 @@ final class GeneratedApplicationE2eTest {
             assertThat(source).contains(
                     "dev.nanonative.railix.stdlib.StandardStepHandlers.Cli::process",
                     "dev.nanonative.railix.stdlib.PrimitiveStepHandlers.Lowercase::process",
-                    "DevelopmentRuntime.Trace.invoke(configuration, input, CALL_0)",
-                    "DevelopmentRuntime.Trace.invoke(configuration, input, CALL_1)",
+                    "DevelopmentRuntime.Trace.invoke(configuration, input, implementation)",
+                    "Handlers_0.CALL_0",
+                    "Handlers_0.CALL_1",
                     "switch (current)"
             ).doesNotContain(
                     "CompiledProject",
@@ -255,7 +256,7 @@ final class GeneratedApplicationE2eTest {
     }
 
     @Test
-    void productionJarContainsNoDevelopmentOrTraceSurface() throws Exception {
+    void applicationWithoutExamplesRetainsMetricsButOmitsExampleExecutionAndValues() throws Exception {
         final ApplicationBuilder.Artifact artifact = productionArtifact();
         final String[] forbiddenSymbols = {
                 "dev/nanonative/railix/development/",
@@ -264,11 +265,6 @@ final class GeneratedApplicationE2eTest {
                 "DevelopmentRuntime",
                 "DevelopmentRuntime$Metrics",
                 "ExampleSuite",
-                "/v1/metrics",
-                "startFlow",
-                "startStep",
-                "finishFlow",
-                "finishStep",
                 "TraceExecution",
                 "TraceSink",
                 "traceExecute_",
@@ -283,6 +279,8 @@ final class GeneratedApplicationE2eTest {
         };
 
         try (JarFile jar = new JarFile(artifact.jar().toFile())) {
+            assertThat(jar.getJarEntry("dev/nanonative/railix/core/runtime/RuntimeMetrics.class")).isNotNull();
+            assertThat(jar.getJarEntry("dev/nanonative/railix/core/runtime/MetricsEndpoint.class")).isNotNull();
             final var entries = jar.stream().toList();
             assertThat(entries).extracting(java.util.jar.JarEntry::getName).noneMatch(name ->
                     name.startsWith("dev/nanonative/railix/development/")
@@ -414,12 +412,12 @@ final class GeneratedApplicationE2eTest {
     }
 
     @Test
-    void productionExecutionOmitsTheDevelopmentTestFlagFromRuntimeContext() throws Exception {
+    void ordinaryIngressUsesTheSameExplicitNonExampleFlag() throws Exception {
         final String source = runtimeContextProject();
         final Path project = project(directory.resolve("production-runtime-context"), source);
 
         assertThat(runJar(productionArtifact(project, source).jar()))
-                .isEqualTo(new ProcessResult(0, "{\"trigger\":\"command\"}"));
+                .isEqualTo(new ProcessResult(0, "{\"test\":false,\"trigger\":\"command\"}"));
     }
 
     @Test
@@ -443,7 +441,7 @@ final class GeneratedApplicationE2eTest {
     }
 
     @Test
-    void productionApplicationPublicApiContainsOnlyProductionIngressAndLifecycle() throws Exception {
+    void applicationPublicApiContainsOrdinaryIngressLifecycleAndMetrics() throws Exception {
         final Path jar = productionArtifact().jar();
         final String api = tool(
                 "javap",
@@ -458,6 +456,7 @@ final class GeneratedApplicationE2eTest {
                         "public dev.nanonative.railix.core.runtime.RunResult stop(java.time.Duration);",
                         "public static void main(java.lang.String[]);",
                         "public java.lang.String projectId();",
+                        "public dev.nanonative.railix.core.runtime.RuntimeMetrics metrics();",
                         "public dev.nanonative.railix.core.project.WorkflowRuntime$SourceResult "
                                 + "runSource(java.lang.String, java.util.Map<java.lang.String, "
                                 + "dev.nanonative.railix.core.value.RailixValue>);"
@@ -465,11 +464,11 @@ final class GeneratedApplicationE2eTest {
     }
 
     @Test
-    void productionJarHasNoHttpServerModuleDependency() throws Exception {
+    void defaultApplicationIncludesTheSharedObservationModuleDependencies() throws Exception {
         final Path jar = productionArtifact().jar();
 
         assertThat(tool("jdeps", "-q", "--print-module-deps", jar.toString()))
-                .doesNotContain("jdk.httpserver");
+                .contains("jdk.httpserver", "jdk.management");
     }
 
     @Test
@@ -1366,7 +1365,7 @@ final class GeneratedApplicationE2eTest {
         }
         Files.writeString(
                 project,
-                CreatorProjects.lowercaseCli().replace("text.lowercase", "text.uppercase"),
+                Files.readString(project).replace("text.lowercase", "text.uppercase"),
                 StandardCharsets.UTF_8
         );
 
@@ -1642,8 +1641,9 @@ final class GeneratedApplicationE2eTest {
             assertThat(string(after, "fingerprint")).isNotEqualTo(string(before, "fingerprint"));
             assertThat(path(after, "build_path")).isNotEqualTo(previousJar).isRegularFile();
             assertThat(previousJar).doesNotExist();
-            assertThat(Files.readString(project, StandardCharsets.UTF_8)).contains("Different Example");
-            assertThat(exampleResult(creator.baseUri(), "command:0"))
+            assertThat(Files.readString(project.resolveSibling("railix.examples.json"), StandardCharsets.UTF_8)).contains("Different Example");
+            final var cases = (RailixValue.ArrayValue) CreatorServerE2eSupport.object(request(creator.baseUri(), "GET", "/api/examples", "").body()).values().get("cases");
+            assertThat(exampleResult(creator.baseUri(), string((RailixValue.ObjectValue) cases.values().getFirst(), "id")))
                     .isEqualTo(RailixValue.string("different example"));
         }
     }
@@ -1759,22 +1759,22 @@ final class GeneratedApplicationE2eTest {
 
     private static String switchCases(final String firstExpected, final String secondExpected) {
         return """
-                [{"outcome":"case-first","option":"field","inputs":{
+                [{"outcome":"case-first","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}},
-                 {"outcome":"case-second","option":"field","inputs":{
+                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}}]]},
+                 {"outcome":"case-second","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}}]
+                    {"use":"value.equals","inputs":{"expected":"%s"}}]]}}]]}]
                 """.formatted(firstExpected, secondExpected);
     }
 
-    private static String switchProject(final String cases) {
+    private static String switchProject(final String routes) {
         return """
                 {"format":1,"id":"switch-generated","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"route","payload":["go"]}]},
-                  {"id":"switch","use":"railix.switch","inputs":{"cases":%s}},
+                  {"id":"switch","use":"railix.branch","inputs":{"routes":%s}},
                   {"id":"first","use":"railix.field-manipulation","inputs":{
                     "field":["context","result"],"value":[{"option":"literal","inputs":{
                     "literal":"first"},"when":{"transforms":[],"all":[]}}],"steps":[]}},
@@ -1794,7 +1794,7 @@ final class GeneratedApplicationE2eTest {
                   {"from":"second.next","to":"end"},
                   {"from":"fallback.next","to":"end"}
                 ]}
-                """.formatted(cases);
+                """.formatted(routes);
     }
 
     private static String nodeLocalSwitchProject() {
@@ -1803,14 +1803,12 @@ final class GeneratedApplicationE2eTest {
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"route","payload":["go"]}]},
-                  {"id":"switch-one","use":"railix.switch","inputs":{"cases":[{
-                    "outcome":"case-one","option":"field","inputs":{
+                  {"id":"switch-one","use":"railix.branch","inputs":{"routes":[{"outcome":"case-one","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]}},
-                  {"id":"switch-two","use":"railix.switch","inputs":{"cases":[{
-                    "outcome":"case-two","option":"field","inputs":{
+                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]]}]}},
+                  {"id":"switch-two","use":"railix.branch","inputs":{"routes":[{"outcome":"case-two","inputs":{},"groups":[[{"option":"field","inputs":{
                     "field":["context","payload","arguments",0]},"when":{"transforms":[],"all":[[
-                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]}},
+                    {"use":"value.equals","inputs":{"expected":"go"}}]]}}]]}]}},
                   {"id":"success","use":"railix.field-manipulation","inputs":{
                     "field":["context","result"],"value":[{"option":"literal","inputs":{
                     "literal":"both"},"when":{"transforms":[],"all":[]}}],"steps":[]}},
@@ -2185,7 +2183,9 @@ final class GeneratedApplicationE2eTest {
             final String source,
             final StepCatalog catalog
     ) throws IOException {
-        final CompileResult result = ProjectCompiler.compileApplication(source, catalog);
+        final String inputs = Files.exists(project.resolveSibling("railix.examples.json"))
+                ? ProjectFiles.inputs(source, ProjectFiles.read(project).source()) : source;
+        final CompileResult result = ProjectCompiler.compileApplication(inputs, catalog);
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         return ApplicationBuilder.buildProduction(project, (CompileResult.Compiled) result);
     }

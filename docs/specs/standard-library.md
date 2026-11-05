@@ -2,9 +2,10 @@
 
 ## Human Review
 
-Status: **Existing baseline with planned consolidation**, updated on 2026-10-17.
+Status: **Existing baseline with unified Branch**, updated on 2026-10-31.
 The user accepted reviewing related operations as configurable Step families; exact
-replacement contracts remain open. The ordinary `value.is-type` predicate now supports
+replacement contracts remain open for the other families. Branching is implemented and locally
+checked through the [Branch contract](system-model.md#branch). The ordinary `value.is-type` predicate now supports
 type guards without changing those planned families.
 
 Owns: the finite versioned unary catalog, supported rows, composition and acceptance rules.
@@ -208,9 +209,9 @@ Creator presentation alone does not justify changing stored Step IDs or runtime 
 | Rounding | Floor, ceiling and half-up rounding. | One rounding operation with declared mode; preserve existing negative-number and tie behavior. |
 | Text matching | Contains, starts-with, ends-with. | One match operation with mode and ordinary operands; do not silently introduce regex or change case rules. |
 | Text case | Locale-independent upper/lower conversion. | One case mode if the declaration remains simpler than separate operations. |
-| Branching | Filter, Choice, Switch, planned Split. | Accepted direction separates route selection (one, multiple matching, all) from sequential/independent execution. A common editor/family must not infer scheduling from wires. IDs, defaults and migration remain open under the [control contract](system-model.md#planned-merge-and-join). |
+| Branching | Filter, Choice, Switch, Split behavior. | `railix.branch` replaces the three separate catalog entries, without aliases or migration. First/matching/all selection, sequential/parallel execution, shared context by default and per-output snapshot copies use public Step contracts. Implemented and locally checked. See the [Branch contract](system-model.md#branch). |
 
-These are consolidation candidates, not newly supported Steps. A summary object is not a
+Except for the Branch increment, these are consolidation candidates, not newly supported Steps. A summary object is not a
 drop-in replacement for a scalar sum. Do not adopt Java double-based statistics and lose the
 existing exact number domain. A non-terminating average needs an explicit precision/rounding
 rule, not accidental `BigDecimal.divide` exceptions. Empty arrays need a declared result for
@@ -219,13 +220,17 @@ nonnumeric elements and must not acquire a numeric scan just to share a statisti
 
 Options and their valid shapes belong to the ordinary Step definition, consumed by Creator,
 compiler and third-party Steps alike. No special family names or stdlib IDs in those consumers.
-Before implementation, agree the first family, persisted version/ID migration, scalar versus
-multiple-output behavior, and how options affect outcomes and available connections.
+For branching, execution settings and extension-supplied synchronous/asynchronous logic must
+also follow the public contract in [SYS-025](system-model.md#planned-merge-and-join), not a
+standard-library-only mode selector or runtime escape hatch.
+Before implementation, agree the first family, compatibility policy, scalar versus multiple-output
+behavior, and how options affect outcomes and available connections. Branching explicitly retires
+the old definitions without migration. Other families have no selected compatibility policy yet.
 
 Acceptance is planned through the public catalog, Creator and generated application: preserve
 each existing operation's relevant scenarios, exercise every supported mode and invalid setting,
-prove old-project migration without changed results, and verify a third-party configured Step
-uses the same declaration path. Measure any changed collection hot path against the current
+prove the selected compatibility policy, and verify a third-party configured Step uses the same
+declaration path. Measure any changed collection hot path against the current
 operation; consolidation must not compute unused aggregates or introduce new runtime machinery
 without a demonstrated need.
 

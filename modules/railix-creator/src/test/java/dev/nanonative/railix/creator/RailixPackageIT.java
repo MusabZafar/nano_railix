@@ -8,6 +8,8 @@ import dev.nanonative.railix.core.value.RailixValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -70,6 +72,26 @@ final class RailixPackageIT {
 
         assertThat(runExecutable(noSystemJavaEnvironment(), "run", "Hello", "Railix"))
                 .isEqualTo(new ProcessResult(0, "[\"Hello\",\"Railix\"]"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void packagedExecutableBuildsAndOpensBothProjectSourceVariants(final boolean include) throws Exception {
+        final Path project = directory.resolve("railix.project.json");
+        Files.writeString(project, argumentProject());
+        final Map<String, String> environment = isolatedEnvironment(directory.resolve("home"));
+        final ProcessResult built = include ? runExecutable(environment, "build", project.toString(), "--include-project")
+                : runExecutable(environment, "build", project.toString());
+        assertThat(built.status()).as(built.output()).isZero();
+        final Path target = include ? directory.resolve("restored/railix.project.json") : project;
+        try (PackagedCreator creator = PackagedCreator.start(PackagedCreator.command(EXECUTABLE, directory,
+                environment, "creator", target.toString(), "0", "--application", built.output()))) {
+            final var response = request(creator.uri(), "GET", "/api/project", "");
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body()).contains("cli-arguments");
+            assertThat(awaitExampleView(creator.uri(), "command:0").statusCode()).isEqualTo(200);
+            assertThat(target).isRegularFile();
+        }
     }
 
     @Test
@@ -620,7 +642,7 @@ final class RailixPackageIT {
     void packagedExecutableRejectsTooManyCreatorArguments() throws Exception {
         assertThat(runExecutable(Map.of(), "creator", "one", "two", "three")).isEqualTo(new ProcessResult(
                 2,
-                "Usage: railix creator [project-file] [port]"
+                "Usage: railix creator [project-file] [port] [--application application.jar]"
         ));
     }
 
@@ -628,8 +650,9 @@ final class RailixPackageIT {
     void packagedExecutableRejectsAMissingCommand() throws Exception {
         assertThat(runExecutable(Map.of())).isEqualTo(new ProcessResult(
                 2,
-                "Usage: railix creator [project-file] [port]\n"
-                        + "       railix run [arguments...]"
+                "Usage: railix creator [project-file] [port] [--application application.jar]\n"
+                        + "       railix run [arguments...]\n"
+                        + "       railix build [project-file] [--include-project] [--no-observation]"
         ));
     }
 

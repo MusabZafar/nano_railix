@@ -1,16 +1,153 @@
 package dev.nanonative.railix.core.step;
 
 import dev.nanonative.railix.core.project.WorkflowRuntime;
+import dev.nanonative.railix.core.runtime.RunResult;
 import dev.nanonative.railix.core.value.RailixValue;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Future;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** Immutable named Step data, supplied separately as compiled configuration and invocation context. */
-public sealed class StepInput permits StepInput.ManagedInput {
+public sealed class StepInput permits StepInput.ManagedInput, StepInput.FlowInput {
+    /** Thread-safe application-owned exact counter. No invocation context is retained. */
+    public interface Counter {
+        /**
+         * Adds a nonnegative amount, saturating at Long.MAX_VALUE instead of wrapping.
+         * @param amount nonnegative increment
+         * @return this counter for chaining
+         * @throws IllegalArgumentException for a negative increment
+         */
+        Counter add(long amount);
+
+        /** Adds one and returns this counter. */
+        default Counter increment() { return add(1); }
+    }
+
+    /** Thread-safe application-owned gauge, absent from exports until first set. */
+    public interface Gauge {
+        /**
+         * Replaces the current measurement. Concurrent writes use atomic last-write-wins semantics.
+         * @param value finite measurement
+         * @return this gauge for chaining
+         * @throws IllegalArgumentException for NaN or infinity
+         */
+        Gauge set(double value);
+    }
+
+    /** Runtime-bound access to only the measurements declared by this Step placement. */
+    public interface Metrics {
+        /**
+         * Returns a declared counter without registering or allocating another handle.
+         * @param name fixed counter name from the Step definition
+         * @return prebound thread-safe counter
+         * @throws IllegalArgumentException for an unknown name or different kind
+         */
+        Counter counter(String name);
+        /**
+         * Returns a declared gauge without registering or allocating another handle.
+         * @param name fixed gauge name from the Step definition
+         * @return prebound thread-safe gauge
+         * @throws IllegalArgumentException for an unknown name or different kind
+         */
+        Gauge gauge(String name);
+    }
+
+    /**
+     * Returns a prebound counter. Disabled measurements use a shared no-op handle.
+     * @param name counter name declared by this Step definition
+     * @return existing thread-safe handle, without allocating a counter per call
+     * @throws IllegalArgumentException for an undeclared name or different kind
+     * @throws IllegalStateException outside a runtime context with declared metrics
+     */
+    public Counter counter(final String name) {
+        throw new IllegalStateException("No metrics are declared for this context.");
+    }
+
+    /**
+     * Returns a prebound gauge. Disabled measurements use a shared no-op handle.
+     * @param name gauge name declared by this Step definition
+     * @return existing thread-safe handle, without allocating a gauge per call
+     * @throws IllegalArgumentException for an undeclared name or different kind
+     * @throws IllegalStateException outside a runtime context with declared metrics
+     */
+    public Gauge gauge(final String name) {
+        throw new IllegalStateException("No metrics are declared for this context.");
+    }
+
+    /** Context ownership for an explicitly executed outgoing path. */
+    public enum ContextMode {
+        /** Share the split's context, with atomic Step writes. */
+        SHARED,
+        /** Start from the split snapshot and keep subsequent changes local. */
+        COPY
+    }
+
+    /** Result of evaluating a route condition without exception-based control flow. */
+    public sealed interface Match permits Match.Decision, Match.Stopped {
+        /** A completed Boolean decision. */
+        enum Decision implements Match { MATCHED, NOT_MATCHED }
+
+        /** A rejected, failed or cancelled condition, not a Boolean false. */
+        record Stopped(RunResult result) implements Match {
+            public Stopped {
+                java.util.Objects.requireNonNull(result, "Condition result cannot be Java null.");
+                if (result instanceof RunResult.Succeeded || result instanceof RunResult.Completed) {
+                    throw new IllegalArgumentException("Stopped conditions require a non-successful result.");
+                }
+            }
+        }
+    }
+
+    /** One authored route. Condition evaluation is lazy and belongs to the current PROCESS call. */
+    public interface Route {
+        /** Returns the declared, stable outgoing outcome. */
+        String outcome();
+
+        /** Returns immutable route settings declared by the Step definition. */
+        StepInput configuration();
+
+        /**
+         * Evaluates this route's OR-of-AND condition against the split input snapshot.
+         *
+         * @return explicit Boolean decision or stopped-condition result
+         * @throws IllegalStateException outside the owning PROCESS invocation/thread
+         */
+        Match match();
+    }
+
+    /** One compiled outgoing continuation, available only during its owning PROCESS call. */
+    public interface Continuation {
+        /**
+         * Runs this path synchronously. A path failure is returned and does not abort siblings.
+         *
+         * @param mode shared context or a copy of the split snapshot
+         * @return this path's complete result
+         * @throws IllegalStateException outside the owning PROCESS call/thread
+         */
+        RunResult run(ContextMode mode);
+
+        /**
+         * Starts lifecycle-owned asynchronous work. Completion/cancellation remains tracked until
+         * the worker actually terminates. PROCESS may return without joining the Future, but its
+         * invocation is not complete until its owned work finishes.
+         *
+         * @param mode shared context or a copy of the split snapshot
+         * @return Future for this path only, whose cancellation does not cancel siblings
+         * @throws IllegalStateException outside the owning PROCESS call/thread
+         */
+        Future<RunResult> start(ContextMode mode);
+    }
+
+    /** Runtime-owned lookup for the current Step's compiled outgoing continuations. */
+    @FunctionalInterface
+    public interface Continuations {
+        /** Returns a declared continuation, or rejects an unknown outcome. */
+        Continuation outcome(String outcome);
+    }
     /** Runtime-owned resource access; Step authors use the resource methods on their context. */
     public interface Resources {
         /** Returns a registered resource with its exact declared type; missing/closed resources fail explicitly. */
@@ -75,6 +212,7 @@ public sealed class StepInput permits StepInput.ManagedInput {
         /**
          * Marks finite source activity complete, without stopping other sources or its admitted work.
          * Repeated calls with the same status are harmless; conflicting statuses are rejected.
+         * A late completion after application cleanup is harmless and cannot change the final status.
          *
          * @param status process status from 0 through 255, used only when standalone launch ends
          * @return this source for chaining
@@ -190,9 +328,23 @@ public sealed class StepInput permits StepInput.ManagedInput {
      * @throws IllegalArgumentException for a missing/blank outcome
      */
     public static StepInput lifecycle(final String primaryOutcome, final Source source, final Resources resources) {
-        return source == null && resources == null
+        return lifecycle(primaryOutcome, source, resources, null);
+    }
+
+    /**
+     * Creates a payload-free lifecycle context with optional application-owned metrics.
+     * @param primaryOutcome declared normal outcome
+     * @param source optional source capability, or Java null
+     * @param resources optional resources, or Java null
+     * @param metrics prebound measurements, or Java null when none are declared
+     * @return immutable lifecycle context
+     * @throws IllegalArgumentException for a blank outcome
+     */
+    public static StepInput lifecycle(final String primaryOutcome, final Source source, final Resources resources,
+                                      final Metrics metrics) {
+        return source == null && resources == null && metrics == null
                 ? new StepInput(Map.of(), Map.of(), Map.of(), Map.of(), primaryOutcome)
-                : new ManagedInput(Map.of(), Map.of(), Map.of(), Map.of(), primaryOutcome, source, resources);
+                : new ManagedInput(Map.of(), Map.of(), Map.of(), Map.of(), primaryOutcome, source, resources, metrics);
     }
 
     /**
@@ -212,7 +364,70 @@ public sealed class StepInput permits StepInput.ManagedInput {
                                        final Map<String, Program> programs, final Map<String, StepInput> selected,
                                        final String outcome, final Resources resources) {
         return resources == null ? new StepInput(values, options, programs, selected, outcome)
-                : new ManagedInput(values, options, programs, selected, outcome, null, resources);
+                : new ManagedInput(values, options, programs, selected, outcome, null, resources, null);
+    }
+
+    /**
+     * Creates an invocation carrying declared route conditions and optional continuation access.
+     * Ordinary invocations without these capabilities keep their existing representation.
+     *
+     * @param values resolved values
+     * @param options selected options
+     * @param programs invocation-scoped nested programs
+     * @param selected selected child inputs
+     * @param outcome primary outcome
+     * @param resources optional resource access, or Java null
+     * @param routes non-null map of declared route inputs
+     * @param continuations optional continuation access, or Java null
+     * @return immutable invocation data with only the declared capabilities
+     */
+    public static StepInput routedInvocation(final Map<String, RailixValue> values, final Map<String, String> options,
+                                             final Map<String, Program> programs, final Map<String, StepInput> selected,
+                                             final String outcome, final Resources resources,
+                                             final Map<String, List<Route>> routes, final Continuations continuations) {
+        return routedInvocation(values, options, programs, selected, outcome, resources, routes, continuations, null);
+    }
+
+    /**
+     * Creates an invocation with only its declared route, resource and metric capabilities.
+     * @param values resolved values
+     * @param options selected options
+     * @param programs invocation-scoped programs
+     * @param selected selected child inputs
+     * @param outcome primary outcome
+     * @param resources optional resources, or Java null
+     * @param routes declared routes
+     * @param continuations optional outgoing execution, or Java null
+     * @param metrics prebound measurements, or Java null when none are declared
+     * @return immutable invocation without an extra wrapper allocation
+     * @throws IllegalArgumentException for invalid invocation data
+     */
+    public static StepInput routedInvocation(final Map<String, RailixValue> values, final Map<String, String> options,
+                                             final Map<String, Program> programs, final Map<String, StepInput> selected,
+                                             final String outcome, final Resources resources,
+                                             final Map<String, List<Route>> routes, final Continuations continuations,
+                                             final Metrics metrics) {
+        if (!routes.isEmpty() || continuations != null)
+            return new FlowInput(values, options, programs, selected, outcome, resources, routes, continuations, metrics);
+        return metrics == null ? invocation(values, options, programs, selected, outcome, resources)
+                : new ManagedInput(values, options, programs, selected, outcome, null, resources, metrics);
+    }
+
+    /** Returns authored routes in declaration order, without evaluating their conditions. */
+    public List<Route> routes(final String name) {
+        throw new IllegalArgumentException("Route input is not declared: " + name);
+    }
+
+    /**
+     * Returns one compiled outgoing path when the definition enables continuations.
+     *
+     * @param outcome non-blank declared outgoing outcome
+     * @return invocation-scoped continuation
+     * @throws IllegalStateException when the definition has no continuation capability
+     * @throws IllegalArgumentException for an undeclared outcome
+     */
+    public Continuation continuation(final String outcome) {
+        throw new IllegalStateException("This Step does not declare continuation execution.");
     }
 
     /**
@@ -297,13 +512,23 @@ public sealed class StepInput permits StepInput.ManagedInput {
     private static final class ManagedInput extends StepInput {
         private final Source source;
         private final Resources resources;
+        private final Metrics metrics;
 
         private ManagedInput(final Map<String, RailixValue> values, final Map<String, String> options,
                              final Map<String, Program> programs, final Map<String, StepInput> selected,
-                             final String primaryOutcome, final Source source, final Resources resources) {
+                             final String primaryOutcome, final Source source, final Resources resources, final Metrics metrics) {
             super(values, options, programs, selected, primaryOutcome);
             this.source = source;
             this.resources = resources;
+            this.metrics = metrics;
+        }
+
+        @Override public Counter counter(final String name) {
+            return metrics == null ? super.counter(name) : metrics.counter(name);
+        }
+
+        @Override public Gauge gauge(final String name) {
+            return metrics == null ? super.gauge(name) : metrics.gauge(name);
         }
 
         @Override
@@ -314,6 +539,58 @@ public sealed class StepInput permits StepInput.ManagedInput {
         @Override
         Resources resources() {
             return resources == null ? super.resources() : resources;
+        }
+    }
+
+    private static final class FlowInput extends StepInput {
+        private final Resources resources;
+        private final Map<String, List<Route>> routes;
+        private final Continuations continuations;
+        private final Metrics metrics;
+
+        private FlowInput(final Map<String, RailixValue> values, final Map<String, String> options,
+                          final Map<String, Program> programs, final Map<String, StepInput> selected,
+                          final String outcome, final Resources resources,
+                          final Map<String, List<Route>> routes, final Continuations continuations, final Metrics metrics) {
+            super(values, options, programs, selected, outcome);
+            this.metrics = metrics;
+            this.resources = resources;
+            this.routes = switch (routes.size()) {
+                case 0 -> Map.of();
+                case 1 -> {
+                    final var entry = routes.entrySet().iterator().next();
+                    yield Map.of(entry.getKey(), List.copyOf(entry.getValue()));
+                }
+                default -> {
+                    final Map<String, List<Route>> copied = new java.util.LinkedHashMap<>();
+                    routes.forEach((name, declared) -> copied.put(name, List.copyOf(declared)));
+                    yield Map.copyOf(copied);
+                }
+            };
+            this.continuations = continuations;
+        }
+
+        @Override public Counter counter(final String name) {
+            return metrics == null ? super.counter(name) : metrics.counter(name);
+        }
+
+        @Override public Gauge gauge(final String name) {
+            return metrics == null ? super.gauge(name) : metrics.gauge(name);
+        }
+
+        @Override
+        Resources resources() {
+            return resources == null ? super.resources() : resources;
+        }
+
+        @Override
+        public List<Route> routes(final String name) {
+            return routes.containsKey(name) ? routes.get(name) : super.routes(name);
+        }
+
+        @Override
+        public Continuation continuation(final String outcome) {
+            return continuations == null ? super.continuation(outcome) : continuations.outcome(outcome);
         }
     }
 

@@ -4,15 +4,23 @@
 
 Accepted direction on 2026-09-19 through the user's documentation-planning request
 and two explicit decisions: separate Example inputs/expectations together, and fail
-an expectation whose Step was not reached. Detailed schema, validation operators,
-migration and release policy remain open. The same workshop later clarified Examples as
-execution/coverage and field-mapping evidence, distinct from optional tests. **Not implemented.**
+an expectation whose Step was not reached. At that point detailed schema, validation operators,
+migration and release policy were open. The same workshop later clarified Examples as
+execution/coverage and field-mapping evidence, distinct from optional tests.
+
+Amended on 2026-11-03: the user accepted selecting a displayed JSON field in Data to add
+equality or absence checks, inspired by AssertJ. The authenticated, stateless Creator check
+boundary is implemented and verified. The user then accepted implementing file separation and
+saved expectations together. Their implementation is locally verified. Visual authoring and
+suite/release policy remain unimplemented. The specification owns the concrete boundaries.
 
 ## Context
 
-Current Trigger nodes embed Example inputs. The generated development application
-executes them and exposes real results; Creator displays those results but does not
-yet check output expectations. Visual groups cannot own correctness because they
+The original Trigger format embedded Example inputs. The generated application executes
+compiled cases and exposes real results. Creator displays those results and checks explicit
+expectations without becoming a second Step executor. The separate saved-case owner is implemented
+and locally verified in the 2026-11-03 amendment. Visual authoring is still planned.
+Visual groups cannot own correctness because they
 are optional presentation. Users need simple execution validation first and optional
 visual output checks later without adding a test engine to production applications.
 
@@ -36,22 +44,24 @@ reachability rule is not selected here. A missing Example is not, by itself, sta
 connected branch cannot execute. The earlier roadmap's blanket test-pass build gate is superseded.
 
 [Examples and validation](../specs/examples-and-validation.md) owns the requirements,
-acceptance and unresolved choices. This ADR does not approve a concrete file schema,
-operator catalog, public endpoint or build-gate implementation.
+acceptance and unresolved choices. This ADR does not approve a concrete file schema
+or build-gate implementation. Its amended first check boundary is defined in that specification.
 
 ## Consequences
 
 - A project can review and evolve Example inputs and expected results together,
   independently of visual metadata and executable Step configuration.
-- The existing project format needs an explicit migration; the new filename alone
-  is not compatibility support. Current files remain unchanged until then.
+- The separate owner requires lossless import and complete-action recovery, not merely
+  a new filename. Creator imports embedded cases when no Example file exists and rejects
+  competing owners instead of silently selecting one.
 - Missing, stale or truncated observations cannot establish passing assertions.
   Validation must use bounded evidence tied to the checked case and artifact.
 - An accidentally changed branch cannot stay green by skipping the expected Step.
 - Successful execution alone does not prove business correctness or exhaustive
   coverage; the UI must distinguish it from satisfied output expectations.
 - Creator validation adds no assertion evaluator or dependency to the generated
-  application. Current production omission remains intact.
+  application. Omission applies to Example execution/value capture and assertions, not to the
+  shared operational metrics clarified on 2026-11-03 in ADR 0020.
 
 ## Alternatives Not Chosen
 
@@ -62,7 +72,7 @@ operator catalog, public endpoint or build-gate implementation.
 - Re-executing Steps in Creator creates a second execution path and can repeat side effects.
 - Treating an unreached expectation as skipped can hide a routing regression.
 
-AssertJ-inspired visual controls are a proposal, not a decision to embed AssertJ or
+AssertJ-inspired field controls are accepted direction, not a decision to embed AssertJ or
 support arbitrary executable assertion code. Expected-error cases and repeated visits
 need later explicit semantics rather than hidden defaults.
 
@@ -70,5 +80,5 @@ need later explicit semantics rather than hidden defaults.
 
 This amends ADR 0020's target ownership of authored Examples, not its single-graph,
 single-execution-path or presentation-isolation decisions. The old embedded format
-remains the implemented baseline. The [roadmap](../roadmap.md#current-sequence) records
+remains importable, not a second writable Example owner. The [roadmap](../roadmap.md#current-sequence) records
 the dependent planning and delivery slices.

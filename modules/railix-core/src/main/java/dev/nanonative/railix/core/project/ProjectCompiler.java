@@ -28,7 +28,7 @@ public final class ProjectCompiler {
     private static final Set<String> NODE_FIELDS = Set.of(
             "id", "use", "inputs", "receives", "returns", "examples", "metrics"
     );
-    private static final Set<String> EXAMPLE_FIELDS = Set.of("name", "payload", "context");
+    private static final Set<String> EXAMPLE_FIELDS = Set.of("id", "name", "payload", "context");
     private static final Set<String> LINK_FIELDS = Set.of("from", "to");
     private static final Set<String> OPTION_FIELDS = Set.of("option", "inputs");
     private static final Set<String> CANDIDATE_FIELDS = Set.of("option", "inputs", "when");
@@ -138,6 +138,7 @@ public final class ProjectCompiler {
                 .toList();
         final List<ApplicationPlan.TriggerPlan> triggers = new ArrayList<>();
         final List<ApplicationPlan.ExamplePlan> examples = new ArrayList<>();
+        final Set<String> exampleIds = new LinkedHashSet<>();
         for (final Node trigger : nodeRead.nodes()) {
             if (trigger.definition().kind() != StepDefinition.Kind.TRIGGER) {
                 continue;
@@ -147,7 +148,11 @@ public final class ProjectCompiler {
                     index.destination(trigger.index(), trigger.definition().primaryOutcome())
             );
             triggers.add(triggerPlan);
-            examples.addAll(trigger.examples());
+            for (final var example : trigger.examples()) {
+                if (!exampleIds.add(example.id())) return rejected("PROJECT_EXAMPLE_ID_DUPLICATE",
+                        "Example id is already declared: " + example.id() + ".", "nodes[" + trigger.index() + "].examples");
+                examples.add(example);
+            }
         }
 
         final List<Diagnostic> validationProblems = StepValidation.validate(catalog, validations);
@@ -732,6 +737,9 @@ public final class ProjectCompiler {
             final StepCatalog catalog,
             final Map<String, ApplicationPlan.Binding> previous
     ) {
+        if (declaration.authoredOutcomes()) {
+            return routedMatchers(value, declaration, path, catalog, previous);
+        }
         final RailixValue resolved = value == null ? RailixValue.array(List.of()) : value;
         if (!(resolved instanceof RailixValue.ArrayValue groups)) {
             return InputRead.rejected(
@@ -778,6 +786,45 @@ public final class ProjectCompiler {
             plans.add(List.copyOf(matcherPlans));
         }
         return InputRead.value(new ApplicationPlan.MatcherGroupsBinding(plans));
+    }
+
+    private InputRead routedMatchers(final RailixValue value, final StepDefinition.MatcherGroupsInput declaration,
+                                    final String path, final StepCatalog catalog,
+                                    final Map<String, ApplicationPlan.Binding> previous) {
+        final RailixValue resolved = value == null ? RailixValue.array(List.of()) : value;
+        if (!(resolved instanceof RailixValue.ArrayValue array)) {
+            return InputRead.rejected("PROJECT_ROUTES_ARRAY_REQUIRED", "Routes must be an array.", path);
+        }
+        final List<ApplicationPlan.RoutePlan> routes = new ArrayList<>();
+        final Set<String> outcomes = new LinkedHashSet<>();
+        final var matchers = new StepDefinition.MatcherGroupsInput(declaration.options());
+        for (int index = 0; index < array.values().size(); index++) {
+            final String routePath = path + "[" + index + "]";
+            if (!(array.values().get(index) instanceof RailixValue.ObjectValue route)) {
+                return InputRead.rejected("PROJECT_ROUTE_OBJECT_REQUIRED", "Route must be an object.", routePath);
+            }
+            final var unknown = unknown(route, Set.of("outcome", "groups", "inputs"),
+                    "PROJECT_ROUTE_FIELD_UNKNOWN", "Unknown route field: ", routePath);
+            if (unknown.isPresent()) return new InputRead(new ApplicationPlan.JsonBinding(List.of()), List.of(unknown.get()));
+            final TextRead outcome = text(route, "outcome", "PROJECT_ROUTE_OUTCOME_REQUIRED",
+                    "Route outcome must be a non-blank string.", routePath + ".outcome");
+            if (!outcome.diagnostics().isEmpty()) return new InputRead(new ApplicationPlan.JsonBinding(List.of()), outcome.diagnostics());
+            if (!safeId(outcome.value()) || !outcomes.add(outcome.value())) {
+                return InputRead.rejected("PROJECT_ROUTE_OUTCOME_INVALID",
+                        "Route outcomes must be unique safe lowercase identifiers.", routePath + ".outcome");
+            }
+            final InputRead condition = matcherGroups(route.values().get("groups"), matchers,
+                    routePath + ".groups", catalog, previous);
+            if (!condition.diagnostics().isEmpty()) return condition;
+            final ObjectRead fields = object(route, "inputs", "PROJECT_ROUTE_INPUTS_OBJECT_REQUIRED",
+                    "Route inputs must be an object.", routePath + ".inputs");
+            if (!fields.diagnostics().isEmpty()) return new InputRead(new ApplicationPlan.JsonBinding(List.of()), fields.diagnostics());
+            final InputsRead inputs = inputs(fields.value(), declaration.routeInputs(), routePath + ".inputs", catalog);
+            if (!inputs.diagnostics().isEmpty()) return new InputRead(new ApplicationPlan.JsonBinding(List.of()), inputs.diagnostics());
+            routes.add(new ApplicationPlan.RoutePlan(outcome.value(),
+                    (ApplicationPlan.MatcherGroupsBinding) condition.binding(), inputs.bindings()));
+        }
+        return InputRead.value(new ApplicationPlan.RoutesBinding(routes, path));
     }
 
     private CandidateRead candidate(
@@ -1117,7 +1164,9 @@ public final class ProjectCompiler {
             }
             if (definition.inputs().stream().anyMatch(field ->
                     field.input() instanceof StepDefinition.CandidatesInput candidates
-                            && candidates.authoredOutcomes())) {
+                            && candidates.authoredOutcomes()
+                            || field.input() instanceof StepDefinition.MatcherGroupsInput groups
+                            && groups.authoredOutcomes()) || definition.continuations()) {
                 return NestedRead.rejected(
                         "PROJECT_NESTED_STEP_AUTHORED_OUTCOMES_UNSUPPORTED",
                         "Nested Steps cannot author workflow routes: " + use.value() + ".",
@@ -1234,6 +1283,11 @@ public final class ProjectCompiler {
             if (unknown.isPresent()) {
                 return ExamplesRead.rejected(unknown.get());
             }
+            final RailixValue identifier = object.values().get("id");
+            if (identifier != null && (!(identifier instanceof RailixValue.StringValue stable)
+                    || !stable.value().matches("[a-z][a-z0-9:-]{0,127}")))
+                return ExamplesRead.rejected(Diagnostic.atPath("PROJECT_EXAMPLE_ID_INVALID",
+                        "Example id must be a safe stable identifier, at most 128 characters.", path + ".id"));
             final TextRead name = text(
                     object,
                     "name",
@@ -1296,7 +1350,7 @@ public final class ProjectCompiler {
                 ));
             }
             examples.add(new ApplicationPlan.ExamplePlan(
-                    trigger + ":" + index,
+                    identifier instanceof RailixValue.StringValue stable ? stable.value() : trigger + ":" + index,
                     trigger,
                     name.value(),
                     index,
@@ -1692,6 +1746,9 @@ public final class ProjectCompiler {
                 .map(ApplicationPlan.CandidatePlan::outcome)
                 .filter(outcome -> !outcome.isEmpty())
                 .forEach(outcomes::add);
+        bindings.values().stream().filter(ApplicationPlan.RoutesBinding.class::isInstance)
+                .map(ApplicationPlan.RoutesBinding.class::cast).flatMap(routes -> routes.routes().stream())
+                .map(ApplicationPlan.RoutePlan::outcome).forEach(outcomes::add);
         final List<String> propagated = new ArrayList<>();
         propagated(bindings, propagated);
         outcomes.addAll(propagated);
@@ -1703,6 +1760,14 @@ public final class ProjectCompiler {
             final Map<String, ApplicationPlan.Binding> bindings
     ) {
         for (final ApplicationPlan.Binding binding : bindings.values()) {
+            if (binding instanceof ApplicationPlan.RoutesBinding routes) {
+                for (int index = 0; index < routes.routes().size(); index++) {
+                    final String outcome = routes.routes().get(index).outcome();
+                    if (definition.outcomes().contains(outcome)) return Optional.of(Diagnostic.atPath(
+                            "PROJECT_ROUTE_OUTCOME_COLLISION", "Route collides with a fixed Step outcome: " + outcome + ".",
+                            routes.path() + "[" + index + "].outcome"));
+                }
+            }
             if (!(binding instanceof ApplicationPlan.CandidatesBinding candidates)) {
                 continue;
             }
@@ -1738,6 +1803,12 @@ public final class ProjectCompiler {
                 matcherGroups.groups().forEach(group -> group.forEach(matcher ->
                         propagated(matcher.source().inputs(), outcomes)
                 ));
+            } else if (binding instanceof ApplicationPlan.RoutesBinding routes) {
+                routes.routes().forEach(route -> {
+                    propagated(route.inputs(), outcomes);
+                    route.condition().groups().forEach(group -> group.forEach(matcher ->
+                            propagated(matcher.source().inputs(), outcomes)));
+                });
             }
         });
     }

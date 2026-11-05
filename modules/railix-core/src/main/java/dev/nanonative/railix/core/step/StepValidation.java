@@ -90,6 +90,9 @@ public final class StepValidation {
             final String key = path + "[" + index + "]";
             final var input = fields.get(index).input();
             if (input instanceof StepDefinition.JsonInput json && !json.validations().isEmpty()) target.put(key, json);
+            if (input instanceof StepDefinition.MatcherGroupsInput groups) {
+                collect(groups.routeInputs(), key + ".route_inputs", target);
+            }
             final List<StepDefinition.Option> options = switch (input) {
                 case StepDefinition.OptionsInput value -> value.options();
                 case StepDefinition.CandidatesInput value -> value.options();

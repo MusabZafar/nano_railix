@@ -1,5 +1,7 @@
 package dev.nanonative.railix.development;
 
+import dev.nanonative.railix.core.runtime.RuntimeMetrics;
+
 import dev.nanonative.railix.core.project.Diagnostic;
 import dev.nanonative.railix.core.runtime.RunResult;
 import dev.nanonative.railix.core.value.RailixJson;
@@ -26,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 final class DevelopmentMetricsContractTest {
     @Test
     void metricStoreRejectsANullProjectIdentifier() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 null,
                 new String[]{"flow"},
                 new String[]{"step"}
@@ -35,7 +37,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsABlankProjectIdentifier() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 " ",
                 new String[]{"flow"},
                 new String[]{"step"}
@@ -44,7 +46,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsNullFlowIdentifiers() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 "project",
                 null,
                 new String[]{"step"}
@@ -53,7 +55,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsNullStepIdentifiers() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 "project",
                 new String[]{"flow"},
                 null
@@ -62,7 +64,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsABlankFlowIdentifier() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 "project",
                 new String[]{""},
                 new String[]{"step"}
@@ -71,7 +73,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsANullFlowIdentifier() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 "project",
                 new String[]{null},
                 new String[]{"step"}
@@ -80,7 +82,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsABlankStepIdentifier() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 "project",
                 new String[]{"flow"},
                 new String[]{""}
@@ -89,7 +91,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void metricStoreRejectsANullStepIdentifier() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new DevelopmentRuntime.Metrics(
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeMetrics(
                 "project",
                 new String[]{"flow"},
                 new String[]{null}
@@ -119,9 +121,10 @@ final class DevelopmentMetricsContractTest {
     }
 
     @Test
-    void negativeStepOutcomeCountsAnError() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
-        metrics.finishStep(1, metrics.startStep(1), -1, succeeded());
+    void rejectedStepOutcomeCountsAnError() {
+        final RuntimeMetrics metrics = metrics();
+        metrics.finishStep(1, metrics.startStep(1), -1, new RunResult.Rejected(List.of(
+                Diagnostic.atPath("INVALID", "Invalid value.", "input"))));
 
         assertThat(metric(step(metrics, "enabled"))).containsAllEntriesOf(Map.of(
                 "executions", 1L,
@@ -132,7 +135,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void cancelledStepDoesNotAlsoCountAsAnError() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishStep(1, metrics.startStep(1), -1, new RunResult.Cancelled());
 
         assertThat(metric(step(metrics, "enabled"))).containsAllEntriesOf(Map.of(
@@ -144,7 +147,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void missingStepOutcomeCountsFailureEvenWhenCancellationWasAlsoReported() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishStep(1, metrics.startStep(1), Integer.MIN_VALUE, new RunResult.Cancelled());
 
         assertThat(metric(step(metrics, "enabled"))).containsAllEntriesOf(Map.of(
@@ -156,7 +159,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void successfulStepOutcomeIgnoresAnUnrelatedTerminalFlowResult() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishStep(1, metrics.startStep(1), 0, new RunResult.Rejected(List.of(
                 Diagnostic.atPath("IGNORED", "Ignored.", "flow")
         )));
@@ -170,7 +173,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void absentFlowResultCountsAnError() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishFlow(0, metrics.startFlow(0), null);
 
         assertThat(metric(flow(metrics, "command"))).containsAllEntriesOf(Map.of(
@@ -194,7 +197,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void constructorContainsOnlyCompilerSelectedMetricSeries() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
 
         assertThat(steps(metrics)).extracting(DevelopmentMetricsContractTest::id)
                 .containsExactly("trigger", "enabled");
@@ -202,7 +205,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void successErrorCancellationAndInflightAreCountedCumulatively() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         final long first = metrics.startFlow(0);
         assertThat(metric(flow(metrics, "command"))).containsEntry("in_flight", 1L);
         metrics.finishFlow(0, first, new RunResult.Succeeded(RailixValue.object(Map.of())));
@@ -227,7 +230,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void contendedStepUpdatesStayBoundedWithoutLosingExecutions() throws Exception {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         final int workers = 32;
         final int calls = 100_000;
         final CountDownLatch ready = new CountDownLatch(workers);
@@ -288,7 +291,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void stepDurationsAreSampledWithoutLosingExactExecutionCounts() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         for (int execution = 0; execution < 1_025; execution++) {
             metrics.finishStep(1, metrics.startStep(1), 0, null);
         }
@@ -301,7 +304,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void warmedMetricUpdatesAllocateNoHeapBeyondCounterReadOverhead() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         for (int call = 0; call < 50_000; call++) {
             metrics.finishStep(1, metrics.startStep(1), 0, null);
         }
@@ -331,7 +334,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void warmedStepMetricRecordingStaysBelowOneMicrosecondPerCall() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         final int calls = 200_000;
         for (int call = 0; call < calls; call++) {
             metrics.finishStep(1, metrics.startStep(1), 0, null);
@@ -351,7 +354,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void snapshotsReportMetricStorageAndRealJvmResourcesWithoutWorkflowValues() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishStep(1, metrics.startStep(1), 0, null);
 
         final RailixValue.ObjectValue snapshot = snapshot(metrics);
@@ -364,7 +367,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void catalogUsesTheSameDurationDescriptorsAsJsonAndTextExports() throws Exception {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishStep(1, metrics.startStep(1), 0, null);
         final ByteArrayOutputStream output = new ByteArrayOutputStream();
 
@@ -389,7 +392,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void prometheusExportUsesCountersGaugesAndBoundedIdentityLabels() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishStep(1, metrics.startStep(1), 0, null);
 
         assertThat(prometheus(metrics))
@@ -404,7 +407,7 @@ final class DevelopmentMetricsContractTest {
 
     @Test
     void influxExportUsesIntegerFieldsAndBoundedIdentityTags() {
-        final DevelopmentRuntime.Metrics metrics = metrics();
+        final RuntimeMetrics metrics = metrics();
         metrics.finishFlow(0, metrics.startFlow(0), new RunResult.Succeeded(RailixValue.object(Map.of())));
 
         assertThat(influx(metrics))
@@ -422,7 +425,7 @@ final class DevelopmentMetricsContractTest {
         final String[] steps = IntStream.range(0, 16_384)
                 .mapToObj(index -> "step-" + index + "-" + "x".repeat(32))
                 .toArray(String[]::new);
-        final DevelopmentRuntime.Metrics metrics = new DevelopmentRuntime.Metrics(
+        final RuntimeMetrics metrics = new RuntimeMetrics(
                 "large-metrics-project",
                 new String[]{"command"},
                 steps
@@ -435,8 +438,8 @@ final class DevelopmentMetricsContractTest {
         assertThat(output.maximumWrite).isLessThanOrEqualTo(16_384);
     }
 
-    private static DevelopmentRuntime.Metrics metrics() {
-        return new DevelopmentRuntime.Metrics(
+    private static RuntimeMetrics metrics() {
+        return new RuntimeMetrics(
                 "metrics-project",
                 new String[]{"command"},
                 new String[]{"trigger", "enabled"}
@@ -447,12 +450,12 @@ final class DevelopmentMetricsContractTest {
         return new RunResult.Succeeded(RailixValue.object(Map.of()));
     }
 
-    private static RailixValue.ObjectValue application(final DevelopmentRuntime.Metrics metrics) {
+    private static RailixValue.ObjectValue application(final RuntimeMetrics metrics) {
         return object(snapshot(metrics), "application");
     }
 
     private static RailixValue.ObjectValue flow(
-            final DevelopmentRuntime.Metrics metrics,
+            final RuntimeMetrics metrics,
             final String id
     ) {
         return values(snapshot(metrics), "flows").stream()
@@ -463,7 +466,7 @@ final class DevelopmentMetricsContractTest {
     }
 
     private static RailixValue.ObjectValue step(
-            final DevelopmentRuntime.Metrics metrics,
+            final RuntimeMetrics metrics,
             final String id
     ) {
         return steps(metrics).stream()
@@ -472,7 +475,7 @@ final class DevelopmentMetricsContractTest {
                 .orElseThrow();
     }
 
-    private static List<RailixValue.ObjectValue> steps(final DevelopmentRuntime.Metrics metrics) {
+    private static List<RailixValue.ObjectValue> steps(final RuntimeMetrics metrics) {
         return values(snapshot(metrics), "steps").stream()
                 .map(RailixValue.ObjectValue.class::cast)
                 .toList();
@@ -504,7 +507,7 @@ final class DevelopmentMetricsContractTest {
         return ((RailixValue.NumberValue) value.values().get(name)).value().longValueExact();
     }
 
-    private static RailixValue.ObjectValue snapshot(final DevelopmentRuntime.Metrics metrics) {
+    private static RailixValue.ObjectValue snapshot(final RuntimeMetrics metrics) {
         final ByteArrayOutputStream output = new ByteArrayOutputStream();
         try {
             metrics.writeJson(output);
@@ -516,7 +519,7 @@ final class DevelopmentMetricsContractTest {
         return (RailixValue.ObjectValue) ((RailixJson.Parsed) parsed).value();
     }
 
-    private static String prometheus(final DevelopmentRuntime.Metrics metrics) {
+    private static String prometheus(final RuntimeMetrics metrics) {
         final ByteArrayOutputStream output = new ByteArrayOutputStream();
         try {
             metrics.writePrometheus(output);
@@ -526,7 +529,7 @@ final class DevelopmentMetricsContractTest {
         return output.toString(StandardCharsets.UTF_8);
     }
 
-    private static String influx(final DevelopmentRuntime.Metrics metrics) {
+    private static String influx(final RuntimeMetrics metrics) {
         final ByteArrayOutputStream output = new ByteArrayOutputStream();
         try {
             metrics.writeInflux(output);

@@ -2129,19 +2129,22 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
     }
 
     @Test
-    void catalogDescribesChoiceThroughTheGenericMatcherGroupInput() throws Exception {
+    void catalogDescribesBranchRoutesThroughTheGenericMatcherGroupInput() throws Exception {
         try (CreatorServer creator = start(directory.resolve("project.json"))) {
-            final RailixValue.ObjectValue definition = catalogDefinition(creator.baseUri(), "railix.choice");
+            final RailixValue.ObjectValue definition = catalogDefinition(creator.baseUri(), "railix.branch");
 
             assertThat(definition.values().get("kind")).isEqualTo(RailixValue.string("step"));
-            assertThat(definition.values().get("primary_outcome")).isEqualTo(RailixValue.string("match"));
+            assertThat(definition.values().get("primary_outcome")).isEqualTo(RailixValue.string("otherwise"));
             assertThat(definition.values().get("outcomes")).isEqualTo(RailixValue.array(List.of(
-                    RailixValue.string("match"),
                     RailixValue.string("otherwise")
             )));
-            assertThat(definition.values().get("inputs")).isEqualTo(object("""
-                    {"value":[{
-                      "name":"conditions",
+            final List<RailixValue> inputs = ((RailixValue.ArrayValue) definition.values().get("inputs")).values();
+            assertThat(inputs).extracting(input -> ((RailixValue.ObjectValue) input).values().get("name"))
+                    .containsExactly(RailixValue.string("routes"), RailixValue.string("selection"),
+                            RailixValue.string("execution"));
+            assertThat(inputs.getFirst()).isEqualTo(object("""
+                    {"value":{
+                      "name":"routes",
                       "type":"matcher_groups",
                       "options":[
                         {"name":"field","inputs":[{
@@ -2149,10 +2152,14 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
                           "default":["context","payload"]
                         }],"value_source":{"scope":"owned","input":"field"}},
                         {"name":"literal","inputs":[{
-                          "name":"value","type":"json","shape":"any","required":true
+                          "name":"value","type":"json","shape":"any","required":false,"default":null
                         }],"value_source":{"scope":"owned","input":"value"}}
-                      ]
-                    }]}
+                      ],
+                      "authored_outcomes":true,
+                      "route_inputs":[{
+                        "name":"own_context","type":"json","shape":"boolean","required":false,"default":false
+                      }]
+                    }}
                     """).values().get("value"));
         }
     }
@@ -3042,7 +3049,7 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
     }
 
     @Test
-    void persistenceFailureStopsCandidateAndRestartsPreviousApplication() throws Exception {
+    void unreadableProjectPreventsReplacementWithoutRestartingApplication() throws Exception {
         final Path project = directory.resolve("project.json");
         try (CreatorServer creator = start(project)) {
             final RailixValue.ObjectValue before = application(creator.baseUri());
@@ -3056,11 +3063,10 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
                     CreatorProjects.empty("quiet-byte")
             );
 
-            assertThat(response.statusCode()).isEqualTo(500);
-            assertThat(response.body()).contains("Project could not be persisted.", "\"recovery\":\"restarted\"");
+            assertThat(response.statusCode()).isEqualTo(409);
+            assertThat(response.body()).contains("Project files cannot be read.");
             final RailixValue.ObjectValue after = application(creator.baseUri());
-            assertThat(number(after, "pid")).isNotEqualTo(number(before, "pid"));
-            assertThat(awaitExit(number(before, "pid"))).isTrue();
+            assertThat(number(after, "pid")).isEqualTo(number(before, "pid"));
             assertThat(string(after, "state")).isEqualTo("running");
             assertThat(string(after, "fingerprint")).isEqualTo(string(before, "fingerprint"));
             assertThat(string(after, "build_path")).isEqualTo(string(before, "build_path"));
@@ -3094,7 +3100,7 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
         try (CreatorServer creator = start(directory.resolve("project.json"))) {
             final HttpResponse<String> response = request(
                     creator.baseUri(),
-                    "POST",
+                    "PUT",
                     "/api/application",
                     ""
             );
@@ -3626,7 +3632,7 @@ abstract class CreatorServerE2eSupport {
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{
                     "name":"example","payload":[],"context":{"payload":{}}
                   }]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[]}},
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
                   {"id":"matched","use":"railix.field-manipulation","inputs":{}},
                   {"id":"otherwise","use":"railix.field-manipulation","inputs":{}}
                 ],"links":[
@@ -3647,11 +3653,11 @@ abstract class CreatorServerE2eSupport {
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{
                     "name":"example","payload":[],"context":{"payload":{}}
                   }]},
-                  {"id":"split","use":"railix.choice","inputs":{"conditions":[]}},
-                  {"id":"choice-a","use":"railix.choice","inputs":{"conditions":[]}},
+                  {"id":"split","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
+                  {"id":"choice-a","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
                   {"id":"a-match","use":"railix.field-manipulation","inputs":{}},
                   {"id":"a-other","use":"railix.field-manipulation","inputs":{}},
-                  {"id":"choice-b","use":"railix.choice","inputs":{"conditions":[]}},
+                  {"id":"choice-b","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
                   {"id":"b-match","use":"railix.field-manipulation","inputs":{}},
                   {"id":"b-other","use":"railix.field-manipulation","inputs":{}}
                 ],"links":[

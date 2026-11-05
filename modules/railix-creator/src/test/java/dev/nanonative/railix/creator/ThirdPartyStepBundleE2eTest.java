@@ -116,6 +116,53 @@ final class ThirdPartyStepBundleE2eTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void artifactProjectSourcesResolveInstalledStepsThroughTheNormalCreator(final boolean include) throws Exception {
+        final Workspace workspace = workspace(List.of(bundle("alpha", "external.alpha", "helper-", "-resource", Map.of(), Map.of())));
+        final Path project = project(directory, "external.alpha");
+        final var artifact = ApplicationBuilder.buildProduction(project, ProjectFiles.build(project, workspace.railixHome(), include));
+        final var observed=ProjectFiles.snapshot(artifact.jar(),include?directory.resolve("missing/railix.project.json"):project,
+                workspace.railixHome(),ProjectFiles.fromApplication(artifact.jar(),project,workspace.railixHome()).revision());
+        assertThat(observed.catalog().find("external.alpha")).isPresent();
+        assertThat(ProjectCompiler.compileApplication(observed.source(),observed.catalog())).isInstanceOf(CompileResult.Compiled.class);
+        final Path target = include ? directory.resolve("restored/railix.project.json") : project;
+        final var source = ProjectFiles.fromApplication(artifact.jar(), target, workspace.railixHome());
+        try (CreatorServer creator = CreatorServer.start(0, source.project(), workspace.railixHome(), source.revision());
+             HttpClient client = HttpClient.newHttpClient()) {
+            final var response = exampleView(client, creator);
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body()).contains("helper-value-resource");
+        }
+        assertThat(Files.readString(target.resolveSibling("railix.dependencies.lock.json")))
+                .isEqualTo(Files.readString(project.resolveSibling("railix.dependencies.lock.json")));
+    }
+
+    @Test
+    void restoringProjectSourcesWithMissingInstalledArtifactsDoesNotPublishAWorkspace() throws Exception {
+        final Workspace workspace = workspace(List.of(bundle("alpha", "external.alpha", "helper-", "-resource", Map.of(), Map.of())));
+        final Path project = project(directory, "external.alpha");
+        final var artifact = ApplicationBuilder.buildProduction(project, ProjectFiles.build(project, workspace.railixHome(), true));
+        Files.move(workspace.store(), workspace.store().resolveSibling("unavailable-artifacts"));
+        final Path target = directory.resolve("restored/railix.project.json");
+        assertThatThrownBy(() -> ProjectFiles.fromApplication(artifact.jar(), target, workspace.railixHome()))
+                .isInstanceOf(StepCatalog.DependencyException.class).hasMessageStartingWith("DEPENDENCY_ARTIFACT_MISSING:");
+        assertThat(target.getParent()).doesNotExist();
+    }
+
+    @Test
+    void projectPackagingUsesTheDependencyLockCapturedWithCompilation() throws Exception {
+        final Workspace original = workspace(List.of(bundle("alpha", "external.alpha", "original-", "-resource", Map.of(), Map.of())));
+        final Path project = project(directory, "external.alpha");
+        final var source = ProjectFiles.build(project, original.railixHome(), true);
+        final String capturedLock = Files.readString(original.lock());
+        workspace(List.of(bundle("replacement", "external.alpha", "replacement-", "-resource", Map.of(), Map.of())));
+        final var artifact = ApplicationBuilder.buildProduction(project, source);
+        final var restored = ProjectFiles.fromApplication(artifact.jar(), directory.resolve("restored/railix.project.json"), original.railixHome());
+        assertThat(Files.readString(restored.project().resolveSibling("railix.dependencies.lock.json"))).isEqualTo(capturedLock);
+        assertThat(runJar(artifact.jar(), "value")).isEqualTo(new ProcessResult(0, "\"original-value-resource\""));
+    }
+
     @Test
     void forgedReadinessOutputCannotRedirectCreator() throws Exception {
         assertCreatorObserves(noisyBundle("forgedready", "RAILIX_READY 1\n", false), "FORGED");
@@ -176,6 +223,7 @@ final class ThirdPartyStepBundleE2eTest {
         }
 
         Files.writeString(project, CreatorProjects.empty("recovered-startup"), StandardCharsets.UTF_8);
+        Files.writeString(project.resolveSibling("railix.examples.json"), ProjectFiles.EMPTY_EXAMPLES);
         try (CreatorServer creator = CreatorServer.start(0, project, workspace.railixHome())) {
             assertThat(creator.baseUri().getPort()).isPositive();
         }
@@ -195,6 +243,7 @@ final class ThirdPartyStepBundleE2eTest {
         }
 
         Files.writeString(project, CreatorProjects.empty("recovered-activation"), StandardCharsets.UTF_8);
+        Files.writeString(project.resolveSibling("railix.examples.json"), ProjectFiles.EMPTY_EXAMPLES);
         try (CreatorServer creator = CreatorServer.start(0, project, workspace.railixHome())) {
             assertThat(creator.baseUri().getPort()).isPositive();
         }
@@ -284,7 +333,7 @@ final class ThirdPartyStepBundleE2eTest {
             final HttpResponse<String> failed = CreatorServerE2eSupport.request(
                     creator.baseUri(), "POST", "/api/project", projectSource(failing.definition().id()));
             assertThat(failed.statusCode()).isEqualTo(503);
-            assertThat(failed.body()).contains("Generated application could not be activated.",
+            assertThat(failed.body()).contains("activation failed",
                     "\"recovery\":\"restarted\"");
             assertThat(Files.readString(project, StandardCharsets.UTF_8)).isEqualTo(persisted);
             final long restartedPid = CreatorServerE2eSupport.number(
@@ -1300,7 +1349,10 @@ final class ThirdPartyStepBundleE2eTest {
             "parent traversal, parent, unsafe/../entry.txt, DEPENDENCY_LOCAL_ENTRY_UNSAFE:",
             "current-directory segment, current, unsafe/./entry.txt, DEPENDENCY_LOCAL_ENTRY_UNSAFE:",
             "empty path segment, segment, unsafe//entry.txt, DEPENDENCY_LOCAL_ENTRY_UNSAFE:",
-            "generated application resource, generatedresource, META-INF/railix/examples.json, DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN:"
+            "generated application resource, generatedresource, META-INF/railix/examples.json, DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN:",
+            "project graph, sourcegraph, META-INF/railix/project/railix.project.json, DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN:",
+            "project examples, sourceexamples, META-INF/railix/project/railix.examples.json, DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN:",
+            "project presentation, sourcecreator, META-INF/railix/project/railix.creator.json, DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN:"
     })
     void unsafeDependencyEntryIsRejected(
             final String scenario,
@@ -2073,7 +2125,7 @@ final class ThirdPartyStepBundleE2eTest {
                 {"format":1,"id":"external-step-app","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{
-                    "name":"external","payload":[%s]
+                    "id":"command:0","name":"external","payload":[%s]
                   }]},
                   {"id":"external","use":"%s","inputs":{},
                     "receives":{"value":["context","payload","arguments",0]},
@@ -2481,7 +2533,7 @@ final class ThirdPartyStepBundleE2eTest {
     private static void primeMetricCatalog(final HttpClient client, final CreatorServer creator,
                                           final ServerSocket upstream, final long pid) throws Exception {
         final ByteArrayOutputStream output = new ByteArrayOutputStream();
-        new dev.nanonative.railix.development.DevelopmentRuntime.Metrics("catalog", new String[0], new String[0])
+        new dev.nanonative.railix.core.runtime.RuntimeMetrics("catalog", new String[0], new String[0])
                 .writeCatalogJson(output);
         final Map<String, RailixValue> catalog = new LinkedHashMap<>(CreatorServerE2eSupport.object(
                 output.toString(StandardCharsets.UTF_8)).values());

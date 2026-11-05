@@ -21,10 +21,10 @@ for execution contracts and the [roadmap](docs/roadmap.md) for supported and pla
 | [System model](docs/specs/system-model.md) | Functional graph, Step/context and lifecycle contracts, control routing and compilation. |
 | [HTTP Trigger](docs/specs/http-trigger.md) / [HTTP Client](docs/specs/http-client.md) | Current HTTP baseline, planned context-driven HTTPS behavior and shared protocol data rules. |
 | [Standard library](docs/specs/standard-library.md) | Primitive semantics, catalog/support matrix and acceptance. |
-| [Observation](docs/specs/observation.md) | Current development execution, metrics and management APIs. |
+| [Observation](docs/specs/observation.md) | Application-owned execution, shared metrics, management APIs and remaining attachment work. |
 | [Creator](docs/specs/creator.md) | Authoring, presentation metadata, factory world and navigation. |
 | [Creator assets](docs/specs/creator-assets.md) | Settings, theme folders, renderer variants and editable sounds/music. |
-| [Examples and validation](docs/specs/examples-and-validation.md) | Agreed future Example ownership and two-phase validation; not implemented. |
+| [Examples and validation](docs/specs/examples-and-validation.md) | Separate Example ownership, Creator checks and planned field authoring. |
 | [Environments and security](docs/specs/environments-and-security.md) | Multi-project secret-management goals and open identity, recovery and ingress design. |
 | [Database and data access](docs/specs/database-and-data-access.md) | Planned durable database and permission-controlled Creator data administration; no time-series database. |
 | [docs/roadmap.md](docs/roadmap.md) | Delivery sequence, dependencies, progress and unsupported scope. |
@@ -44,10 +44,10 @@ Application -> CLI Trigger -> Lowercase -> End
 The [canonical lowercase project](examples/lowercase-app/railix.project.json) is a
 ready-to-open example of this flow.
 
-Today `railix.project.json` contains the flat graph and Trigger Examples;
-`railix.creator.json` is optional presentation only. The accepted future design moves
-Example inputs and expectations together into `railix.examples.json`. That migration
-has not happened. See the [validation spec](docs/specs/examples-and-validation.md).
+`railix.project.json` contains the flat graph. Creator imports older embedded Examples once
+into `railix.examples.json`, which owns inputs and optional expectations together.
+`railix.creator.json` remains optional presentation only. Saved checks are available through
+the Creator API; their field UI is still planned. See the [validation spec](docs/specs/examples-and-validation.md).
 Invalid functional edits show diagnostics while the last valid development app keeps running.
 
 ## Build And Start
@@ -134,6 +134,48 @@ Or select both:
 ```
 
 Creator prints the URL to open. `Ctrl-C` stops Creator and its owned development-application JVM.
+
+Build a standalone application, optionally including the original project documents:
+
+```sh
+"$RAILIX" build path/to/railix.project.json
+"$RAILIX" build path/to/railix.project.json --include-project
+```
+
+The command prints the generated application JAR path. Without `--include-project`, open the
+matching local project against that artifact:
+
+```sh
+"$RAILIX" creator path/to/railix.project.json --application path/to/application.jar
+```
+
+With embedded documents, select a new workspace directory whose parent already exists:
+
+```sh
+"$RAILIX" creator new-workspace/railix.project.json --application path/to/application.jar
+```
+
+These source-loading commands use the normal project loader and start a local application with Examples. This does not
+attach to, replace or deploy an independently running application. Existing files are never
+replaced during extraction. A mismatched local project is rejected. Installed third-party Steps
+still use their dependency lock and local artifact store. Project files are limited to 64 MiB
+each. Embedded documents may contain configuration credentials, so inclusion is explicit.
+Local execution still uses configured external services. Review ports and credentials before
+starting a copied project.
+
+For a running standalone JAR, choose **Project actions > Connect live app** in Creator.
+The default build publishes an authenticated local observation connection automatically. No port,
+URL or token arguments are needed. **Live** shows that exact build read-only. **Draft** remains
+local and editable. Connecting pauses its execution. Edits still build and save. Choose **Start
+locally** after reviewing trigger ports and external services to run the draft and its Examples.
+Normal Creator startup without a Live connection still starts locally as before.
+The change count opens a list of added, changed and removed Steps. A removed
+Step retains its old connections in Live and can be restored locally when its neighbors still match.
+Closing Creator never stops the independently started application. If source was not embedded and
+the draft has changed, select the matching original project file in the connection dialog.
+Use `build --no-observation` only when a build must have no observation listener. Metrics and Step
+execution remain the same. Discovery currently requires an owner-only POSIX local filesystem.
+
 `./mvnw clean` removes the generated JAR and application image. Railix has no third-party Java runtime
 libraries or graphics framework. Creator renders its factory with native Canvas2D and a CSS-themed HUD;
 Playwright is test-only.
@@ -179,8 +221,8 @@ provided by this minimal transport.
 - `railix-core`: canonical values, Step contracts, project validation, Java application generation,
   generated-application runtime contracts, stateless workflow execution, and the development
   capabilities packaged only into development artifacts.
-- `railix-stdlib`: App, CLI Trigger, HTTP Trigger, HTTP Client, Field Manipulation, Filter, Choice,
-  Switch, and built-in total or explicitly fallible unary Steps.
+- `railix-stdlib`: App, CLI Trigger, HTTP Trigger, HTTP Client, Field Manipulation, configurable
+  Branch, and built-in total or explicitly fallible unary Steps.
 - `railix-creator`: Creator HTTP/UI, project build and rolling child-JVM lifecycle, read-only
   management proxies, launcher, and executable shaded JAR.
 

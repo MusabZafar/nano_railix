@@ -52,6 +52,7 @@ final class ApplicationBuilder {
     private static final List<String> RUNTIME_PREFIXES = List.of(
             "dev/nanonative/railix/core/project/Diagnostic",
             "dev/nanonative/railix/core/project/RuntimeApplication",
+            "dev/nanonative/railix/core/project/ObservedApplication",
             "dev/nanonative/railix/core/project/WorkflowRuntime",
             "dev/nanonative/railix/core/runtime/",
             "dev/nanonative/railix/core/step/StepInput",
@@ -60,8 +61,6 @@ final class ApplicationBuilder {
     );
     private static final String DEVELOPMENT_PREFIX = "dev/nanonative/railix/development/";
     private static final String PLATFORM_CLASS_PREFIX = "dev/nanonative/railix/";
-    private static final byte[] MANIFEST_HEADER = "Manifest-Version: 1.0\r\nMain-Class: "
-            .getBytes(StandardCharsets.UTF_8);
 
     private ApplicationBuilder() {
     }
@@ -70,25 +69,43 @@ final class ApplicationBuilder {
             final Path projectFile,
             final CompileResult.Compiled compiled
     ) throws IOException {
-        return (DevelopmentBuild) build(projectFile, compiled, true);
+        return (DevelopmentBuild) build(projectFile, compiled, true, Map.of(), true);
     }
 
     static Artifact buildProduction(
             final Path projectFile,
             final CompileResult.Compiled compiled
     ) throws IOException {
-        return (Artifact) build(projectFile, compiled, false);
+        return (Artifact) build(projectFile, compiled, false, Map.of(), true);
+    }
+
+    static Artifact buildProduction(
+            final Path projectFile,
+            final ProjectFiles.Build source
+    ) throws IOException {
+        return buildProduction(projectFile, source, true);
+    }
+
+    static Artifact buildProduction(final Path projectFile, final ProjectFiles.Build source,
+                                    final boolean observation) throws IOException {
+        if (!(source.result() instanceof CompileResult.Compiled compiled))
+            throw new IllegalArgumentException("Cannot package a rejected project.");
+        return (Artifact) build(projectFile, compiled, false, source.documents(), observation);
     }
 
     private static Published build(
             final Path projectFile,
             final CompileResult.Compiled compiled,
-            final boolean development
+            final boolean development,
+            final Map<String, String> projectDocuments,
+            final boolean observation
     ) throws IOException {
+        final Set<String> reserved = new java.util.HashSet<>(compiled.developmentResources().keySet());
+        reserved.addAll(projectDocuments.keySet());
         final RuntimeFiles runtime = runtime(
                 compiled.applicationDependencies(),
                 development,
-                compiled.developmentResources().keySet()
+                reserved
         );
         final String applicationSource = development
                 ? compiled.developmentApplicationSource()
@@ -96,7 +113,14 @@ final class ApplicationBuilder {
         final String mainClass = development
                 ? compiled.developmentLauncherClass()
                 : compiled.applicationClass();
-        final String key = buildKey(compiled, runtime.entries(), development);
+        final String sourceIdentity = ProjectFiles.identity(compiled);
+        final String baseKey = buildKey(compiled, runtime.entries(), development);
+        final MessageDigest publication = sha256();
+        update(publication, baseKey);
+        update(publication, observation ? "observation-on" : "observation-off");
+        projectDocuments.forEach((name, value) -> { update(publication, name); update(publication, value); });
+        final String key = projectDocuments.isEmpty() && observation ? baseKey
+                : "sha256-" + HexFormat.of().formatHex(publication.digest());
         final Path root = projectFile.toAbsolutePath().normalize().getParent()
                 .resolve(".railix").resolve("build");
         final Path destination = root.resolve(key);
@@ -171,8 +195,13 @@ final class ApplicationBuilder {
                     ), false);
                 }
             }
-            jar(jar, mainClass, expected);
-            if (!matches(jar, mainClass, expected)) {
+            for (final var resource : projectDocuments.entrySet()) {
+                final byte[] bytes = resource.getValue().getBytes(StandardCharsets.UTF_8);
+                putEntry(expected, new MemoryRuntimeEntry(resource.getKey(), bytes.length, digest(bytes), bytes), false);
+            }
+            final byte[] manifest = manifest(mainClass, sourceIdentity, observation);
+            jar(jar, manifest, expected);
+            if (!matches(jar, manifest, expected)) {
                 throw new IOException("Generated application JAR does not match its expected content inventory.");
             }
             synchronized (ApplicationBuilder.class) {
@@ -672,7 +701,7 @@ final class ApplicationBuilder {
             throw new IOException("DEPENDENCY_PLATFORM_CLASS_FORBIDDEN: Dependency JAR cannot provide Railix "
                     + "platform class: " + name + ".");
         }
-        if (reservedResources.contains(name)) {
+        if (reservedResources.contains(name) || name.startsWith(ProjectFiles.ARCHIVE_ROOT)) {
             throw new IOException("DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN: Dependency JAR cannot provide generated "
                     + "application resource: " + name + ".");
         }
@@ -753,7 +782,8 @@ final class ApplicationBuilder {
             final boolean development
     ) {
         final MessageDigest digest = sha256();
-        update(digest, "railix-application-v4");
+        update(digest, "railix-application-v5");
+        update(digest, ProjectFiles.identity(compiled));
         update(digest, development ? "development" : "production");
         update(digest, Runtime.version().toString());
         update(digest, System.getProperty("java.vendor"));
@@ -779,28 +809,27 @@ final class ApplicationBuilder {
 
     private static void jar(
             final Path target,
-            final String mainClass,
+            final byte[] manifest,
             final Map<String, RuntimeEntry> content
     ) throws IOException {
         try (OutputStream file = Files.newOutputStream(target, StandardOpenOption.CREATE_NEW);
              JarOutputStream jar = new JarOutputStream(file)) {
-            write(jar, JarFile.MANIFEST_NAME, manifest(mainClass));
+            write(jar, JarFile.MANIFEST_NAME, manifest);
             for (final RuntimeEntry entry : content.values()) {
                 write(jar, entry);
             }
         }
     }
 
-    private static byte[] manifest(final String mainClass) {
-        final byte[] main = mainClass.getBytes(StandardCharsets.UTF_8);
-        final byte[] manifest = new byte[MANIFEST_HEADER.length + main.length + 4];
-        System.arraycopy(MANIFEST_HEADER, 0, manifest, 0, MANIFEST_HEADER.length);
-        System.arraycopy(main, 0, manifest, MANIFEST_HEADER.length, main.length);
-        manifest[manifest.length - 4] = '\r';
-        manifest[manifest.length - 3] = '\n';
-        manifest[manifest.length - 2] = '\r';
-        manifest[manifest.length - 1] = '\n';
-        return manifest;
+    private static byte[] manifest(final String mainClass, final String sourceIdentity, final boolean observation) throws IOException {
+        final var manifest = new java.util.jar.Manifest();
+        manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
+        manifest.getMainAttributes().putValue("Main-Class", mainClass);
+        manifest.getMainAttributes().putValue("Railix-Project-Id", sourceIdentity);
+        manifest.getMainAttributes().putValue("Railix-Observation", Boolean.toString(observation));
+        final var output = new java.io.ByteArrayOutputStream();
+        manifest.write(output);
+        return output.toByteArray();
     }
 
     private static void write(
@@ -862,14 +891,13 @@ final class ApplicationBuilder {
 
     private static boolean matches(
             final Path jar,
-            final String mainClass,
+            final byte[] manifest,
             final Map<String, RuntimeEntry> content
     ) throws IOException {
         if (!Files.isRegularFile(jar)) {
             return false;
         }
         final Map<String, RuntimeEntry> expected = new TreeMap<>(content);
-        final byte[] manifest = manifest(mainClass);
         expected.put(JarFile.MANIFEST_NAME, new MemoryRuntimeEntry(
                 JarFile.MANIFEST_NAME, manifest.length, digest(manifest), manifest
         ));

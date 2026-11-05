@@ -92,6 +92,42 @@ final class ConfigurationValidationBundleE2eTest extends CreatorServerE2eSupport
     }
 
     @Test
+    void buildRejectsProjectFilesChangedWhileAnInstalledValidatorRuns() throws Exception {
+        install();
+        final Path home = directory.resolve("home");
+        Files.createDirectories(home.resolve(".railix"));
+        Files.move(directory.resolve("railix-home/artifacts"), home.resolve(".railix/artifacts"));
+        final Path gate = Files.createDirectory(directory.resolve("gate"));
+        final Path project = directory.resolve("railix.project.json");
+        final String inputs = RailixJson.write(RailixValue.object(java.util.Map.of("value", RailixValue.string("gate:" + gate))));
+        final var documents = ProjectFiles.split(ProjectFiles.identify(source(inputs), true), ProjectFiles.EMPTY_EXAMPLES);
+        Files.writeString(project, documents.project());
+        final Path examples = directory.resolve("railix.examples.json");
+        Files.writeString(examples, documents.examples());
+        final Path log = directory.resolve("build.log");
+        final Process build = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Duser.home=" + home, "-cp", System.getProperty("java.class.path"), RailixMain.class.getName(),
+                "build", project.toString(), "--include-project").redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (!Files.exists(gate.resolve("ready")) && build.isAlive() && System.nanoTime() < deadline) Thread.sleep(5);
+            assertThat(gate.resolve("ready")).as(Files.readString(log)).exists();
+            final String changed = documents.examples().replace("default", "changed-during-build");
+            Files.writeString(examples, changed);
+            Files.writeString(gate.resolve("release"), "release");
+            assertThat(build.waitFor(15, TimeUnit.SECONDS)).isTrue();
+            assertThat(build.exitValue()).as(Files.readString(log)).isEqualTo(2);
+            assertThat(Files.readString(log)).contains("PROJECT_SOURCE_CHANGED");
+            assertThat(Files.readString(examples)).isEqualTo(changed);
+            assertThat(directory.resolve(".railix/build")).doesNotExist();
+        } finally {
+            Files.writeString(gate.resolve("release"), "release");
+            build.destroyForcibly();
+            assertThat(build.waitFor(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
     void ownedAndNestedInputsUseTheSameCallbackContract() throws Exception {
         final var catalog = install();
         final String owned = "{\"options\":{\"option\":\"custom\",\"inputs\":{\"port\":-1}}}";

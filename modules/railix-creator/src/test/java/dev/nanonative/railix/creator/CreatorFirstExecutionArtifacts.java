@@ -228,6 +228,7 @@ final class CreatorFirstExecutionArtifacts {
                         return switch (result) {
                             case RunResult.Succeeded succeeded -> "succeeded|"
                                     + RailixJson.write(succeeded.context());
+                            case RunResult.Completed completed -> "completed|" + RailixJson.write(completed.context());
                             case RunResult.Rejected rejected -> "rejected|"
                                     + rejected.diagnostics().getFirst().code() + "|"
                                     + rejected.diagnostics().getFirst().path();
@@ -240,6 +241,7 @@ final class CreatorFirstExecutionArtifacts {
                     private static String result(final RunResult result) {
                         return switch (result) {
                             case RunResult.Succeeded ignored -> "succeeded";
+                            case RunResult.Completed ignored -> "completed";
                             case RunResult.Rejected rejected -> "rejected:" + rejected.diagnostics().getFirst().code();
                             case RunResult.Failed failed -> "failed:" + failed.failure().code();
                             case RunResult.Cancelled ignored -> "cancelled";
@@ -333,6 +335,7 @@ final class CreatorFirstExecutionArtifacts {
                     private static String result(final RunResult result) {
                         return switch (result) {
                             case RunResult.Succeeded ignored -> "succeeded";
+                            case RunResult.Completed ignored -> "completed";
                             case RunResult.Rejected rejected -> "rejected:" + rejected.diagnostics().getFirst().code();
                             case RunResult.Failed failed -> "failed:" + failed.failure().code();
                             case RunResult.Cancelled ignored -> "cancelled";

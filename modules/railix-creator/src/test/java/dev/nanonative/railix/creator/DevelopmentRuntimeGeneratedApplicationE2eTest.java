@@ -707,7 +707,7 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
                 .contains("\"status\":\"failed\"")
                 .contains("\"input_context\"")
                 .contains("\"context\"")
-                .doesNotContain("\"code\"");
+                .contains("STEP_IMPLEMENTATION_FAULT");
         assertThat(object(response.body()).values()).doesNotContainKey("type").containsKey("exception");
         assertThat(response.body()).contains("thirdparty.conformance.DevelopmentRuntimeConformanceSteps$Fault.process");
     }
@@ -1737,10 +1737,10 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
                     {"name":"match","payload":[],"context":{"payload":{"value":"allow"}}},
                     {"name":"otherwise","payload":[],"context":{"payload":{"value":"deny"}}}
                   ]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[[{
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[{
                     "option":"field","inputs":{"field":["context","payload","value"]},
                     "when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":"allow"}}]]}
-                  }]]}},
+                  }]]}]}},
                   {"id":"matched","use":"railix.field-manipulation","inputs":{}},
                   {"id":"otherwise","use":"railix.field-manipulation","inputs":{}}
                 ],"links":[

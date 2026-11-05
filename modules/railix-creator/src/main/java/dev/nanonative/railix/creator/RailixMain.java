@@ -5,23 +5,22 @@ import dev.nanonative.railix.core.project.Diagnostic;
 import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.project.RuntimeApplication;
 import dev.nanonative.railix.core.step.StepCatalog;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import java.io.IOException;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /** Starts Railix Creator. Generated project applications are independent executable JARs. */
 public final class RailixMain {
     private static final int DEFAULT_PORT = 0;
-    private static final String CREATOR_USAGE = "Usage: railix creator [project-file] [port]";
+    private static final String CREATOR_USAGE = "Usage: railix creator [project-file] [port] [--application application.jar]";
+    private static final String BUILD_USAGE = "       railix build [project-file] [--include-project] [--no-observation]";
     private static final String USAGE = CREATOR_USAGE + "\n"
-            + "       railix run [arguments...]";
+            + "       railix run [arguments...]\n" + BUILD_USAGE;
 
     private RailixMain() {
     }
@@ -40,6 +39,7 @@ public final class RailixMain {
         return switch (arguments[0]) {
             case "creator" -> creator(arguments);
             case "run" -> runApplication(List.of(arguments).subList(1, arguments.length));
+            case "build" -> build(List.of(arguments).subList(1, arguments.length));
             default -> reject("Unknown Railix command: " + arguments[0] + ".");
         };
     }
@@ -47,18 +47,23 @@ public final class RailixMain {
     private static int runApplication(final List<String> arguments) {
         try {
             final Path project = Path.of("railix.project.json");
-            final String source = readApplicationProject(project);
             final Path absoluteProject = project.toAbsolutePath().normalize();
-            final Path dependencyLock = absoluteProject.resolveSibling("railix.dependencies.lock.json");
-            final StepCatalog catalog = Files.exists(dependencyLock)
-                    ? StandardLibrary.catalog().install(
-                            dependencyLock,
-                            Path.of(System.getProperty("user.home"), ".railix", "artifacts")
-                    )
-                    : StandardLibrary.catalog();
+            if (!Files.isRegularFile(absoluteProject)) return reject("Cannot read project: " + project);
+            if (Files.exists(ProjectFiles.journal(absoluteProject)))
+                return reject("PROJECT_EDIT_PENDING: Reopen Creator to recover the interrupted edit before running.");
+            final var documents = ProjectFiles.read(absoluteProject);
+            if (Files.exists(ProjectFiles.journal(absoluteProject)))
+                return reject("PROJECT_EDIT_PENDING: Project files are being edited. Retry after the edit completes.");
+            if (!documents.diagnostics().isEmpty()) {
+                final Diagnostic diagnostic = documents.diagnostics().getFirst();
+                return reject(diagnostic.code() + " " + diagnostic.path() + " " + diagnostic.message());
+            }
+            final String source = documents.source();
+            final StepCatalog catalog = ProjectFiles.catalog(absoluteProject,
+                    Path.of(System.getProperty("user.home"), ".railix"));
             final CompileResult result = ProjectCompiler.compileApplication(source, catalog);
             if (result instanceof CompileResult.Rejected rejected) {
-                final Diagnostic diagnostic = rejected.diagnostics().getFirst();
+                final Diagnostic diagnostic = documents.locations(rejected.diagnostics()).getFirst();
                 return reject(diagnostic.code() + " " + diagnostic.path() + " " + diagnostic.message());
             }
             final CompileResult.Compiled compiled = (CompileResult.Compiled) result;
@@ -74,14 +79,26 @@ public final class RailixMain {
         }
     }
 
-    private static String readApplicationProject(final Path project) throws IOException {
-        if (!Files.isRegularFile(project)) {
-            throw new IOException("Cannot read project: " + project);
-        }
+    static int build(final List<String> arguments) {
+        final List<String> files = arguments.stream().filter(argument -> !Set.of("--include-project", "--no-observation").contains(argument)).toList();
+        if (files.size() > 1 || files.stream().anyMatch(argument -> argument.startsWith("--"))
+                || arguments.stream().filter("--include-project"::equals).count() > 1
+                || arguments.stream().filter("--no-observation"::equals).count() > 1)
+            return reject(BUILD_USAGE.strip());
+        final Path project = Path.of(files.isEmpty() ? "railix.project.json" : files.getFirst()).toAbsolutePath().normalize();
         try {
-            return Files.readString(project, StandardCharsets.UTF_8);
-        } catch (final CharacterCodingException exception) {
-            throw new IOException("Project is not valid UTF-8.", exception);
+            if (!Files.isRegularFile(project)) return reject("PROJECT_SOURCE_REQUIRED: Select an existing project file: " + project);
+            final boolean includeProject = arguments.contains("--include-project");
+            final var source = ProjectFiles.build(project, Path.of(System.getProperty("user.home"), ".railix"), includeProject);
+            if (source.result() instanceof CompileResult.Rejected rejected) {
+                final Diagnostic diagnostic = rejected.diagnostics().getFirst();
+                return reject(diagnostic.code() + " " + diagnostic.path() + " " + diagnostic.message());
+            }
+            final var artifact = ApplicationBuilder.buildProduction(project, source, !arguments.contains("--no-observation"));
+            System.out.println(artifact.jar());
+            return 0;
+        } catch (final IOException | IllegalArgumentException exception) {
+            return reject(exception.getMessage());
         }
     }
 
@@ -129,15 +146,30 @@ public final class RailixMain {
     }
 
     private static int creator(final String[] arguments) {
-        if (arguments.length > 3) {
+        final List<String> options = new ArrayList<>(List.of(arguments).subList(1, arguments.length));
+        final int applicationIndex = options.indexOf("--application");
+        final Path artifact;
+        if (applicationIndex >= 0) {
+            if (applicationIndex + 1 >= options.size() || options.get(applicationIndex + 1).startsWith("--"))
+                return reject(CREATOR_USAGE);
+            artifact = Path.of(options.remove(applicationIndex + 1));
+            options.remove(applicationIndex);
+        } else artifact = null;
+        if (options.size() > 2 || options.stream().anyMatch(option -> option.startsWith("--"))) {
             return reject(CREATOR_USAGE);
         }
         try {
-            final Path project = arguments.length > 1
-                    ? Path.of(arguments[1])
+            final Path selected = !options.isEmpty()
+                    ? Path.of(options.getFirst())
                     : Path.of("railix.project.json");
-            final int port = arguments.length > 2 ? Integer.parseInt(arguments[2]) : DEFAULT_PORT;
-            try (CreatorServer creator = CreatorServer.start(port, project)) {
+            final int port = options.size() > 1 ? Integer.parseInt(options.get(1)) : DEFAULT_PORT;
+            if (port < 0 || port > 65_535) return reject("Creator port must be from 0 through 65535.");
+            final Path home = Path.of(System.getProperty("user.home"), ".railix");
+            final ProjectFiles.ApplicationSource source = artifact == null
+                    ? new ProjectFiles.ApplicationSource(selected, "")
+                    : ProjectFiles.fromApplication(artifact, selected, home);
+            final Path project = source.project();
+            try (CreatorServer creator = CreatorServer.start(port, project, home, source.revision())) {
                 final Thread shutdown = Thread.ofPlatform()
                         .name("railix-creator-shutdown")
                         .unstarted(creator::close);

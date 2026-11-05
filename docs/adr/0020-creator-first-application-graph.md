@@ -2,10 +2,40 @@
 
 ## Status
 
+Amended on 2026-11-03: execution and operational metrics MUST NOT vary by development,
+test or production labels. Explicit build capabilities may omit optional features. Examples
+are the execution exception: they inject Trigger output and may record per-Step values.
+They use the same operational metric implementation as real ingress. Creator alone evaluates
+assertions. This supersedes the blanket production-observation omission below.
+The protected local observation connection is enabled by default and can be disabled at build
+time, as selected on the same date. It does not select another execution or metric model.
+
+Clarified on 2026-11-03: one Creator workspace may observe a deployed version while editing,
+building and running a local version of the same project with Examples. The observed application
+remains read-only and independently owned. Local edits are not deployments. The
+[Creator contract](../specs/creator.md#live-application-and-local-changes) owns visible changes and
+restoration; [observation](../specs/observation.md#application-source-and-build-identity) owns exact
+source/build correspondence. The user selected an option to include the existing project
+documents in the build; otherwise matching project data must be available locally. No intermediate
+minimal description or second graph format is introduced. The owning observation contract now
+defines JAR source inclusion and normal local loading against an artifact. The first independent
+local attachment captures original source, then uses separate read-only Live and editable Draft
+views in the same workspace. Transient owner-only discovery records contain no graph. Shared
+bounded metric transport does not grant process ownership. Confirming a Live selection pauses
+only the owned local JVM and retains its compiled draft. Local execution resumes explicitly with
+`Start locally`, using the existing lifecycle. Ordinary Creator startup without a Live connection
+still auto-starts. No separate executor or dormant JVM is introduced.
+
 Accepted on 2026-07-29. Refined through 2026-09-01 to separate the flat functional graph from
 optional Creator metadata, remove compiler-expanded reusable flows, and add generic explicit
 flow-control inputs, continuous semantic zoom, and explicit Creator/compiler/generated-application
 ownership.
+
+Amended on 2026-10-31: one configurable Branch replaces separate Filter/Choice/Switch entries.
+The user selected sequential or parallel independent paths, shared context by default, per-output
+split-snapshot copies, independent path failures and atomic whole-Step commits with last-completed
+write winning. The public continuation contract below implements that direction without adding a
+second graph or a built-in-only execution mechanism.
 
 Amended on 2026-09-19 following the user's specification-workshop clarification: independent
 copying and linked sharing are planned Creator features, not rejected product directions.
@@ -48,8 +78,10 @@ basic graph editing was stable. It has been removed.
 Keep one materialized functional graph and one generated application, with declarative
 Step contracts and no hidden group expansion. Compilation is structural; the generated
 application executes. Creator owns editing, building and child-process lifecycle.
-Groups, geometry and themes remain presentation only. Development observations belong to
-the generated application and are physically omitted from current production artifacts.
+Groups, geometry and themes remain presentation only. Operational observations belong to the
+generated application and share one implementation in every build that includes that capability.
+Example execution, recorded Example values and Creator assertions remain separate capabilities,
+not reasons to generate a slower ordinary execution path for local use.
 
 Creator may additionally copy and share a Step or group's functional contents. It resolves those edits
 into ordinary Steps and links before compilation; a deployed application never follows a live
@@ -62,6 +94,20 @@ Functional routing, correlation and budget identities cannot depend on optional 
 Simply connecting more incoming belts processes each arrival separately. Waiting and context
 combination belong to an explicitly configured Join. This keeps convenience in Creator without
 making a visual change secretly schedule work or combine requests.
+
+Ordinary Steps may declare `.withContinuations()` and execute compiled outgoing routes from their
+PROCESS through `StepInput`. Definitions own available settings. Implementations own selection and
+scheduling, including third-party implementations. Core does not assign behavior to option names or
+standard-library IDs. Returned single outcomes remain the allocation-light ordinary path.
+
+A continuation invocation owns its workers until real termination, even when its Future is already
+cancelled. The [JDK Future contract](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/Future.html)
+allows `isDone()` after cancellation and describes interruption as an attempt to stop work.
+Therefore shutdown accounting follows worker lifetime, not Future state. Shared context commits
+are synchronized for the commit only, never for the whole PROCESS. Copy contexts use the split
+snapshot and do not write back. Separate path results preserve errors without redefining Trigger
+responses or declaring the entire application broken. The [Branch contract](../specs/system-model.md#branch)
+owns exact behavior. Join pairing and deferred work beyond PROCESS remain separate decisions.
 
 Interaction references support this direction. [Node-RED wiring](https://nodered.org/docs/user-guide/editor/workspace/wires)
 demonstrates insertion feedback and direct connection operations. [Factorio remote view](https://www.factorio.com/blog/post/fff-380)
