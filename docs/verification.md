@@ -1645,3 +1645,37 @@ retained as `publication-clean-verify.log`; GitHub checks remain separate public
 
 Unknown native occupancy message languages fail closed and are not verified. The existing broader
 HTTPS/CORS and real-traffic payload-recording work remains outside this increment.
+
+The first GitHub run for `fb087d1` failed one desktop timing-label assertion after the local gate
+passed. It measured a fractional relative-position change while the font/camera refresh could
+still be settling. No runtime defect was demonstrated by that assertion. The test-only correction
+waits for fonts, the public scene refresh and its rendered frames, then reads both rectangles in
+one browser evaluation. Every arrow direction must visibly move the station and apply a fresh
+scene before comparison. The original 0.1-pixel tolerance is unchanged. Failure diagnostics are
+now retained for this case. The four affected desktop cases and the generated-JAR metric/port
+checks pass, and the final read-only review found no actionable issue in this correction.
+The focused log is retained as `publication-layout-final-focused.log`. The complete local
+follow-up is recorded below. A new GitHub check remains required before merging.
+
+The follow-up clean gate completed on 2026-11-05 at 00:05 CET with three real-time audio timeouts,
+not a successful result. All three reproduce in isolation. Failure snapshots show visible pages
+with running audio contexts still at 0.00533 seconds after the 30-second waits. Offline synthesis
+passes. Headless browser tests now use Chromium's `--disable-audio-output` switch to isolate the
+physical output device while preserving real Web Audio rendering, scheduling and autoplay rules.
+Chromium selects an [output-only substitute](https://github.com/chromium/chromium/blob/main/media/audio/audio_manager_base.cc)
+whose [worker requests real audio buffers](https://github.com/chromium/chromium/blob/main/media/audio/fake_audio_output_stream.cc).
+No player code, score, timeout or expected value was weakened. The volume case additionally
+requires the audio clock to advance before checking its controls. All three cases then pass.
+Audio clock/state/gain details and traces are retained on failure. These automated checks do not
+verify physical speakers or audible device recovery. Reproduction and corrected logs are
+`publication-audio-reproduction.log` and `publication-audio-isolated.log`.
+
+The corrected exact `./mvnw clean verify` passed on 2026-11-05 at 00:37 CET in 25:55. XML reports
+confirm 3,850 passed, zero failures/errors and one skipped optional renderer comparison, with the
+same suite counts as above. Source and tests match the isolated snapshot. Aggregate coverage is
+93.04% line and 84.25% branch, still below the non-gating goals. The final follow-up review found
+no actionable issue. Task-owned test, browser and review processes have ended. Fresh desktop and
+narrow port screenshots are retained in ignored `evidence/publication-followup/`; the full log is
+`publication-followup-final-clean-verify.log`. No product code changed in this follow-up.
+The initial published `fb087d1` GitHub check failed. The local gate does not replace the required
+green GitHub check on the corrected commit before merging.

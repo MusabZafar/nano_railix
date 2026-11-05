@@ -5653,6 +5653,14 @@ abstract class RailixCreatorBrowserSupport {
                       traceCases: state.traceCases, traceReadError: state.traceReadError,
                       compatibility, computedOptions, compatibilityError,
                       diagnostics: state.diagnostics, stepQueries: state.stepQueries,
+                      audio: {
+                        hidden:document.hidden, status:document.querySelector('#audio-status')?.textContent,
+                        effects:{state:state.audio?.context?.state,time:state.audio?.context?.currentTime,
+                          frequency:state.audio?.effectSession?.voices[0]?.voice.frequency?.value},
+                        music:{state:state.audio?.musicContext?.state,time:state.audio?.musicContext?.currentTime,
+                          gain:state.audio?.musicGain?.gain.value,paused:state.audio?.musicPaused,
+                          end:state.audio?.musicSession?.end}
+                      },
                       focused: document.activeElement?.id, optionsHovered: options?.matches(':hover'),
                       optionsPending: state.optionsPending, query: state.world?.query,
                       observationQuery: state.observations?.query,
@@ -5702,6 +5710,8 @@ abstract class RailixCreatorBrowserSupport {
             capturePlaywrightProcesses();
             browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
                     .setChannel(System.getenv().getOrDefault("RAILIX_BROWSER_CHANNEL", "chrome"))
+                    // Render real Web Audio without depending on the host's physical output clock.
+                    .setArgs(List.of("--disable-audio-output"))
                     .setHeadless(true));
             capturePlaywrightProcesses();
             // A fixed creation time keeps the fixture's procedural scenery repeatable.

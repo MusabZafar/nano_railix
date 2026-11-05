@@ -2878,6 +2878,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    @Tag("browser-diagnostics")
     void timingHasAStablePlaceWithoutRelativeHeatOrSelection() {
         openProject(fourStepProject());
         page.evaluate("""
@@ -2894,9 +2895,37 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         timing.waitFor();
         page.waitForFunction("() => document.querySelector('#graph').dataset.cameraMoving === 'false'");
         assertThat(timing.textContent()).isEqualTo("12 ms avg");
-        final double before = timing.boundingBox().y - page.locator("[data-world-id=one]").boundingBox().y;
-        page.locator("#graph").press("ArrowRight");
-        assertThat(timing.boundingBox().y - page.locator("[data-world-id=one]").boundingBox().y).isCloseTo(before, within(.1));
+        page.evaluate("""
+                async () => {
+                  await document.fonts.ready;
+                  await window.__renderer.refresh();
+                  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                }
+                """);
+        final String relativeOffset = "element => element.getBoundingClientRect().y"
+                + " - element.closest('[data-world-id]').getBoundingClientRect().y";
+        final double before = ((Number) timing.evaluate(relativeOffset)).doubleValue();
+        for (final String direction : List.of("ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp")) {
+            final BoundingBox previous = page.locator("[data-world-id=one]").boundingBox();
+            final var previousScene = page.evaluateHandle("() => window.__renderer.scene");
+            try {
+                page.locator("#graph").press(direction);
+                page.waitForFunction("previous => window.__renderer.scene !== previous", previousScene);
+            } finally {
+                previousScene.dispose();
+            }
+            final boolean horizontal = direction.equals("ArrowRight") || direction.equals("ArrowLeft");
+            page.waitForFunction("""
+                    position => {
+                      const box = document.querySelector('[data-world-id=one]')?.getBoundingClientRect();
+                      return box && (box[position.axis] - position.before) * position.sign > 1;
+                    }
+                    """, Map.of("axis", horizontal ? "x" : "y", "before", horizontal ? previous.x : previous.y,
+                    "sign", direction.equals("ArrowRight") || direction.equals("ArrowDown") ? -1 : 1));
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+            assertThat(((Number) timing.evaluate(relativeOffset)).doubleValue()).as(direction)
+                    .isCloseTo(before, within(.1));
+        }
         assertThat(page.locator(".world-metric").count()).isZero();
         page.evaluate("() => { window.__renderer.dispose(); }");
         assertThat(pageErrors).isEmpty();

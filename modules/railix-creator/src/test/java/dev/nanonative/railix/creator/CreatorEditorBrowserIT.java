@@ -3405,6 +3405,9 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
         page.locator("#open-settings").click();
         page.locator("#settings-music-tab").click();
         page.waitForFunction("() => state.audio.musicContext?.state === 'running'");
+        final Object startedAt = page.evaluate("() => state.audio.musicContext.currentTime");
+        page.waitForFunction("before => state.audio.musicContext.currentTime > before + .1", startedAt,
+                new Page.WaitForFunctionOptions().setTimeout(3_000));
         final var slider = page.locator("#music-volume");
         assertThat(slider.inputValue()).isEqualTo("25");
         assertThat(page.locator("#music-volume-value").textContent()).isEqualTo("25%");
@@ -3567,6 +3570,7 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    @Tag("browser-diagnostics")
     void musicAutomaticallyAdvancesAfterPauseAndWrapsWithoutRepeating() throws Exception {
         final Path group = Files.createDirectories(directory.resolve("railix-home/music/short"));
         for (final String name : List.of("Alpha", "Beta")) {
@@ -4486,6 +4490,7 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    @Tag("browser-diagnostics")
     void selectingMachinesPlaysTheirCustomWorkingAndUncoveredScores() throws Exception {
         final Path sounds = directory.resolve("railix-home/sounds");
         final String score = """
