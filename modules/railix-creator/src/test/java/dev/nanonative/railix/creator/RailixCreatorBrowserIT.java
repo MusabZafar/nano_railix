@@ -987,6 +987,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    @Tag("browser-diagnostics")
     void semanticZoomReplacesAnAggregateWithItsRealChildren() throws Exception {
         openProject(deepBranchProject(96));
         final String project = Files.readString(directory.resolve("project.json"));
@@ -1000,6 +1001,7 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         final Path screenshots = Files.createDirectories(Path.of("target", "screenshots"));
         page.screenshot(new Page.ScreenshotOptions().setPath(screenshots.resolve("semantic-zoom-overview.png")));
         page.evaluate("region => void state.world.focus(region.id)", region);
+        awaitScene();
         page.waitForFunction("""
                 region => !state.world.scene.nodes.some(node => node.id === region.id && !node.expanded)
                   && state.world.scene.nodes.some(node => node.id !== region.id && node.count < region.count
