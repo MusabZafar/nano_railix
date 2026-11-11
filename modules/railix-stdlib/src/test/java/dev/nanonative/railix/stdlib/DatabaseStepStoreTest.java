@@ -41,7 +41,7 @@ class DatabaseStepStoreTest {
 
     @Test
     void catalogDeclaresDatabaseStepContractAndGenericInputs() {
-        final StepDefinition definition = StandardLibrary.catalog()
+        final StepDefinition definition = PrimitiveStepsCreatorProjectE2eTest.catalog()
                 .find("railix.database")
                 .orElseThrow();
 
@@ -111,7 +111,10 @@ class DatabaseStepStoreTest {
                 """.formatted(RailixJson.write(RailixValue.string(field)) + ": "
                 + RailixJson.write(RailixValue.string(badValue)));
 
-        final CompileResult result = ProjectCompiler.compileApplication(project, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(
+                project,
+                PrimitiveStepsCreatorProjectE2eTest.catalog()
+        );
 
         assertThat(result).isInstanceOfSatisfying(CompileResult.Rejected.class, rejected ->
                 assertThat(rejected.diagnostics())

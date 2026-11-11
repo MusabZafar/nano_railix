@@ -2,7 +2,6 @@ package dev.nanonative.railix.creator;
 
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaFileObject;
@@ -29,7 +28,7 @@ final class CreatorFirstExecutionArtifacts {
         Files.createDirectories(workspace);
         final Path project = workspace.resolve("railix.project.json");
         Files.writeString(project, source, StandardCharsets.UTF_8);
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         if (!(result instanceof CompileResult.Compiled compiled)) {
             throw new IOException("Production conformance project did not compile: " + result);
         }
@@ -228,6 +227,7 @@ final class CreatorFirstExecutionArtifacts {
                         return switch (result) {
                             case RunResult.Succeeded succeeded -> "succeeded|"
                                     + RailixJson.write(succeeded.context());
+                            case RunResult.Completed completed -> "completed|" + RailixJson.write(completed.context());
                             case RunResult.Rejected rejected -> "rejected|"
                                     + rejected.diagnostics().getFirst().code() + "|"
                                     + rejected.diagnostics().getFirst().path();
@@ -240,6 +240,7 @@ final class CreatorFirstExecutionArtifacts {
                     private static String result(final RunResult result) {
                         return switch (result) {
                             case RunResult.Succeeded ignored -> "succeeded";
+                            case RunResult.Completed ignored -> "completed";
                             case RunResult.Rejected rejected -> "rejected:" + rejected.diagnostics().getFirst().code();
                             case RunResult.Failed failed -> "failed:" + failed.failure().code();
                             case RunResult.Cancelled ignored -> "cancelled";
@@ -333,6 +334,7 @@ final class CreatorFirstExecutionArtifacts {
                     private static String result(final RunResult result) {
                         return switch (result) {
                             case RunResult.Succeeded ignored -> "succeeded";
+                            case RunResult.Completed ignored -> "completed";
                             case RunResult.Rejected rejected -> "rejected:" + rejected.diagnostics().getFirst().code();
                             case RunResult.Failed failed -> "failed:" + failed.failure().code();
                             case RunResult.Cancelled ignored -> "cancelled";

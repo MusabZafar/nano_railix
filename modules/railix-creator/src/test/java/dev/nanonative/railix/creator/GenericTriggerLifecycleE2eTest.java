@@ -37,6 +37,46 @@ final class GenericTriggerLifecycleE2eTest {
     @TempDir Path directory;
 
     @Test
+    void lateSourceCompletionAfterShutdownIsHarmless() throws Exception {
+        final Path marker = directory.resolve("source-port");
+        final var catalog = GeneratedApplicationFixture.installedCatalog(directory, List.of(definition()),
+                ProductionRuntimeConcurrencySteps.SocketSource.class);
+        final String source = source("late-complete", marker);
+        final Path project = directory.resolve("railix.project.json");
+        Files.writeString(project, source);
+        final var compiled = (CompileResult.Compiled) ProjectCompiler.compileApplication(source, catalog);
+        final Path jar = ApplicationBuilder.buildProduction(project, compiled).jar();
+        final String main = "dev.nanonative.railix.core.project.LateCompletionProbe";
+        final Path probe = CreatorFirstExecutionArtifacts.compileProbe(directory.resolve("probe"), jar, main, """
+                package dev.nanonative.railix.core.project;
+                import java.nio.file.*;
+                import java.util.List;
+                import java.time.Duration;
+                import dev.nanonative.railix.core.runtime.RunResult;
+                public final class LateCompletionProbe {
+                    public static void main(final String[] args) throws Exception {
+                        final var app = RailixApplication.runtime();
+                        try {
+                            if (!(app.launch(List.of()) instanceof RunResult.Succeeded)) throw new AssertionError("startup");
+                            app.stop();
+                            final Path folder = Path.of(args[0]);
+                            Files.writeString(folder.resolve("complete-after-stop"), "release");
+                            final long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+                            while (!Files.exists(folder.resolve("completion-result"))) {
+                                if (System.nanoTime() >= deadline) throw new AssertionError("completion missing");
+                                Thread.sleep(5);
+                            }
+                            if (!Files.readString(folder.resolve("completion-result")).equals("completed"))
+                                throw new AssertionError(Files.readString(folder.resolve("completion-result")));
+                        } finally { app.stop(); }
+                    }
+                }
+                """);
+        final var result = CreatorFirstExecutionArtifacts.runProbe(probe, jar, main, directory.toString());
+        assertThat(result.exitCode()).as(result.output()).isZero();
+    }
+
+    @Test
     void cliCompletionDoesNotStopAnIndependentVirtualThreadSource() throws Exception {
         try (Child child = build("normal")) {
             await(() -> text(child.output()).contains("cli-finished"));
@@ -82,6 +122,7 @@ final class GenericTriggerLifecycleE2eTest {
         try (Child child = build("fail")) {
             assertThat(child.process().waitFor(10, TimeUnit.SECONDS)).isTrue();
             assertThat(child.process().exitValue()).as(text(child.output())).isEqualTo(1);
+            assertThat(text(child.output())).contains("SOURCE_START_FAILED socket");
             assertThat(Files.readString(directory.resolve("closed"))).isEqualTo("closed");
             assertThat(Files.exists(child.marker())).isFalse();
         }
@@ -147,6 +188,46 @@ final class GenericTriggerLifecycleE2eTest {
     }
 
     @Test
+    void successfulActivationCannotOverwriteAnExternalMetadataEdit() throws Exception {
+        final Path marker = directory.resolve("source-port");
+        GeneratedApplicationFixture.installedCatalog(directory, List.of(definition()), ProductionRuntimeConcurrencySteps.SocketSource.class);
+        final Path project = directory.resolve("railix.project.json");
+        Files.writeString(project, source("normal", marker));
+        try (final var creator = CreatorServer.start(0, project, directory.resolve("railix-home"));
+             final var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
+            final String persisted = Files.readString(project);
+            final String examples = Files.readString(project.resolveSibling("railix.examples.json"));
+            final var before = CreatorServerE2eSupport.application(creator.baseUri());
+            final var current = CreatorServerE2eSupport.object(CreatorServerE2eSupport.request(creator.baseUri(), "GET", "/api/project", "").body());
+            final var candidate = CreatorServerE2eSupport.object(source("hold", marker));
+            final var socket = ((RailixValue.ArrayValue) candidate.values().get("nodes")).values().stream()
+                    .map(RailixValue.ObjectValue.class::cast).filter(node -> RailixValue.string("socket").equals(node.values().get("id")))
+                    .findFirst().orElseThrow();
+            final var command = RailixValue.object(Map.of("kind", RailixValue.string("patch"),
+                    "project", RailixValue.object(Map.of("nodes", RailixValue.object(Map.of("socket", socket)))),
+                    "creator", RailixValue.object(Map.of("steps", RailixValue.object(Map.of("message",
+                            RailixValue.object(Map.of("name", RailixValue.string("Inside edit")))))))));
+            final var replacement = tasks.submit(() -> CreatorServerE2eSupport.request(creator.baseUri(), "POST", "/api/editor",
+                    RailixJson.write(RailixValue.object(Map.of("revision", current.values().get("revision"),
+                            "creator_revision", current.values().get("creator_revision"), "command", command)))));
+            final Path metadata = project.resolveSibling("railix.creator.json");
+            final String external = Files.readString(metadata).replace("\"steps\":{}", "\"steps\":{\"message\":{\"name\":\"Outside edit\"}}");
+            try {
+                await(() -> Files.exists(directory.resolve("activating")));
+                Files.writeString(metadata, external);
+            } finally { Files.writeString(directory.resolve("activation-release"), "release"); }
+            final var response = replacement.get(20, TimeUnit.SECONDS);
+            assertThat(response.statusCode()).as(response.body()).isEqualTo(409);
+            assertThat(Files.readString(metadata)).isEqualTo(external);
+            assertThat(Files.readString(project)).isEqualTo(persisted);
+            assertThat(Files.readString(project.resolveSibling("railix.examples.json"))).isEqualTo(examples);
+            assertThat(CreatorServerE2eSupport.application(creator.baseUri()).values().get("fingerprint"))
+                    .isEqualTo(before.values().get("fingerprint"));
+            assertThat(directory.resolve(".railix/run/editor-transaction.json")).doesNotExist();
+        }
+    }
+
+    @Test
     void failedEditorActivationPreservesPreviouslyInvalidMetadataWithoutReportingAnOutsideEdit() throws Exception {
         final Path marker = directory.resolve("source-port");
         GeneratedApplicationFixture.installedCatalog(directory, List.of(definition()),
@@ -169,7 +250,8 @@ final class GenericTriggerLifecycleE2eTest {
                             "nodes", RailixValue.object(Map.of("socket", changedNode)))))))));
             final var response = CreatorServerE2eSupport.request(creator.baseUri(), "POST", "/api/editor", body);
             assertThat(response.statusCode()).as(response.body()).isEqualTo(503);
-            assertThat(response.body()).contains("could not be activated").doesNotContain("outside Creator", "\"conflict\"");
+            assertThat(response.body()).contains("activation failed", "SOURCE_START_FAILED socket")
+                    .doesNotContain("outside Creator", "\"conflict\"");
             assertThat(Files.readString(metadata)).isEqualTo(invalid);
             assertThat(directory.resolve(".railix/run/editor-transaction.json")).doesNotExist();
         }
@@ -210,7 +292,14 @@ final class GenericTriggerLifecycleE2eTest {
         final String accepted = source("normal", marker);
         Files.writeString(project, accepted);
         try (CreatorServer creator = CreatorServer.start(0, project, directory.resolve("railix-home"))) {
+            final String checkPath = "/api/assertions/expectations/cli:0/message";
+            final var saved = CreatorServerE2eSupport.object(CreatorServerE2eSupport.request(creator.baseUri(), "GET", checkPath, "").body());
+            assertThat(CreatorServerE2eSupport.request(creator.baseUri(), "POST", checkPath, RailixJson.write(RailixValue.object(Map.of(
+                    "revision", saved.values().get("revision"), "source_revision", saved.values().get("source_revision"),
+                    "checks", RailixValue.array(List.of(CreatorServerE2eSupport.object(
+                    "{\"path\":[\"context\",\"result\"],\"assertion\":\"isEqualTo\",\"expected\":\"cli-finished\"}"))))))).statusCode()).isEqualTo(200);
             final String persisted = Files.readString(project);
+            final String persistedExamples = Files.readString(project.resolveSibling("railix.examples.json"));
             final var before = CreatorServerE2eSupport.application(creator.baseUri());
             final var rejected = CreatorServerE2eSupport.request(creator.baseUri(), "POST", "/api/project", source("fail", marker));
 
@@ -219,7 +308,9 @@ final class GenericTriggerLifecycleE2eTest {
             assertThat(Files.readString(project)).isEqualTo(persisted);
             final var document = CreatorServerE2eSupport.object(CreatorServerE2eSupport.request(
                     creator.baseUri(), "GET", "/api/project", "").body());
-            assertThat(document.values().get("project")).isEqualTo(((RailixJson.Parsed) RailixJson.parse(accepted)).value());
+            assertThat(document.values().get("project")).isEqualTo(((RailixJson.Parsed) RailixJson.parse(
+                    ProjectFiles.identify(accepted, true))).value());
+            assertThat(Files.readString(project.resolveSibling("railix.examples.json"))).isEqualTo(persistedExamples);
             final var after = CreatorServerE2eSupport.application(creator.baseUri());
             assertThat(after.values().get("fingerprint")).isEqualTo(before.values().get("fingerprint"));
             assertThat(after.values().get("pid")).isNotEqualTo(before.values().get("pid"));
@@ -300,9 +391,10 @@ final class GenericTriggerLifecycleE2eTest {
         return new Child(process, marker, output);
     }
 
-    private static StepDefinition definition() {
+    static StepDefinition definition() {
         return StepDefinition.named("test.socket", "1").kind(StepDefinition.Kind.TRIGGER)
                 .source("test.socket").receive("value", ValueShape.STRING)
+                .metric(dev.nanonative.railix.core.runtime.MetricDefinition.gauge("active_port", "Active port", "port"))
                 .input("marker", StepDefinition.Input.json(ValueShape.STRING))
                 .input("mode", StepDefinition.Input.json(ValueShape.STRING))
                 .input("target", StepDefinition.Input.path(StepDefinition.PathAccess.WRITE)

@@ -1,8 +1,9 @@
 package dev.nanonative.railix.stdlib;
 
-import dev.nanonative.railix.core.step.StepCatalog;
+import dev.nanonative.railix.core.step.StepBundle;
 import dev.nanonative.railix.core.step.StepDefinition;
 import dev.nanonative.railix.core.step.StepDefinition.Input;
+import dev.nanonative.railix.core.runtime.MetricDefinition;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueShape;
 
@@ -22,8 +23,17 @@ public final class StandardLibrary {
     private StandardLibrary() {
     }
 
-    public static StepCatalog catalog() {
-        return StepCatalog.of(StandardLibrary.class, definitions().toArray(StepDefinition[]::new));
+    /**
+     * Exports this provider during its own build using the public bundle writer.
+     *
+     * @param arguments compiled classes directory and destination provider JAR
+     * @throws IllegalArgumentException when exactly two paths are not supplied
+     * @throws java.io.IOException when export fails
+     */
+    public static void main(final String[] arguments) throws java.io.IOException {
+        if (arguments.length != 2) throw new IllegalArgumentException("Expected compiled classes and destination bundle paths.");
+        StepBundle.write(java.nio.file.Path.of(arguments[0]), java.nio.file.Path.of(arguments[1]),
+                StandardLibrary.class, definitions());
     }
 
     /** Returns the built-in authoring contracts, also used by the isolated configuration validator. */
@@ -35,9 +45,7 @@ public final class StandardLibrary {
                 httpClient(),
                 database(),
                 fieldManipulation(),
-                filter(),
-                choice(),
-                switchStep()
+                branch()
         ));
         definitions.addAll(PrimitiveSteps.definitions());
         return List.copyOf(definitions);
@@ -75,16 +83,19 @@ public final class StandardLibrary {
     }
 
     private static StepDefinition http() {
-        return StepDefinition.named("railix.trigger.http", "1")
+        return StepDefinition.named("railix.trigger.http", "2")
                 .kind(StepDefinition.Kind.TRIGGER)
                 .displayName("HTTP")
                 .maximumInstances(1)
                 .source("application.http")
+                .metric(MetricDefinition.gauge("preferred_port", "Preferred port", "port"))
+                .metric(MetricDefinition.gauge("active_port", "Active port", "port"))
                 .receive("request", ValueShape.OBJECT)
                 .input("host", Input.json(ValueShape.STRING).defaultValue(RailixValue.string("127.0.0.1")))
                 .input("port", Input.json(ValueShape.NUMBER).between(RailixValue.number(0), RailixValue.number(65535))
                         .defaultValue(RailixValue.number(8080))
                         .validation(Integer.class, port -> java.util.Optional.empty()))
+                .input("next_free_port", Input.json(ValueShape.BOOLEAN).defaultValue(RailixValue.bool(true)))
                 .input("target", Input.path(WRITE)
                         .defaultPath("context", "payload", "request"))
                 .exampleTarget("target")
@@ -221,45 +232,28 @@ public final class StandardLibrary {
                 .implementation(StandardStepHandlers.FieldManipulation.class);
     }
 
-    private static StepDefinition filter() {
-        return StepDefinition.named("railix.filter", "1")
-                .displayName("Filter")
-                .primaryOutcome("match")
-                .input("conditions", Input.candidates(fieldOrLiteral()).defaultCandidate("field"))
-                .outcome("otherwise")
-                .implementation(StandardStepHandlers.Filter.class);
-    }
-
-    private static StepDefinition choice() {
-        return StepDefinition.named("railix.choice", "1")
-                .displayName("Choice")
-                .primaryOutcome("match")
-                .input("conditions", Input.matcherGroups(fieldOrLiteral()))
-                .outcome("otherwise")
-                .implementation(StandardStepHandlers.Choice.class);
-    }
-
-    private static StepDefinition switchStep() {
-        return StepDefinition.named("railix.switch", "1")
-                .searchTerms("route", "case", "branch")
+    private static StepDefinition branch() {
+        return StepDefinition.named("railix.branch", "1")
+                .displayName("Branch")
+                .searchTerms("choice", "if", "filter", "switch", "split", "route", "async", "sync")
                 .primaryOutcome("otherwise")
-                .input("cases", Input.candidates(fieldOrLiteral(
-                        Input.json(ValueShape.ANY).defaultValue(RailixValue.nullValue())
-                )).withAuthoredOutcomes())
-                .implementation(StandardStepHandlers.Switch.class);
+                .input("routes", Input.matcherGroups(fieldOrLiteral()).withAuthoredOutcomes()
+                        .routeInput("own_context", Input.json(ValueShape.BOOLEAN).defaultValue(RailixValue.bool(false))))
+                .input("selection", Input.options(Input.option("first"), Input.option("matching"), Input.option("all"))
+                        .defaultOption("first"))
+                .input("execution", Input.options(Input.option("sequential"), Input.option("parallel"))
+                        .defaultOption("sequential"))
+                .withContinuations()
+                .implementation(StandardStepHandlers.Branch.class);
     }
 
     private static StepDefinition.Option[] fieldOrLiteral() {
-        return fieldOrLiteral(Input.json(ValueShape.ANY));
-    }
-
-    private static StepDefinition.Option[] fieldOrLiteral(final StepDefinition.JsonInput literal) {
         return new StepDefinition.Option[]{
                 Input.option("field")
                         .input("field", Input.path(READ).defaultPath("context", "payload"))
                         .fromOwned("field"),
                 Input.option("literal")
-                        .input("value", literal)
+                        .input("value", Input.json(ValueShape.ANY).defaultValue(RailixValue.nullValue()))
                         .fromOwned("value")
         };
     }

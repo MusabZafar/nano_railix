@@ -5,7 +5,6 @@ import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import thirdparty.conformance.ThirdPartyKvStep;
@@ -153,17 +152,20 @@ class DatabaseStepGeneratedApplicationE2eTest {
                     },
                     {
                       "id": "route",
-                      "use": "railix.switch",
+                      "use": "railix.branch",
                       "inputs": {
-                        "cases": [
+                        "routes": [
                           {
                             "outcome": "write",
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "put"}}]]
-                            }
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "put"}}]]
+                              }
+                            }]]
                           }
                         ]
                       }
@@ -284,9 +286,10 @@ class DatabaseStepGeneratedApplicationE2eTest {
 
         final Process server = RailixPackageIT.instrumentJava(new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Duser.home=" + jar.getParent(),
                 "-jar",
                 jar.toString()
-        )).redirectErrorStream(true).start();
+        )).directory(jar.getParent().toFile()).redirectErrorStream(true).start();
         server.getOutputStream().close();
         try (HttpClient client = HttpClient.newHttpClient()) {
             final URI baseUri = awaitHttpBaseUri(server);
@@ -376,13 +379,19 @@ class DatabaseStepGeneratedApplicationE2eTest {
                     },
                     {
                       "id": "route-method",
-                      "use": "railix.switch",
+                      "use": "railix.branch",
                       "inputs": {
-                        "cases": [{
+                        "routes": [{
                           "outcome": "create",
-                          "option": "field",
-                          "inputs": {"field": ["context", "payload", "request", "method"]},
-                          "when": {"transforms": [], "all": [[{"use": "value.equals", "inputs": {"expected": "POST"}}]]}
+                          "inputs": {},
+                          "groups": [[{
+                            "option": "field",
+                            "inputs": {"field": ["context", "payload", "request", "method"]},
+                            "when": {
+                              "transforms": [],
+                              "all": [[{"use": "value.equals", "inputs": {"expected": "POST"}}]]
+                            }
+                          }]]
                         }]
                       }
                     },
@@ -501,35 +510,44 @@ class DatabaseStepGeneratedApplicationE2eTest {
                     },
                     {
                       "id": "route",
-                      "use": "railix.switch",
+                      "use": "railix.branch",
                       "inputs": {
-                        "cases": [
+                        "routes": [
                           {
                             "outcome": "do-upsert",
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "upsert"}}]]
-                            }
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "upsert"}}]]
+                              }
+                            }]]
                           },
                           {
                             "outcome": "do-bulk",
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "bulk"}}]]
-                            }
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "bulk"}}]]
+                              }
+                            }]]
                           },
                           {
                             "outcome": "do-delete",
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "delete"}}]]
-                            }
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "delete"}}]]
+                              }
+                            }]]
                           }
                         ]
                       }
@@ -720,35 +738,44 @@ class DatabaseStepGeneratedApplicationE2eTest {
                     },
                     {
                       "id": "route",
-                      "use": "railix.switch",
+                      "use": "railix.branch",
                       "inputs": {
-                        "cases": [
+                        "routes": [
                           {
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "add-1"}}]]
-                            },
-                            "outcome": "do-add-1"
+                            "outcome": "do-add-1",
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "add-1"}}]]
+                              }
+                            }]]
                           },
                           {
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "add-dup"}}]]
-                            },
-                            "outcome": "do-add-dup"
+                            "outcome": "do-add-dup",
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "add-dup"}}]]
+                              }
+                            }]]
                           },
                           {
-                            "option": "field",
-                            "inputs": {"field": ["context", "payload", "arguments", 0]},
-                            "when": {
-                              "transforms": [],
-                              "all": [[{"use": "value.equals", "inputs": {"expected": "add-2"}}]]
-                            },
-                            "outcome": "do-add-2"
+                            "outcome": "do-add-2",
+                            "inputs": {},
+                            "groups": [[{
+                              "option": "field",
+                              "inputs": {"field": ["context", "payload", "arguments", 0]},
+                              "when": {
+                                "transforms": [],
+                                "all": [[{"use": "value.equals", "inputs": {"expected": "add-2"}}]]
+                              }
+                            }]]
                           }
                         ]
                       }
@@ -904,6 +931,7 @@ class DatabaseStepGeneratedApplicationE2eTest {
                           "use": "railix.trigger.cli",
                           "inputs": {},
                           "examples": [{
+                            "id": "cli:0",
                             "name": "seed-account",
                             "payload": [],
                             "context": {"payload": {"account": {"_id": "acct-7", "balance": 500.25}}}
@@ -946,6 +974,7 @@ class DatabaseStepGeneratedApplicationE2eTest {
                       "use": "railix.trigger.cli",
                       "inputs": {},
                       "examples": [{
+                        "id": "cli:0",
                         "name": "read-account",
                         "payload": [],
                         "context": {"payload": {"id": "acct-7"}}
@@ -986,7 +1015,7 @@ class DatabaseStepGeneratedApplicationE2eTest {
             final Path project,
             final String source
     ) throws IOException {
-        return productionArtifact(project, source, StandardLibrary.catalog());
+        return productionArtifact(project, source, GeneratedApplicationFixture.catalog());
     }
 
     private static ApplicationBuilder.Artifact productionArtifact(
@@ -1002,10 +1031,12 @@ class DatabaseStepGeneratedApplicationE2eTest {
     private static ProcessResult runJar(final Path jar, final String... arguments) throws Exception {
         final List<String> command = new ArrayList<>();
         command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        command.add("-Duser.home=" + jar.getParent());
         command.add("-jar");
         command.add(jar.toString());
         command.addAll(List.of(arguments));
         final Process process = RailixPackageIT.instrumentJava(new ProcessBuilder(command))
+                .directory(jar.getParent().toFile())
                 .redirectErrorStream(true)
                 .start();
         process.getOutputStream().close();

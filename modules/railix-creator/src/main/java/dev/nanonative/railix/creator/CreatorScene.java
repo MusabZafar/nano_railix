@@ -126,8 +126,8 @@ final class CreatorScene {
         }
         final Part app = nodes.values().stream().filter(node -> "app".equals(node.kind)).findFirst().orElseThrow();
         final List<Part> order = layout(app);
-        final Set<Part> destinations = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-        final boolean converging = edges.stream().anyMatch(edge -> !destinations.add(edge.to));
+        for (final Route edge : edges) edge.to.incomingRoutes++;
+        final boolean converging = edges.stream().anyMatch(edge -> edge.to.incomingRoutes > 1);
         final Map<Part, Part> occurrences = groups(order, groups);
         retainAcyclicGroups(occurrences, edges);
         if (!occurrences.isEmpty()) {
@@ -530,6 +530,13 @@ final class CreatorScene {
                 .queries("example_cases");
     }
 
+    /** Resolves an ordinary Step's canonical trace ordinal, never a visual group or region. */
+    java.util.OptionalInt assertionNode(final String id) {
+        final Part part = identities.get(id);
+        return part != null && "step".equals(part.kind)
+                ? java.util.OptionalInt.of(part.node) : java.util.OptionalInt.empty();
+    }
+
     static Map<String, String> inspectionParameters(final String query) {
         if (query != null && query.length() > 8192) throw new IllegalArgumentException("Section inspection query exceeds 8192 characters.");
         final var selected = parameters(query, Set.of("revision", "region"));
@@ -614,6 +621,13 @@ final class CreatorScene {
         final List<RailixValue> diagnostics = new ArrayList<>();
         final List<RailixValue> problems = new ArrayList<>(array(result, "diagnostics"));
         if (result.values().get("failure") instanceof RailixValue.ObjectValue failure) problems.add(failure);
+        for (final RailixValue item : array(result, "paths")) {
+            if (item instanceof RailixValue.ObjectValue path
+                    && path.values().get("result") instanceof RailixValue.ObjectValue pathResult) {
+                problems.addAll(array(pathResult, "diagnostics"));
+                if (pathResult.values().get("failure") instanceof RailixValue.ObjectValue failure) problems.add(failure);
+            }
+        }
         for (final RailixValue item : problems) {
             if (!(item instanceof RailixValue.ObjectValue diagnostic)) throw new IOException("Example diagnostic is invalid.");
             final String path = text(diagnostic.values(), "path");
@@ -1436,6 +1450,7 @@ final class CreatorScene {
         private int[] metricMembers = new int[0];
         private int disabled;
         private boolean metrics;
+        private int incomingRoutes;
         private boolean station;
         private int exampleCount;
         private String iconRef = "";
@@ -1931,7 +1946,7 @@ final class CreatorScene {
                 toLast = edge.to.last;
                 outcome = edge.outcome;
                 metricMembers = edge.to.metricMembers;
-                unknownMetrics = edge.to.node < 0 || !edge.to.metrics;
+                unknownMetrics = edge.to.node < 0 || !edge.to.metrics || edge.to.incomingRoutes > 1;
                 unknownSelection = edge.from.node < 0 || edge.to.node < 0 || "app".equals(edge.from.kind);
                 members = unknownSelection ? new int[0] : edge.to.members;
             } else {

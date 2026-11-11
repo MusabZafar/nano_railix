@@ -2,7 +2,6 @@ package dev.nanonative.railix.creator;
 
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.RailixJson;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -58,7 +57,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         });
         final var metadata = com.google.gson.JsonParser.parseString(fixture.creator()).getAsJsonObject();
         metadata.getAsJsonObject("steps").remove("lane-0-0");
-        final var scene = new CreatorScene(project.toString(), object(metadata.toString()), StandardLibrary.catalog())
+        final var scene = new CreatorScene(project.toString(), object(metadata.toString()), GeneratedApplicationFixture.catalog())
                 .view("x=928.3084347979694&y=233.70079959538538&width=244.41310622026867&height=250.697039622573&scale=8.387445887445887&focus=group:group-lane-0-0");
         for (final var link : array(scene, "links")) assertThat(array((RailixValue.ObjectValue) link, "points"))
                 .as(RailixJson.write(link)).hasSizeGreaterThanOrEqualTo(2);
@@ -73,13 +72,13 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
             final var link = value.getAsJsonObject();
             if (link.get("from").getAsString().equals("payments-merge-right.next")) link.addProperty("to", "orders-lane-0-20");
         }
-        final var scene = new CreatorScene(source.toString(), metadata, StandardLibrary.catalog()).view("scale=0.1");
+        final var scene = new CreatorScene(source.toString(), metadata, GeneratedApplicationFixture.catalog()).view("scale=0.1");
         assertThat(scene.values().get("limited")).isEqualTo(RailixValue.bool(false));
         assertThat(nodes(scene).stream().map(part -> string(part, "id")))
                 .doesNotContain("area:orders-command", "area:payments-command").contains("area:stock-command");
         final var edited = fixture.project().replace("  ADA LOVELACE  ", "  NEW EXAMPLE  ");
-        final var first = new CreatorScene(fixture.project(), metadata, StandardLibrary.catalog()).view("scale=0.1");
-        final var second = new CreatorScene(edited, metadata, StandardLibrary.catalog()).view("scale=0.1");
+        final var first = new CreatorScene(fixture.project(), metadata, GeneratedApplicationFixture.catalog()).view("scale=0.1");
+        final var second = new CreatorScene(edited, metadata, GeneratedApplicationFixture.catalog()).view("scale=0.1");
         assertThat(nodes(first).stream().filter(part -> string(part, "id").startsWith("area:")).map(part -> string(part, "id")))
                 .containsExactlyElementsOf(nodes(second).stream().filter(part -> string(part, "id").startsWith("area:")).map(part -> string(part, "id")).toList());
     }
@@ -87,7 +86,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     @Test
     void independentRoutesHaveSeparateCorridorsInABranchHeavySystem() {
         final var fixture = CreatorWorldBrowserIT.systemStressScene();
-        final var indexed = new CreatorScene(fixture.project(), object(fixture.creator()), StandardLibrary.catalog());
+        final var indexed = new CreatorScene(fixture.project(), object(fixture.creator()), GeneratedApplicationFixture.catalog());
         final var overview = indexed.view("scale=0.1");
         assertThat(nodes(overview).stream().filter(part -> string(part, "kind").equals("trigger"))).hasSize(2);
         assertThat(nodes(overview)).hasSizeLessThanOrEqualTo(20);
@@ -169,7 +168,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"left","payload":[],"context":{"left":true}},
                     {"name":"right","payload":[],"context":{"left":false}}]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[[{"option":"field","inputs":{"field":["context","left"]},"when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]}},
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[[{"option":"field","inputs":{"field":["context","left"]},"when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]}]}},
                   {"id":"a","use":"railix.field-manipulation","inputs":{"field":["context","route"],"value":[{"option":"literal","inputs":{"literal":"a"}}],"steps":[]}},
                   {"id":"b","use":"railix.field-manipulation","inputs":{"field":["context","route"],"value":[{"option":"literal","inputs":{"literal":"b"}}],"steps":[]}},
                   {"id":"merge","use":"railix.field-manipulation","inputs":{"field":["context","done"],"value":[{"option":"literal","inputs":{"literal":true}}],"steps":[]}}],
@@ -296,7 +295,9 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     void unequalSubtreesStillHaveSymmetricChoiceSocketsAndBeltLengths() throws Exception {
         final Path project = directory.resolve("railix.project.json");
         final String source = branchGroupProject()
-                .replace("\"id\":\"matched\",\"use\":\"railix.field-manipulation\"", "\"id\":\"matched\",\"use\":\"railix.choice\"")
+                .replace("\"id\":\"matched\",\"use\":\"railix.field-manipulation\",\"inputs\":{}",
+                        "\"id\":\"matched\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":["
+                                + "{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}")
                 .replace("{\"from\":\"matched.next\",\"to\":\"end\"}",
                         "{\"from\":\"matched.match\",\"to\":\"end\"},{\"from\":\"matched.otherwise\",\"to\":\"end\"}");
         Files.writeString(project, source);
@@ -584,7 +585,8 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     @Test
     void tallBranchGroupEntersAtItsOriginRatherThanItsTopmostBranch() throws Exception {
         final String nodes = IntStream.range(0, 15).mapToObj(index ->
-                "{\"id\":\"branch-" + index + "\",\"use\":\"railix.choice\",\"inputs\":{\"conditions\":[]}}")
+                "{\"id\":\"branch-" + index + "\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":["
+                        + "{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}}")
                 .collect(java.util.stream.Collectors.joining(","));
         final String links = IntStream.range(0, 15).mapToObj(index ->
                 "{\"from\":\"branch-" + index + ".match\",\"to\":\"" + (index < 7 ? "branch-" + (index * 2 + 1) : "end") + "\"},"
@@ -647,8 +649,8 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
                 .replace("\"nodes\":[", "\"nodes\":[" + corridorNodes)
                 .replace("\"links\":[", "\"links\":[" + corridorLinks)
                 .replace("{\"id\":\"route\"", "{\"id\":\"normalize\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},"
-                        + "{\"id\":\"guard\",\"use\":\"railix.choice\",\"inputs\":{}},"
-                        + "{\"id\":\"limit\",\"use\":\"railix.choice\",\"inputs\":{}},"
+                        + "{\"id\":\"guard\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}},"
+                        + "{\"id\":\"limit\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}},"
                         + "{\"id\":\"disabled\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},"
                         + "{\"id\":\"rejected\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},"
                         + "{\"id\":\"route\"")
@@ -798,7 +800,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     void wideBranchesCoarsenWithoutOmittingAnyStationOrConnection() throws Exception {
         final int count = 5000;
         final CreatorScene indexed = new CreatorScene(Files.readString(groupedBranches(count)),
-                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), StandardLibrary.catalog());
+                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), GeneratedApplicationFixture.catalog());
         for (final String query : List.of("", "x=-1000&y=-1000&width=10000000&height=10000000&scale=100000000")) {
             final RailixValue.ObjectValue visible = indexed.view(query);
             assertConnected(visible);
@@ -812,7 +814,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     @Test
     void coarsenedSceneRegionsExposeBoundedIndividualCounters() throws Exception {
         final CreatorScene indexed = new CreatorScene(Files.readString(groupedBranches(5000)),
-                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), StandardLibrary.catalog());
+                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), GeneratedApplicationFixture.catalog());
         final List<RailixValue.ObjectValue> regions = nodes(indexed.view("")).stream()
                 .filter(node -> string(node, "kind").equals("region")).toList();
         assertThat(regions).isNotEmpty();
@@ -844,7 +846,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         final int count = Integer.getInteger("railix.scene.scale", 20_000);
         final long started = System.nanoTime();
         final CreatorScene indexed = new CreatorScene(chain(count), object("{\"format\":2,\"groups\":[],\"steps\":{}}"),
-                StandardLibrary.catalog());
+                GeneratedApplicationFixture.catalog());
         final long indexedAt = System.nanoTime();
         final var times = new java.util.ArrayList<Long>();
         int queryBytes = 0;
@@ -958,9 +960,9 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         final String outputs = IntStream.range(0, steps).mapToObj(index ->
                 "{\"id\":\"output-" + index + "\",\"use\":\"railix.field-manipulation\",\"inputs\":{}}")
                 .collect(java.util.stream.Collectors.joining(","));
-        final String cases = IntStream.range(0, steps - 1).mapToObj(index ->
-                "{\"outcome\":\"case-" + index + "\",\"option\":\"literal\",\"inputs\":{\"value\":1},"
-                        + "\"when\":{\"transforms\":[],\"all\":[]}}")
+        final String routes = IntStream.range(0, steps - 1).mapToObj(index ->
+                "{\"outcome\":\"case-" + index + "\",\"inputs\":{},\"groups\":[[{\"option\":\"literal\","
+                        + "\"inputs\":{\"value\":1},\"when\":{\"transforms\":[],\"all\":[]}}]]}")
                 .collect(java.util.stream.Collectors.joining(","));
         final String links = IntStream.range(0, steps).mapToObj(index ->
                 "{\"from\":\"route." + (index == steps - 1 ? "otherwise" : "case-" + index)
@@ -971,9 +973,9 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
                 {"format":1,"id":"branch-lanes","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{"name":"example","payload":[]}]},
-                  {"id":"route","use":"railix.switch","inputs":{"cases":[%s]}},%s
+                  {"id":"route","use":"railix.branch","inputs":{"routes":[%s]}},%s
                 ],"links":[{"from":"app.start","to":"command"},{"from":"command.next","to":"route"},%s]}
-                """.formatted(cases, outputs, links));
+                """.formatted(routes, outputs, links));
         final String groups = IntStream.range(0, steps).mapToObj(index ->
                 "\"output-" + index + "\":{\"group\":\"reply\"}")
                 .collect(java.util.stream.Collectors.joining(","));
@@ -1165,7 +1167,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         final StringBuilder nodes = new StringBuilder("""
                 {"id":"app","use":"railix.app","inputs":{}},
                 {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[{"name":"empty","payload":[]}]},
-                {"id":"choice","use":"railix.choice","inputs":{"conditions":[]}}
+                {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}}
                 """);
         final StringBuilder links = new StringBuilder("""
                 {"from":"app.start","to":"command"},{"from":"command.next","to":"choice"}

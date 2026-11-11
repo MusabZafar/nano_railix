@@ -128,35 +128,44 @@ final class RailixCreatorDatabaseBrowserIT extends RailixCreatorBrowserSupport {
                 },
                 {
                   "id": "route-op",
-                  "use": "railix.switch",
+                  "use": "railix.branch",
                   "inputs": {
-                    "cases": [
+                    "routes": [
                       {
                         "outcome": "upsert",
-                        "option": "field",
-                        "inputs": {"field": ["context", "payload", "arguments", 0]},
-                        "when": {
-                          "transforms": [],
-                          "all": [[{"use": "value.equals", "inputs": {"expected": "upsert"}}]]
-                        }
+                        "inputs": {},
+                        "groups": [[{
+                          "option": "field",
+                          "inputs": {"field": ["context", "payload", "arguments", 0]},
+                          "when": {
+                            "transforms": [],
+                            "all": [[{"use": "value.equals", "inputs": {"expected": "upsert"}}]]
+                          }
+                        }]]
                       },
                       {
                         "outcome": "bulk",
-                        "option": "field",
-                        "inputs": {"field": ["context", "payload", "arguments", 0]},
-                        "when": {
-                          "transforms": [],
-                          "all": [[{"use": "value.equals", "inputs": {"expected": "bulk"}}]]
-                        }
+                        "inputs": {},
+                        "groups": [[{
+                          "option": "field",
+                          "inputs": {"field": ["context", "payload", "arguments", 0]},
+                          "when": {
+                            "transforms": [],
+                            "all": [[{"use": "value.equals", "inputs": {"expected": "bulk"}}]]
+                          }
+                        }]]
                       },
                       {
                         "outcome": "delete",
-                        "option": "field",
-                        "inputs": {"field": ["context", "payload", "arguments", 0]},
-                        "when": {
-                          "transforms": [],
-                          "all": [[{"use": "value.equals", "inputs": {"expected": "delete"}}]]
-                        }
+                        "inputs": {},
+                        "groups": [[{
+                          "option": "field",
+                          "inputs": {"field": ["context", "payload", "arguments", 0]},
+                          "when": {
+                            "transforms": [],
+                            "all": [[{"use": "value.equals", "inputs": {"expected": "delete"}}]]
+                          }
+                        }]]
                       }
                     ]
                   }

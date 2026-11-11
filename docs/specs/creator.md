@@ -20,6 +20,86 @@ under visual review. No replacement for the default presentation is accepted yet
 
 Decisions: [ADR 0020](../adr/0020-creator-first-application-graph.md). Historical checks: [verification](../verification.md).
 
+## Live Application And Local Changes
+
+Accepted direction on 2026-11-03, first local implementation in verification: observing a running application and editing its
+project belong in the same Creator workspace. Read-only describes the observed application, not
+the entire editor. A local build may run with Examples while the deployed version remains visible.
+These are versions of the same project, not separate authoring products or execution models.
+
+- **CR-021:** Creator MUST keep the observed version unchanged when the user edits, builds,
+  runs, undoes or restores local work. Observation grants no deployment, replacement or shutdown
+  authority over an independently started application. Detaching MUST leave it running.
+- **CR-022:** Creator MUST distinguish local additions, changes and removals from the observed
+  version while preserving enough of the old connections to understand the deployed Flow.
+  A locally removed Step MUST remain inspectable in that comparison and restorable through a
+  local editor action. Its comparison representation MUST NOT become a local executable Step
+  or connection. Restoration follows existing revision/conflict and complete-action rules.
+- **CR-023:** Live observations and local Example evidence MUST identify their owning build and
+  application instance. Creator MUST NOT attach deployed measurements to modified local behavior,
+  combine their counters or display a local Example path as deployed traffic. A shared project or
+  Step ID alone does not establish matching behavior. Unavailable evidence is not zero activity.
+
+A subdued old Step with its old connections is a proposed comparison treatment, not a selected
+new theme. Exact controls and layout need an interactive desktop/narrow journey. Prefer one clear
+observation-source control and the existing Inspector over duplicate workbenches or permanent
+status text on every Step. Comparison geometry remains Creator-only.
+
+The first implementation uses Project actions > Connect live app and a compact Draft/Live
+selector in the existing workspace. Live reuses the scene, navigation, metrics and Inspector but
+exposes no editing controls or Examples. Draft retains ordinary editing and local execution.
+Changing versions cancels outstanding reads and invalidates source-specific metrics, Example,
+camera-navigation and radar caches. The change list selects the correct version and Step.
+Connections are staged before selection. A cancelled connection keeps the prior reader and local
+process. Only an explicit authenticated POST confirms the selection. GET reads cannot select an
+instance or stop a process. If loading
+a selected Live version fails, Creator returns to Draft, displays the failure and retains the
+attempted identity for a new selection. It must not restore a browser identity whose server reader
+has already been replaced. Header actions and connection-dialog actions both expose failures visibly.
+Removed Steps remain subdued and connected in Live, not inserted as executable draft nodes.
+Restoring a removed Step uses the ordinary revision-checked complete editor action, persistence,
+compilation and Undo path. Necessary adjacent deleted Steps form one restoration section. More than
+one Step is previewed with its count and identities before confirmation. The Step definition's
+primary outcome identifies the expected deletion bypass, without assuming a built-in Step or
+discarding secondary terminal exits. Changed surviving routes or ambiguous primary fan-out are
+rejected rather than overwriting later edits. Existing groups/presentation can be retained when
+still valid. The comparison is derived in memory and is never another saved project format.
+
+The [source and identity contract](observation.md#application-source-and-build-identity) owns how
+Creator reads the existing project documents, optionally included in the build or otherwise
+available locally. It uses no reduced graph format. Missing or mismatched source must not be
+presented as the exact running version. It does not prevent displaying measurements whose
+identities are known. Missing source cannot silently become a new editable reconstruction.
+
+Accepted on 2026-11-03: confirming a Live connection stops only Creator's owned local process and
+keeps its compiled draft ready. Editing still compiles and persists normally, without executing
+PRE hooks, Triggers or Examples. `Start locally` explicitly starts that build through the existing
+application lifecycle after the user reviews its resource settings. Port or startup failures keep
+the draft ready and leave the observed application untouched. Starting changes neither the source
+revision nor Undo history. Reopening the active Live view does not stop an explicitly started
+local application. Selecting a different Live instance pauses the local process again.
+Reloading the browser retains the server's selected instance and the ready draft's start action.
+Normal `creator` startup without a Live connection retains auto-start. No CLI flag, dormant JVM,
+alternate executor or production-I/O sandbox is introduced.
+
+On 2026-11-04 the user selected port fallback rather than opening a stopped draft for an occupied
+application port. The [HTTP Trigger contract](http-trigger.md#trigger-behavior), HT-002/009, owns
+the preferred-port setting, next-free behavior and actual endpoint display through ordinary Step
+configuration and the shared [metric contract](observation.md#step-defined-metrics). Port fallback
+and preferred/active-port display use the ordinary HTTP Step and shared measurements, with final
+verification tracked in the [port-selection evidence](../verification.md#http-port-selection). Step-defined metrics extend the existing Railix
+endpoint, not a separate reporting channel or listener per Step. This does not approve
+silently changing the Creator UI's own port or swallowing unrelated application-start failures.
+
+Planned acceptance:
+
+| Requirement | Public Creator journey and expected result |
+| --- | --- |
+| CR-021 | Observe an independently started app, edit and rebuild locally, then detach. Real ingress to the observed instance remains available and unchanged, including when the local build fails. |
+| CR-022 | Remove a Step and reconnect locally. Inspect the old deployed route, restore the Step and Undo. Only local files/builds change; conflicting outside edits are not overwritten. |
+| CR-023 | Run real ingress on the observed build and Examples on the changed local build. Both remain identifiable without mixed metrics or fabricated cross-version paths. Replace the observed instance and reject stale evidence. |
+| CR-021 to CR-023 | Open an artifact with embedded project documents, then one without them using matching local files. Both use the same project reader. For missing/mismatched data, locate the matching project rather than inventing a graph. Check changes, restoration and evidence selection at desktop and narrow sizes by pointer and keyboard. |
+
 ## Planned Capability And Resource Guidance
 
 This specification owns user journeys, interaction states, feedback and accessibility, not just
@@ -516,8 +596,10 @@ trace downloads. Queued and running work uses a yellow progress mark, success a 
 failure a red cross. Text fallback and accessible names identify status without color alone.
 The list displays at most 20 issues per page. A bounded error header from the Example inventory
 provides the cause and location independently of recorded-value downloads. Unavailable recorded
-values do not erase the failure or prevent navigation. Their explicit retry does not start repeated
-background reads. When no Step location was recorded, navigation returns to the Example's Trigger
+values do not erase the failure or prevent navigation. A transient read failure receives exactly
+one automatic retry through the existing visible-page observation poll. Further failures wait for
+Retry. Permanent rejections wait immediately. No timer or repeated background trace scan is added.
+When no Step location was recorded, navigation returns to the Example's Trigger
 without claiming that the Trigger failed. Closing the popover or navigating elsewhere cancels its pending
 navigation. Rebuilding removes the previous build's failures until current results arrive.
 
@@ -588,6 +670,7 @@ No other Example is chosen automatically.
 Scope filtering reads cached, revision-bound reachability summaries, never replays traces from render,
 hover or paint. Loading, unavailable and empty results are distinct from the global list.
 Inspector tabs use Configure, Data, Appearance and Grouping, with consistent symbols and text labels.
+They expose their selected state to assistive technology and support arrow, Home and End keys.
 Data owns recorded context changes and the observed branch exit. It uses the central Example
 selection, with changed JSON fields visible by default and the eye action revealing the full context.
 There is no separate Results tab, before/after JSON renderer or local Example selector.
@@ -595,7 +678,7 @@ The desktop Inspector can be resized from its left edge with pointer or keyboard
 the full available width. Resizing is presentation state, not a project edit.
 Appearance offers searchable embedded and user-supplied SVG/PNG symbols through the existing icon
 catalog. A chosen symbol is embedded in Creator metadata, never processing configuration, and can be
-reset or undone. Grouping starts with the selected Step's
+reset or undone. Grouping, not Appearance, owns group assignment. It starts with the selected Step's
 assignment, with other reusable groups behind an All groups disclosure. Foundry uses consistently fitted,
 functional module symbols. Connected belt ends have low-contrast, belt-width openings rather than
 bright port dots. Moving plates carry direction marks. The selected Example has the strongest
@@ -605,6 +688,18 @@ Form simplification retains those tabs and all editing actions. A single value s
 numbered candidate heading or inactive reorder controls. Multiple sources and authored cases retain
 their identities and ordering. Duplicate path headings may be visually suppressed only for one
 source path with the same label. Distinct and multiple option inputs retain their labels.
+Short JSON literals use a single-line field. Objects and arrays use a multiline editor. Both
+preserve JSON types, exact numbers, invalid drafts and Reset behavior. Narrow Inspector columns
+stack source, comparison and operand controls instead of truncating their meaning. One route
+needs no extra enclosing frame. Color and Reset controls remain aligned on one row.
+An empty route shows its Add condition action, not an already expanded source catalog.
+Further OR alternatives expand only when requested. Grouping repeats a managed group's title
+only when it differs from the target already named by the selection or assignment control.
+Grouping selects immediately with visible loading feedback. A delayed read must not switch back
+from a newer tab, steal field focus or reopen a closed Inspector. Read failures offer an explicit
+Retry without stopping the application. Symbol selection uses the same visible disclosure marker
+as other expandable controls. The phone Example row retains its caption and labels its Clear
+action so it cannot be mistaken for closing the Inspector.
 Save responses and observation refreshes must preserve an unfinished field value, focus, caret
 selection and text scroll position within the same Inspector selection and tab. Unsaved active
 text also participates in the reload warning before its change event commits it.
@@ -631,12 +726,16 @@ Entered groups and work areas have a separate return control beside the entry st
 entry Step remains functional and selectable. Touch supports single-tap entry/return, canvas pan and
 pinch zoom. Narrow layouts provide 44 CSS-pixel control targets and a scrollable Inspector.
 Opening or resizing the Inspector keeps the selected Step visible at the current zoom when canvas
-space remains. Narrow split views reserve room for the Step, return portal and timing legend.
-Short narrow windows use a full-screen Inspector instead of collapsing its form.
+space remains. At phone widths the Inspector is a full-screen editing surface, not a squeezed
+canvas/editor split. It reuses the existing Example selector, Undo, Redo and Settings control.
+The covered HUD and canvas are not interactive or keyboard-focusable, and canvas motion pauses
+while covered. The application, observations and Example processing continue. Settings and import
+use that same surface. Tabs, Close and editor actions remain reachable while fields scroll.
 Closing it does not recenter the camera or discard the selection.
 On narrow screens, choosing an outgoing connection temporarily clears the Inspector from the canvas
 so destinations and Cancel remain reachable. The Cancel control restores the same Inspector and output
-focus. Once a destination is submitted, destination-picking ends. The pending save cannot be cancelled
+focus. Insertion likewise reveals the canvas and returns to its initiating action on Cancel.
+Once a destination is submitted, destination-picking ends. The pending save cannot be cancelled
 through the connection controls.
 Undo/Redo use curved action arrows, not navigation arrows. Navigation and Example selection do not
 create history. Automated mutation checks use isolated projects, never the user's active preview.
@@ -686,8 +785,9 @@ The Example HUD links directly to that failing Step. Arrival markers do not mean
 While an Example is selected, cumulative error counters do not paint unrelated buildings as failures
 of that Example. Recorded error totals remain available in metrics. Switching selection resets the
 Inspector's scroll position so its identity and observed changes are immediately visible.
-An unavailable Example read retains its failed selection key. Status polling does not repeat the
-trace scan. Retry, a new selection or a changed build may request the recorded values again.
+An unavailable Example read retains its failed selection key. After one automatic retry for a
+transient failure, status polling does not repeat the trace scan. Retry, a new selection or a
+changed build may request the recorded values again. Hidden pages do not retry value reads.
 A failure jump loads its destination before requesting recorded values. Summary and Step reads
 stay within the application's existing concurrent-read budget.
 A failed Step-value read does not discard an independently validated Example result or its reached
@@ -709,8 +809,8 @@ sampled-time coloring, independently of Example selection. Each connection uses 
 sampled mean. A collapsed group uses its slowest measured member mean, not its sum or elapsed
 group latency. The group's world label uses that same measure without an `avg sum` suffix.
 The sum remains available in Group metrics. Straight runs, corners and bridges retain the same time color. A visible
-logarithmic scale compares the measured Steps and collapsed groups currently in view, excluding
-stations behind HUD panels. Turquoise marks the shorter sampled mean and blue the longer one.
+logarithmic scale compares the measured Steps and collapsed groups currently in the canvas viewport.
+Turquoise marks the shorter sampled mean and blue the longer one.
 Panning, zooming or entering a group updates the numeric range after the camera gesture settles,
 not continuously during a drag or flight. Equal measurements share one
 color and one numeric label. No measurement creates an artificial spread. The legend is read-only
@@ -751,7 +851,13 @@ belong behind Technical details. Small screens keep readable navigation and a fo
 Location and the active Example belong to the fixed workbench toolbar, not separate overlays
 covering the canvas. The toolbar identifies the current project and location, uses readable
 controls and wraps into explicit rows at narrow widths. Sound, music, Home, Overview and
-Settings keep their distinct functions. Starting with a stale or missing access key explains
+Settings keep their distinct functions. The current group remains visible beside a compact
+parent-area popover, which retains direct access to every enclosing area. Escape returns focus
+to its invoker, and choosing a parent returns keyboard control to the canvas. The popover stays
+anchored to its invoker rather than the bottom of the entire toolbar. On phones the
+Example caption and choice share one row, with its actions below rather than squeezing the
+selected name between icons. The existing select node remains connected during updates so
+progress feedback does not close an open native picker. Starting with a stale or missing access key explains
 how to open the current link printed by the running Creator. A transport failure offers an
 explicit retry. Neither case removes authentication or guesses credentials.
 
@@ -900,7 +1006,7 @@ button activation. This applies the contextual controls and removal of duplicate
 [Factorio's GUI review](https://www.factorio.com/blog/post/fff-363), and the attribute/comparison/value
 structure of [Finder criteria](https://support.apple.com/en-gb/guide/mac-help/mh15155/mac), without
 introducing another saved model or a Choice-specific execution path.
-Choice comparisons place field, comparison and operand controls beside one another. Changing
+Choice comparisons place field, comparison and operand controls together, stacking them in narrow columns. Changing
 the comparison preserves compatible operands; optional calculations and longer chains expand
 on demand.
 The common matcher is directly visible, without an additional condition disclosure. Empty comparison
@@ -908,7 +1014,8 @@ chains say `Value exists`, matching their actual behavior. Additional AND condit
 and comparisons open on demand, with bounded searchable lists. Optional JSON controls use one
 checkbox label rather than a duplicate heading. Path access remains in the field's tooltip.
 Configure and Data retain connection controls. Appearance and Grouping omit that unrelated row.
-Focus keeps Inspector open, including on narrow screens, and frames the selection beside it.
+Focus frames the selection beside the desktop Inspector. On phones it returns to the canvas
+to reveal the selected Step rather than framing it behind a full-screen editor.
 The world and label surfaces use non-scrollable clipping; browser focus scrolling must not move
 the diagram independently of the camera or displace its controls.
 Diagnostics and malformed route states appear on their owning node, outcome, or group.
@@ -964,6 +1071,15 @@ The visual vocabulary follows the consistent-control and in-context-action princ
 
 The minimap reuses one coarse scene per revision, bins it into at most 32 by 20 CSS cells, and moves
 the existing camera. Its read has a five-second deadline and bounded retry, independent of traffic.
+Only the map content is a pointer navigation target, not its caption. Map clicks and arrow keys
+cancel an active camera flight before moving the view. Enter centers the overview. Returning
+to a visible browser tab retains the loaded overview and focus when its revision and scope are
+unchanged. Interrupted reads still retry through the existing bounded loading path.
+In short narrow viewports the timing scale wraps beside the radar, without hiding either surface
+or allowing them to overlap. A changed timing scale also updates return-control placement, so
+the Back action does not retain bounds from the previous scale layout.
+Timing membership follows the visible canvas bounds, not HUD occlusion. Showing the scale or
+moving the Back control cannot remove their underlying Steps from the same scale calculation.
 Machine centers and routed belt segments have distinct cell geometry. Current viewport observations
 and known diagnostics provide state overlays; unobserved areas remain neutral. Selection retains
 one world position/identity and colors its cell, without a second selection box or navigation history.

@@ -4,7 +4,6 @@ import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepDefinition;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -66,6 +65,23 @@ final class CreatorSceneObservationsE2eTest extends CreatorServerE2eSupport {
 
     private static long metricNumber(final RailixValue.ObjectValue entity, final String metric) {
         return number((RailixValue.ObjectValue) entity.values().get("metrics"), metric);
+    }
+
+    @Test
+    void convergingInputsDoNotClaimTheSharedDestinationCountForEachRoute() throws Exception {
+        final Path project=directory.resolve("railix.project.json");
+        Files.writeString(project,CreatorProjects.grouping()
+                .replace("{\"id\":\"lowercase-text\"", "{\"id\":\"branch\",\"use\":\"railix.branch\",\"inputs\":{\"routes\":[{\"outcome\":\"match\",\"inputs\":{},\"groups\":[]}]}},{\"id\":\"left\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},{\"id\":\"right\",\"use\":\"railix.field-manipulation\",\"inputs\":{}},{\"id\":\"lowercase-text\"")
+                .replace("{\"from\":\"command.next\",\"to\":\"lowercase-text\"}","{\"from\":\"command.next\",\"to\":\"branch\"},{\"from\":\"branch.match\",\"to\":\"left\"},{\"from\":\"branch.otherwise\",\"to\":\"right\"},{\"from\":\"left.next\",\"to\":\"lowercase-text\"},{\"from\":\"right.next\",\"to\":\"lowercase-text\"}"));
+        try(CreatorServer creator=start(project)) {
+            assertThat(awaitExampleView(creator.baseUri(),"command:0").statusCode()).isEqualTo(200);
+            final String view="x=-10000&y=-10000&width=100000&height=100000&scale=1";
+            final var visible=scene(creator.baseUri(),view);
+            final var response=request(creator.baseUri(),"GET","/api/scene/observations?revision="+string(visible,"revision")+"&"+view,"");
+            assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+            final var routes=entries(object(response.body()),"links").stream().filter(link->string(link,"id").startsWith("left.") || string(link,"id").startsWith("right.")).toList();
+            assertThat(routes).hasSize(2).allSatisfy(link->assertThat(link.values()).doesNotContainKey("metrics"));
+        }
     }
 
     @Test
@@ -377,7 +393,7 @@ final class CreatorSceneObservationsE2eTest extends CreatorServerE2eSupport {
                   {"id":"app","use":"railix.app","inputs":{}},
                   {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
                     {"name":"one-arrival","payload":[],"context":{"payload":{}}}]},
-                  {"id":"choice","use":"railix.choice","inputs":{"conditions":[]}},
+                  {"id":"choice","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},"groups":[]}]}},
                   {"id":"matched","use":"railix.field-manipulation","inputs":{}},
                   {"id":"otherwise","use":"railix.field-manipulation","inputs":{}},
                   {"id":"joined","use":"railix.field-manipulation","inputs":{}}
@@ -406,7 +422,7 @@ final class CreatorSceneObservationsE2eTest extends CreatorServerE2eSupport {
     @Test
     void sampledOperationalHttpExecutionsAreAggregatedWithoutAddingFlowTotalsTwice() throws Exception {
         final String source = threeStepProject().replace("\"id\":\"two\",", "\"id\":\"two\",\"metrics\":false,");
-        final RailixValue.ObjectValue observed = operationalObservations(source, StandardLibrary.catalog(), 1025, 200);
+        final RailixValue.ObjectValue observed = operationalObservations(source, GeneratedApplicationFixture.catalog(), 1025, 200);
         final RailixValue.ObjectValue region = entry(observed, "group-region:normalize:one");
 
         assertThat(metricNumber(region, "executions")).isEqualTo(2054);

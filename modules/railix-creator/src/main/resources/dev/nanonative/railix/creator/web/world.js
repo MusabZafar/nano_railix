@@ -112,6 +112,9 @@
       if (this._map) this._listen(this._map, "click", event => {
         if (!this._overview) return;
         const rect = (this._map.querySelector('.map-content') || this._map).getBoundingClientRect(), bounds = this._mapBounds;
+        if (event.detail && (event.clientX < rect.left || event.clientX >= rect.right
+          || event.clientY < rect.top || event.clientY >= rect.bottom)) return;
+        this._cancelFlight();
         const view = this._viewport();
         const x = event.detail ? bounds.x + clamp((event.clientX - rect.left) / rect.width, 0, 1) * bounds.width : bounds.x + bounds.width/2;
         const y = event.detail ? bounds.y + clamp((event.clientY - rect.top) / rect.height, 0, 1) * bounds.height : bounds.y + bounds.height/2;
@@ -124,6 +127,7 @@
         if (!direction || !this._overview) return;
         event.preventDefault();
         event.stopPropagation();
+        this._cancelFlight();
         const view=this._viewport();
         this._camera.x += direction[0] * Math.min(this._mapBounds.width/10,view.width/4);
         this._camera.y += direction[1] * Math.min(this._mapBounds.height/10,view.height/4);
@@ -137,7 +141,7 @@
         if (document.hidden) {
           this._mapRequest?.abort();
           clearTimeout(this._mapRetry);
-          this._mapRevision = null;
+          if (this._overviewContext !== this._mapRevision) this._mapRevision = null;
         } else this._refreshOverview();
         stage.classList.remove('panning');
         const moving = Boolean(this._flightFrame);
@@ -160,6 +164,7 @@
     connection(value) {
       this._connection = value;
       this._drawEditControls();
+      this._callbacks.onConnection?.();
       return this;
     }
 
@@ -293,6 +298,18 @@
         host.classList.add('sprite-portrait');
         this._surface.portrait(node,this._appearance(node),host);
       }
+      return this;
+    }
+
+    /** Clear source-specific geometry and pending reads when changing the observed application version. */
+    resetScene() {
+      this._request?.abort();this._mapRequest?.abort();this._requestId++;
+      this._mapRequest=null;this._mapRevision=null;this._overviewContext=null;clearTimeout(this._mapRetry);
+      if(this._map)this._map.hidden=true;
+      this._cancelFlight();this._pendingFocus='app';this._groups=[];this._zoomEntry=null;
+      this._mapGrid=this._mapNodes=this._mapSelection=this._overview=null;
+      this._initialized=false;this._viewVersion++;
+      this.connection(null);
       return this;
     }
 
@@ -1358,15 +1375,13 @@
       return {x: x-size/2, y: y-size/2, width: size, height: size};
     }
 
-    _draw() {
-      if (this._disposed || !this._surface) return;
+    _placeReturn() {
       if (this._return) {
         const entry=this._scene?.inside && this._scene.entry;
         this._return.hidden=!entry;
         if (entry) {
           const box=this._viewBounds(this._planeBounds(entry),18*this._camera.scale*(entry.station_scale||1));
           const parent=this.navigation.at(-2)?.name || this._callbacks.parentName?.() || 'System';
-          this._return.querySelector('span').textContent='Back';
           this._return.setAttribute('aria-label',`Return to ${parent}`);
           this._return.title=`Back to ${parent}`;
           const beside=box.x>=112;
@@ -1380,7 +1395,12 @@
           this._return.hidden=box.y+box.height<0 || box.y>this._size.height || box.x>this._size.width || box.x+box.width<0;
         }
       }
-      const controls = this._controlBounds();
+    }
+
+    _draw() {
+      if (this._disposed || !this._surface) return;
+      this._placeReturn();
+      let controls = this._controlBounds();
       this._drawEditControls();
       this._used = new Set();
       const view = this._viewport(), batch = this._batch;
@@ -1415,11 +1435,12 @@
             && box.x <= this._size.width+32 && box.y <= this._size.height+32);
         if(!this._pan?.dragging && !this._pinch && !this._flightFrame && !this._requestTimer
           && this._surface.timing?.(visible.filter(({node,box})=>!node.expanded&&['step','region'].includes(node.kind)
-          && !controls.some(control=>box.x+box.width/2>=control.x && box.x+box.width/2<=control.x+control.width
-            && box.y+box.height/2>=control.y && box.y+box.height/2<=control.y+control.height))
+          && box.x+box.width>0 && box.y+box.height>0 && box.x<this._size.width && box.y<this._size.height)
           .map(({look})=>look.durationNanos))) {
           reconcile=true;
           this._callbacks.onTiming?.();
+          this._placeReturn();
+          controls = this._controlBounds();
         }
         const dx = batch ? (batch.camera.x-this._camera.x)*unit : 0;
         const dy = batch ? (batch.camera.y-this._camera.y)*unit : 0;
@@ -1477,7 +1498,7 @@
 
     _syncMotion() {
       clearTimeout(this._motionTimer);
-      const enabled = !this._disposed && !document.hidden && !this._callbacks.reducedMotion?.();
+      const enabled = !this._disposed && !document.hidden && !this._stage.closest('[inert]') && !this._callbacks.reducedMotion?.();
       const moving = enabled && this._moving && this._callbacks.motionActive?.() !== false;
       if (this._stage.dataset.trafficAnimated !== String(moving)) this._stage.dataset.trafficAnimated = String(moving);
       const replaying = String(enabled && this._replaying);
@@ -1524,7 +1545,7 @@
     }
 
     _minimap() {
-      if (!this._map || !this._scene || this._disposed || document.hidden) return;
+      if (!this._map || !this._scene || !this._overview || this._disposed || document.hidden) return;
       const context = JSON.stringify([this._scene.revision, new URLSearchParams(this._sceneQuery).get('inside')]);
       if (this._overviewContext !== context) return;
       this._map.hidden = false;
@@ -1535,7 +1556,7 @@
       const title=this._map.querySelector('.map-title'),caption=this.navigation.at(-1)?.name || this._callbacks.parentName?.() || 'System';
       if(title && title.textContent!==caption) {
         title.textContent=caption;
-        this._map.setAttribute('aria-label',`Overview of ${caption}. Click to travel; arrow keys to pan.`);
+        this._map.setAttribute('aria-label',`Overview of ${caption}. Click the map to travel; Enter to center; arrow keys to pan.`);
       }
       if(this._mapTopology!==this._overview) {
         this._mapTopology=this._overview;
@@ -1856,6 +1877,7 @@
           element.dataset.coverage = look.coverage || "";
           element.dataset.error = String(Boolean(look.error));
           element.dataset.activity = look.activity || "";
+          element.classList.toggle('draft-removed',Boolean(look.removed));
           element.title = [look.label || node.name, look.description || look.detail].filter(Boolean).join('\n');
           if (node.kind === "region") {
             element.dataset.groupRegionLabel = node.id;

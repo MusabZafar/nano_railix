@@ -25,6 +25,7 @@ public final class StandardStepHandlers {
                             source.arguments().stream().<RailixValue>map(RailixValue::string).toList())));
                     status = switch (result.result()) {
                         case RunResult.Succeeded ignored -> success(result.responses());
+                        case RunResult.Completed ignored -> success(result.responses());
                         case RunResult.Rejected rejected -> {
                             rejected.diagnostics().forEach(diagnostic -> System.err.println(
                                     diagnostic.code() + " " + diagnostic.path() + " " + diagnostic.message()));
@@ -78,26 +79,38 @@ public final class StandardStepHandlers {
         }
     }
 
-    /** Routes a present candidate to match and an absent candidate to otherwise. */
-    public static final class Filter {
+    /** Selects declared routes and executes them using the same public API as installed Steps. */
+    public static final class Branch {
+        /** Returns one selected outcome, or explicitly runs independent outgoing paths. */
         public static StepResult process(final StepInput configuration, final StepInput input) {
-            return StepResult.outcome(input.optionalValue("conditions").isPresent() ? "match" : "otherwise");
-        }
-    }
-
-    /** Routes the matcher-groups Boolean to match or otherwise. */
-    public static final class Choice {
-        public static StepResult process(final StepInput configuration, final StepInput input) {
-            return StepResult.outcome(
-                    RailixValue.bool(true).equals(input.value("conditions")) ? "match" : "otherwise"
-            );
-        }
-    }
-
-    /** Routes the first accepted authored candidate, or the Step's primary fallback. */
-    public static final class Switch {
-        public static StepResult process(final StepInput configuration, final StepInput input) {
-            return StepResult.outcome(input.selectedOutcomeOrPrimary("cases"));
+            final String selection = configuration.option("selection");
+            final boolean parallel = configuration.option("execution").equals("parallel");
+            java.util.ArrayList<StepInput.Route> selected = null;
+            for (final StepInput.Route route : input.routes("routes")) {
+                final StepInput.Match match = selection.equals("all") ? StepInput.Match.Decision.MATCHED : route.match();
+                if (match instanceof StepInput.Match.Stopped stopped) return StepResult.stopped(stopped.result());
+                if (match == StepInput.Match.Decision.MATCHED) {
+                    if (selection.equals("first") && !parallel
+                            && !((RailixValue.BooleanValue) route.configuration().value("own_context")).value()) {
+                        return StepResult.outcome(route.outcome());
+                    }
+                    if (selected == null) selected = new java.util.ArrayList<>();
+                    selected.add(route);
+                    if (selection.equals("first")) break;
+                }
+            }
+            if (selected == null) return StepResult.outcome(input.primaryOutcome());
+            if (selected.size() == 1 && !parallel
+                    && !((RailixValue.BooleanValue) selected.getFirst().configuration().value("own_context")).value()) {
+                return StepResult.outcome(selected.getFirst().outcome());
+            }
+            for (final StepInput.Route route : selected) {
+                final StepInput.ContextMode mode = ((RailixValue.BooleanValue) route.configuration().value("own_context")).value()
+                        ? StepInput.ContextMode.COPY : StepInput.ContextMode.SHARED;
+                final StepInput.Continuation continuation = input.continuation(route.outcome());
+                if (parallel) continuation.start(mode); else continuation.run(mode);
+            }
+            return StepResult.continued();
         }
     }
 }

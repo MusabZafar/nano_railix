@@ -8,10 +8,10 @@ import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepContractJson;
 import dev.nanonative.railix.core.step.StepDefinition;
+import dev.nanonative.railix.core.runtime.ObservationServer;
 import dev.nanonative.railix.core.value.RailixData;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -56,6 +56,8 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import static dev.nanonative.railix.creator.ProjectFiles.persist;
 
 /** Creator HTTP server, project workspace, and rolling development-application owner. */
 public final class CreatorServer implements AutoCloseable {
@@ -117,8 +119,11 @@ public final class CreatorServer implements AutoCloseable {
     private final String creatorToken;
     private final String themeAssetCookieName;
     private final String themeAssetSecret;
-    private DevelopmentApplication application;
-    private DevelopmentApplication retirement;
+    private LocalApplication application;
+    private LiveApplication live;
+    private LiveApplication pendingLive;
+    private final Semaphore liveConnections = new Semaphore(1);
+    private LocalApplication retirement;
     private boolean retirementDeletesArtifact;
     private String retirementPhase = "";
     private boolean serverClosed;
@@ -202,6 +207,11 @@ public final class CreatorServer implements AutoCloseable {
     }
 
     static CreatorServer start(final int port, final Path projectFile, final Path railixHome) throws IOException {
+        return start(port, projectFile, railixHome, "");
+    }
+
+    static CreatorServer start(final int port, final Path projectFile, final Path railixHome,
+                               final String requiredProjectRevision) throws IOException {
         if (port < 0 || port > 65_535) {
             throw new IllegalArgumentException("Creator port must be from 0 through 65535.");
         }
@@ -213,12 +223,10 @@ public final class CreatorServer implements AutoCloseable {
         }
         final Path absoluteProject = projectFile.toAbsolutePath().normalize();
         try (final ProjectLease recovery = ProjectLease.acquire(absoluteProject)) {
-            recoverEditor(absoluteProject, Map.of());
+            final var preserved = ProjectFiles.recover(absoluteProject, Map.of());
+            if (!preserved.isEmpty()) throw new IOException("External project changes were preserved: " + String.join(", ", preserved) + ". Reopen after checking these files.");
         }
-        final Path dependencyLock = absoluteProject.resolveSibling("railix.dependencies.lock.json");
-        final StepCatalog catalog = Files.exists(dependencyLock)
-                ? StandardLibrary.catalog().install(dependencyLock, railixHome.resolve("artifacts"))
-                : StandardLibrary.catalog();
+        final StepCatalog catalog = ProjectFiles.catalog(absoluteProject, railixHome);
         final IconLibrary icons = new IconLibrary(railixHome);
         final Path themeDirectory = Files.createDirectories(railixHome).toRealPath().resolve("themes");
         final Path soundDirectory = themeDirectory.resolveSibling("sounds");
@@ -227,25 +235,33 @@ public final class CreatorServer implements AutoCloseable {
         Files.createDirectories(soundDirectory);
         Files.createDirectories(musicDirectory);
         final boolean projectExists = Files.exists(absoluteProject);
-        final String requested = projectExists
-                ? readProject(absoluteProject)
-                : defaultProject(absoluteProject);
+        if (!projectExists && Files.exists(absoluteProject.resolveSibling("railix.examples.json")))
+            throw new IOException("An Example file already exists here. Restore or open its project before creating another one.");
+        final var documents = projectExists ? ProjectFiles.read(absoluteProject)
+                : new ProjectFiles.Read(defaultProject(absoluteProject, catalog), List.of());
+        if (!documents.diagnostics().isEmpty()) {
+            final var diagnostic = documents.diagnostics().getFirst();
+            throw new IOException(diagnostic.code() + " " + diagnostic.path() + " " + diagnostic.message());
+        }
+        final String requested = documents.source();
         final CompileResult result = ProjectCompiler.compileApplication(requested, catalog);
         if (result instanceof CompileResult.Rejected rejected) {
-            final Diagnostic diagnostic = rejected.diagnostics().getFirst();
+            final Diagnostic diagnostic = documents.locations(rejected.diagnostics()).getFirst();
             throw new IOException(
                     "Cannot open Creator project: " + diagnostic.code() + " "
                             + diagnostic.path() + " " + diagnostic.message()
             );
         }
         final CompileResult.Compiled compiled = (CompileResult.Compiled) result;
+        if (!requiredProjectRevision.isEmpty() && !requiredProjectRevision.equals(ProjectFiles.identity(compiled)))
+            throw new IOException("PROJECT_SOURCE_MISMATCH: Project files changed before Creator opened this application.");
         final String canonical = compiled.source();
         final Path creatorFile = absoluteProject.resolveSibling("railix.creator.json");
         final boolean creatorExists = Files.exists(creatorFile);
         final String defaultCreator = projectExists ? CreatorDocument.EMPTY
                 : "{\"created_at\":" + System.currentTimeMillis() + "," + CreatorDocument.EMPTY.substring(1);
         final String requestedCreator = creatorExists
-                ? readProject(creatorFile)
+                ? ProjectFiles.readText(creatorFile)
                 : defaultCreator;
         final CreatorDocument.Result requestedCreatorResult = CreatorDocument.parse(
                 requestedCreator,
@@ -271,7 +287,7 @@ public final class CreatorServer implements AutoCloseable {
         ExecutorService executor = null;
         ScheduledExecutorService bodyDeadlines = null;
         try {
-            persist(absoluteProject, canonical);
+            ProjectFiles.writeProject(absoluteProject, canonical);
             if (!creatorExists || requestedCreatorResult.diagnostics().isEmpty()) {
                 persist(creatorFile, creatorResult.source());
             }
@@ -390,6 +406,12 @@ public final class CreatorServer implements AutoCloseable {
                 return;
             }
             open.set(false);
+            synchronized (applicationLock) {
+                if (live != null) live.close();
+                if (pendingLive != null) pendingLive.close();
+                live = null;
+                pendingLive = null;
+            }
             synchronized (buildLock) {
                 if (!applicationClosed) {
                     try {
@@ -570,6 +592,16 @@ public final class CreatorServer implements AutoCloseable {
                 }
             }
         }
+        if (path.equals("/api/live") || path.startsWith("/api/live/")) {
+            try { return live(exchange, path); }
+            catch (final java.util.NoSuchElementException missing) {
+                return json(404,RailixValue.object(Map.of("message",RailixValue.string(missing.getMessage()))));
+            } catch (final IllegalArgumentException invalid) {
+                return json(400,RailixValue.object(Map.of("message",RailixValue.string(invalid.getMessage()))));
+            } catch (final IOException unavailable) {
+                return json(503,RailixValue.object(Map.of("message",RailixValue.string(unavailable.getMessage()))));
+            }
+        }
         if ("/api/project".equals(path)) {
             return project(exchange);
         }
@@ -583,7 +615,8 @@ public final class CreatorServer implements AutoCloseable {
             return sceneObservations(exchange);
         }
         if ("/api/application".equals(path)) {
-            return getOnly(exchange, json(200, application()));
+            return exchange.getRequestMethod().equals("POST") ? startLocal(exchange)
+                    : getOnly(exchange, json(200, application()));
         }
         if ("/api/metrics".equals(path)) {
             return metrics(exchange, "");
@@ -603,6 +636,10 @@ public final class CreatorServer implements AutoCloseable {
                     ? ""
                     : rawPath.substring("/api/examples/".length()));
         }
+        if ("/api/assertions".equals(path)) return getOnly(exchange, json(200, ExampleAssertions.catalog()));
+        if ("/api/assertions/check".equals(path)) return checkAssertions(exchange);
+        if (path.startsWith("/api/assertions/expectations/"))
+            return savedAssertions(exchange, path.substring("/api/assertions/expectations/".length()));
         if ("/api/catalog".equals(path)) {
             return getOnly(exchange, json(200, catalog()));
         }
@@ -1938,7 +1975,7 @@ public final class CreatorServer implements AutoCloseable {
         try {
             final Map<String, String> parameters = CreatorScene.observationParameters(exchange.getRequestURI().getRawQuery());
             final CreatorScene snapshot;
-            final DevelopmentApplication deployed;
+            final LocalApplication deployed;
             final long functionalRevision;
             final long presentationRevision;
             final long pid;
@@ -1946,7 +1983,7 @@ public final class CreatorServer implements AutoCloseable {
                 final String project;
                 final RailixValue.ObjectValue metadata;
                 synchronized (applicationLock) {
-                    if (!open.get() || deploymentPending || visibleEdit != null
+                    if (!open.get() || !application.running() || deploymentPending || visibleEdit != null
                             || !sourceArtifactKey.equals(application.artifact().directory().getFileName().toString())) {
                         return unavailable(open.get() ? "application" : "closed");
                     }
@@ -2104,13 +2141,243 @@ public final class CreatorServer implements AutoCloseable {
         }
     }
 
-    private boolean sceneObservationCurrent(final DevelopmentApplication deployed, final long functionalRevision,
+    private boolean sceneObservationCurrent(final LocalApplication deployed, final long functionalRevision,
                                              final long presentationRevision) {
         synchronized (applicationLock) {
-            return open.get() && !deploymentPending && visibleEdit == null && application == deployed
+            return open.get() && deployed.running() && !deploymentPending && visibleEdit == null && application == deployed
                     && sourceRevision == functionalRevision && creatorRevision == presentationRevision
                     && sourceArtifactKey.equals(deployed.artifact().directory().getFileName().toString());
         }
+    }
+
+    private Response startLocal(final HttpExchange exchange) throws IOException {
+        final BodyRead body = body(exchange, 16_384);
+        if (!body.diagnostics().isEmpty()) return bodyResponse(body);
+        final var parsed = RailixJson.parse(utf8(body.value()));
+        if (!(parsed instanceof RailixJson.Parsed json) || !(json.value() instanceof RailixValue.ObjectValue request)
+                || !request.values().keySet().equals(Set.of("action", "revision", "creator_revision"))
+                || !RailixValue.string("start").equals(request.values().get("action")))
+            return json(422, RailixValue.object(Map.of("message", RailixValue.string("Choose Start locally for the current draft."))));
+        synchronized (buildLock) {
+            if (!cleanupRetirement().isEmpty()) return cleanupPendingLocked();
+            final LocalApplication previous;
+            final long generation;
+            synchronized (applicationLock) {
+                if (!open.get()) return unavailable("closed");
+                if (deploymentPending || visibleEdit != null || !revision(request, "revision", sourceRevision)
+                        || !revision(request, "creator_revision", creatorRevision)
+                        || Files.exists(ProjectFiles.journal(projectFile))) return supersededLocked();
+                if (!ProjectFiles.read(projectFile).source().equals(source))
+                    return json(409, RailixValue.object(Map.of("message", RailixValue.string("Project files changed outside Creator. Reload before starting."))));
+                if (application.running()) return json(200, projectPayloadLocked(false));
+                previous = application;
+                generation = nextGeneration++;
+                deploymentPending = true;
+            }
+            DevelopmentApplication candidate = null;
+            try {
+                candidate = DevelopmentApplication.start(generation, ApplicationBuilder.reserve(previous.artifact()));
+                candidate.activate();
+                synchronized (applicationLock) {
+                    if (!open.get() || !revision(request, "revision", sourceRevision)
+                            || !revision(request, "creator_revision", creatorRevision) || !candidate.running()) {
+                        discard(candidate);
+                        return supersededLocked();
+                    }
+                    application = candidate;
+                    retirement = previous;
+                    retirementDeletesArtifact = false;
+                    retirementPhase = "";
+                }
+                cleanupRetirement();
+                return json(200, projectPayload(false));
+            } catch (final IOException failure) {
+                if (candidate != null) discard(candidate);
+                return json(503, RailixValue.object(Map.of("status", RailixValue.string("failed"),
+                        "message", RailixValue.string(failure.getMessage() == null ? "Local application could not start." : failure.getMessage()),
+                        "application", application())));
+            } finally {
+                synchronized (applicationLock) { deploymentPending = false; }
+            }
+        }
+    }
+
+    private Response confirmLive(final String instance) throws IOException {
+        if (!liveConnections.tryAcquire()) return unavailable("connection-in-progress");
+        try {
+            synchronized (buildLock) {
+                if (!cleanupRetirement().isEmpty()) return cleanupPendingLocked();
+                final LiveApplication selected;
+                final LocalApplication previous;
+                synchronized (applicationLock) {
+                    if (!open.get()) return unavailable("closed");
+                    if (live != null && live.connection.instance().equals(instance)) {
+                        if (pendingLive != null && pendingLive.connection.instance().equals(instance)) {
+                            pendingLive.close(); pendingLive = null;
+                        }
+                        return json(200, RailixValue.object(Map.of("application", live.snapshot())));
+                    }
+                    selected = pendingLive;
+                    if (selected == null || !selected.connection.instance().equals(instance) || !selected.alive())
+                        return json(409, RailixValue.object(Map.of("message", RailixValue.string("Choose a running application again."))));
+                    if (deploymentPending || visibleEdit != null) return unavailable("edit-in-progress");
+                    previous = application;
+                    deploymentPending = true;
+                }
+                try {
+                    if (!(previous instanceof LocalApplication.Prepared)) {
+                        final var prepared = new LocalApplication.Prepared(previous.artifact());
+                        try { previous.close(); }
+                        catch (final RuntimeException failure) {
+                            prepared.close();
+                            synchronized (applicationLock) {
+                                retirement = previous; retirementDeletesArtifact = false; retirementPhase = "application-cleanup";
+                                return cleanupPendingLocked();
+                            }
+                        }
+                        synchronized (applicationLock) { application = prepared; }
+                    }
+                    synchronized (applicationLock) {
+                        if (!open.get() || pendingLive != selected || !selected.alive())
+                            return json(409, RailixValue.object(Map.of("message", RailixValue.string("Application stopped while connecting. The local draft is ready to start."))));
+                        if (live != null) live.close();
+                        live = selected;
+                        pendingLive = null;
+                        return json(200, RailixValue.object(Map.of("application", live.snapshot())));
+                    }
+                } finally {
+                    synchronized (applicationLock) { deploymentPending = false; }
+                }
+            }
+        } finally { liveConnections.release(); }
+    }
+
+    private Response live(final HttpExchange exchange, final String path) throws IOException {
+        if (path.equals("/api/live")) {
+            if (exchange.getRequestMethod().equals("GET")) {
+                final List<RailixValue> candidates = ObservationServer.connections(settingsDirectory).stream()
+                        .<RailixValue>map(connection -> RailixValue.object(Map.of(
+                                "instance", RailixValue.string(connection.instance()), "pid", RailixValue.number(connection.pid()),
+                                "artifact", RailixValue.string(connection.artifact().toString()),
+                                "started_at", RailixValue.string(connection.started().toString())))).toList();
+                synchronized (applicationLock) {
+                    return json(200, RailixValue.object(Map.of("applications", RailixValue.array(candidates),
+                            "connected", live == null ? RailixValue.nullValue() : live.snapshot())));
+                }
+            }
+            if (!exchange.getRequestMethod().equals("POST")) return methodNotAllowed();
+            final BodyRead body = body(exchange, 16_384);
+            if (!body.diagnostics().isEmpty()) return bodyResponse(body);
+            final var parsed = RailixJson.parse(utf8(body.value()));
+            if (!(parsed instanceof RailixJson.Parsed json) || !(json.value() instanceof RailixValue.ObjectValue request)
+                    || !Set.of("instance","project","confirm").containsAll(request.values().keySet())
+                    || !(request.values().get("instance") instanceof RailixValue.StringValue id)
+                    || request.values().containsKey("project") && !(request.values().get("project") instanceof RailixValue.StringValue))
+                return json(422, RailixValue.object(Map.of("message", RailixValue.string("Choose a running application."))));
+            if (request.values().containsKey("confirm")) {
+                if (!RailixValue.bool(true).equals(request.values().get("confirm")) || request.values().containsKey("project"))
+                    return json(422, RailixValue.object(Map.of("message", RailixValue.string("Confirm the selected application."))));
+                return confirmLive(id.value());
+            }
+            if (!liveConnections.tryAcquire()) return unavailable("connection-in-progress");
+            try {
+                final var candidate = ObservationServer.connections(settingsDirectory).stream()
+                        .filter(connection -> connection.instance().equals(id.value())).findFirst();
+                if (candidate.isEmpty()) return json(404, RailixValue.object(Map.of("message", RailixValue.string("Application stopped. Refresh the connection list."))));
+                final Path matching = request.values().get("project") instanceof RailixValue.StringValue selected
+                        ? Path.of(selected.value()).toAbsolutePath().normalize() : projectFile;
+                final LiveApplication connected = LiveApplication.connect(candidate.get(), matching, settingsDirectory);
+                synchronized (applicationLock) {
+                    if (!open.get()) { connected.close(); return unavailable("closed"); }
+                    if (pendingLive != null) pendingLive.close();
+                    pendingLive = connected;
+                    return json(200, RailixValue.object(Map.of("application", connected.snapshot(), "changes", connected.comparison(source))));
+                }
+            } catch (final IOException failure) {
+                return json(409, RailixValue.object(Map.of("message", RailixValue.string(failure.getMessage()))));
+            } finally { liveConnections.release(); }
+        }
+        if (!exchange.getRequestMethod().equals("GET")) return methodNotAllowed();
+        final LiveApplication captured;
+        final String draft;
+        synchronized (applicationLock) {
+            final var instances=exchange.getRequestHeaders().getOrDefault("X-Railix-Live-Instance",List.of());
+            if(instances.size()!=1) return json(409,RailixValue.object(Map.of("message",RailixValue.string("Choose the live application again."))));
+            final String instance=instances.getFirst();
+            captured = live; draft = source;
+            if(captured==null || !captured.connection.instance().equals(instance))
+                return json(409,RailixValue.object(Map.of("message",RailixValue.string("Live connection changed. Choose the application again."))));
+        }
+        if (captured == null) return unavailable("not-connected");
+        if (path.equals("/api/live/catalog")) return json(200, RailixValue.object(Map.of("steps", RailixValue.array(
+                captured.project.catalog().definitions().stream().<RailixValue>map(CreatorServer::definition).toList()))));
+        if (path.equals("/api/live/application")) return json(200, captured.snapshot());
+        if (path.equals("/api/live/editor")) {
+            final var payload = new LinkedHashMap<>(captured.editor.view(exchange.getRequestURI().getRawQuery(), captured.project.creator()).values());
+            payload.put("revision", RailixValue.number(0));
+            payload.put("creator_revision", RailixValue.number(0));
+            payload.put("application", captured.snapshot());
+            payload.put("history", RailixValue.object(Map.of("undo", RailixValue.bool(false), "redo", RailixValue.bool(false))));
+            payload.put("diagnostics", RailixValue.array(List.of()));
+            payload.put("changes", captured.comparison(draft));
+            payload.put("comparison_instance",RailixValue.string(captured.connection.instance()));
+            payload.put("workspace", RailixValue.object(Map.of("project_path", RailixValue.string(projectFile.toString()),
+                    "step_count", RailixValue.number(captured.editor.stepCount()), "flow_count", RailixValue.number(captured.editor.flowCount()))));
+            return json(200, RailixValue.object(payload));
+        }
+        if (path.equals("/api/live/changes")) return json(200, captured.comparison(draft));
+        if (path.equals("/api/live/scene")) return json(200, captured.scene.view(exchange.getRequestURI().getRawQuery()));
+        if (path.equals("/api/live/scene/observations")) {
+            if (!sceneObservationResponses.tryAcquire()) return unavailable("saturated");
+            try {
+                final var parameters = CreatorScene.observationParameters(exchange.getRequestURI().getRawQuery());
+                if (!captured.scene.observesRevision(parameters.get("revision")))
+                    return json(409, RailixValue.object(Map.of("status", RailixValue.string("scene-revision-conflict"))));
+                final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                final RailixValue.ObjectValue result;
+                if (parameters.containsKey("members")) {
+                    final var page = captured.scene.memberPage(parameters);
+                    final var read = captured.read("/v1/metrics/query", (RailixValue.ObjectValue) page.values().get("query"), deadline);
+                    if (read.status() != 200) return unavailable("application");
+                    final var document = (RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(utf8(read.body()))).value();
+                    if (!RailixValue.number(captured.connection.pid()).equals(document.values().get("application_pid"))) return unavailable("application");
+                    final var values = new LinkedHashMap<>(page.values());
+                    values.remove("query"); values.putAll(document.values());
+                    values.put("revision", RailixValue.string(parameters.get("revision")));
+                    result = RailixValue.object(values);
+                } else {
+                    final var projection = captured.scene.observationView(parameters);
+                    final var catalog = captured.read("/v1/metrics/catalog", null, deadline);
+                    if (catalog.status() != 200) return unavailable("application");
+                    final var validated = ApplicationReads.catalog(new DevelopmentApplication.Response(catalog.status(), utf8(catalog.body())), captured.connection.pid());
+                    projection.metricDefinitions((RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(validated.body())).value());
+                    projection.unavailable("examples");
+                    for (final var query : projection.queries("metrics")) {
+                        if (System.nanoTime() >= deadline) return unavailable("observation-timeout");
+                        final var read = captured.read("/v1/metrics/query", query, deadline);
+                        if (read.status() != 200) return unavailable("application");
+                        final var document = (RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(utf8(read.body()))).value();
+                        if (!RailixValue.number(captured.connection.pid()).equals(document.values().get("application_pid"))) return unavailable("application");
+                        if (!projection.accept("metrics", query, document)) break;
+                    }
+                    result = projection.response(0, captured.connection.pid());
+                }
+                synchronized (applicationLock) { if (live != captured || !captured.alive()) return unavailable("application"); }
+                final var response = json(200, result);
+                send(exchange, response);
+                return Response.committedResponse();
+            } finally { sceneObservationResponses.release(); }
+        }
+        if (path.equals("/api/live/metrics") || path.startsWith("/api/live/metrics/")) {
+            final String metricPath = path.equals("/api/live/metrics") ? "/v1/metrics/application" : path.replace("/api/live", "/v1");
+            if (!forwarding.tryAcquire()) return unavailable("saturated");
+            try {
+                final var read = captured.read(metricPath, null, System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+                synchronized (applicationLock) { if (live != captured || !captured.alive()) return unavailable("application"); }
+                return new Response(read.status(), read.contentType(), read.body());
+            } finally { forwarding.release(); }
+        }
+        return json(404, RailixValue.object(Map.of("status", RailixValue.string("not-found"))));
     }
 
     private Response scene(final HttpExchange exchange) {
@@ -2179,12 +2446,14 @@ public final class CreatorServer implements AutoCloseable {
                     ""
             )), application()));
         }
-        final CompileResult result = ProjectCompiler.compileApplication(projectSource, catalog);
+        final String inputs;
+        synchronized (applicationLock) { inputs = ProjectFiles.inputs(projectSource, source); }
+        final CompileResult result = ProjectCompiler.compileApplication(inputs, catalog);
         if (result instanceof CompileResult.Rejected rejected) {
             return json(422, diagnostics(rejected.diagnostics(), application()));
         }
         synchronized (buildLock) {
-            if (Files.exists(editorJournal(projectFile))) return unavailable("editor-recovery-restart-required");
+            if (Files.exists(ProjectFiles.journal(projectFile))) return unavailable("editor-recovery-restart-required");
             return accept((CompileResult.Compiled) result, revision, true);
         }
     }
@@ -2207,10 +2476,12 @@ public final class CreatorServer implements AutoCloseable {
             return json(422, RailixValue.object(Map.of("message", RailixValue.string(failure.getMessage()))));
         }
         synchronized (buildLock) {
-            if (Files.exists(editorJournal(projectFile))) return unavailable("editor-recovery-restart-required");
+            if (Files.exists(ProjectFiles.journal(projectFile))) return unavailable("editor-recovery-restart-required");
             final String previousSource;
             final RailixValue.ObjectValue previousCreator;
             final String previousMetadata;
+            final String previousExamples;
+            final RailixValue.ObjectValue previousExpectations;
             final RailixValue.ObjectValue project;
             final RailixValue.ObjectValue command = CreatorChanges.object(request, "command");
             final String kind = CreatorChanges.text(command, "kind");
@@ -2228,9 +2499,12 @@ public final class CreatorServer implements AutoCloseable {
                 previousSource = source;
                 previousCreator = creatorValue;
                 previousMetadata = Files.readString(creatorFile);
-                if (!Files.readString(projectFile).equals(previousSource)
+                final var documents = ProjectFiles.read(projectFile);
+                if (documents.examples().isEmpty() || !documents.source().equals(previousSource)
                         || creatorDiagnostics.isEmpty() && !previousMetadata.equals(RailixJson.write(previousCreator)))
                     return json(409, RailixValue.object(Map.of("message", RailixValue.string("Project files changed outside Creator. Restart to load them before editing."))));
+                previousExamples = documents.examples();
+                previousExpectations = ProjectFiles.expectations(previousExamples);
                 project = editorLocked().project();
                 historical = undo ? editorUndo.peekLast() : redo ? editorRedo.peekLast() : null;
                 try {
@@ -2240,6 +2514,24 @@ public final class CreatorServer implements AutoCloseable {
                                 CreatorChanges.restore(creatorValue, undo ? historical.creatorBack() : historical.creatorForward(), false), historical.selection());
                     } else {
                         var operation = command;
+                        if (kind.equals("restore")) {
+                            final var instances=exchange.getRequestHeaders().getOrDefault("X-Railix-Live-Instance",List.of());
+                            if(live==null || instances.size()!=1 || !live.connection.instance().equals(instances.getFirst()))
+                                return json(409,RailixValue.object(Map.of("message",RailixValue.string("Live connection changed. Select the running version again before restoring."))));
+                            if (!Set.of("kind","node").containsAll(command.values().keySet())) throw new IllegalArgumentException("Restore needs only a Step identity.");
+                            operation = ProjectComparison.restore(live.project.source(), project, CreatorChanges.text(command,"node"),live.project.catalog());
+                            final var styles=new LinkedHashMap<String,RailixValue>();
+                            for(final String restored:CreatorChanges.object(CreatorChanges.object(operation,"project"),"nodes").values().keySet()) {
+                              final var previousStyle=CreatorChanges.object(live.project.creator(),"steps").values().get(restored);
+                              if(previousStyle instanceof RailixValue.ObjectValue style) {
+                                final var retainedStyle=new LinkedHashMap<>(style.values());
+                                final String group=CreatorChanges.text(style,"group");
+                                if(!group.isEmpty() && CreatorChanges.array(creatorValue,"groups").stream().noneMatch(value->CreatorChanges.text(CreatorChanges.object(value),"id").equals(group))) retainedStyle.remove("group");
+                                styles.put(restored,RailixValue.object(retainedStyle));
+                              }
+                            }
+                            if(!styles.isEmpty())operation=CreatorChanges.with(operation,"creator",RailixValue.object(Map.of("steps",RailixValue.object(styles))));
+                        }
                         if (kind.equals("patch")) {
                             operation = CreatorChanges.with(command, "project", editorLocked().changes(CreatorChanges.object(command, "project")));
                             final var fields = new LinkedHashMap<>(CreatorChanges.object(operation, "creator").values());
@@ -2253,7 +2545,7 @@ public final class CreatorServer implements AutoCloseable {
                 }
             }
             final boolean functional = !project.equals(change.project());
-            final String candidateSource = functional ? RailixJson.write(change.project()) : previousSource;
+            final String candidateSource = functional ? ProjectFiles.inputs(RailixJson.write(change.project()), previousSource) : previousSource;
             final CompileResult compiled = functional ? ProjectCompiler.compileApplication(candidateSource, catalog) : null;
             if (compiled instanceof CompileResult.Rejected rejected) return rejectedEdit(change.project(), rejected.diagnostics());
             final CreatorDocument.Result metadata = CreatorDocument.parse(RailixJson.write(change.creator()), candidateSource, catalog);
@@ -2262,9 +2554,14 @@ public final class CreatorServer implements AutoCloseable {
                     "selection", RailixValue.string(change.selection()),
                     "project_changes", CreatorChanges.diff(project, change.project()),
                     "creator_changes", CreatorChanges.diff(previousCreator, metadata.value()))));
-            final Path journal = editorJournal(projectFile);
-            persist(journal, RailixJson.write(RailixValue.object(Map.of("project", RailixValue.string(previousSource),
-                    "creator", RailixValue.string(previousMetadata)))));
+            final Path journal = ProjectFiles.journal(projectFile);
+            if (!previousExamples.equals(ProjectFiles.readText(projectFile.resolveSibling("railix.examples.json"))))
+                return json(409, RailixValue.object(Map.of("message", RailixValue.string("Examples changed outside Creator. Reload before editing."))));
+            final Map<String, String> planned = new LinkedHashMap<>(Map.of("project", candidateSource, "creator", metadata.source()));
+            if (historical != null) planned.put("examples", ProjectFiles.restoreExpectations(
+                    ProjectFiles.split(candidateSource, previousExamples).examples(),
+                    undo ? historical.expectationsBack() : historical.expectationsForward()));
+            ProjectFiles.begin(projectFile, planned);
             synchronized (applicationLock) {
                 visibleApplication = applicationSnapshotLocked();
                 visibleEdit = new CreatorChanges.Edit(project, previousCreator, "");
@@ -2281,6 +2578,18 @@ public final class CreatorServer implements AutoCloseable {
                 } else accepted = json(200, RailixValue.object(Map.of()));
                 Response response = accepted;
                 if (accepted.status() == 200 && !previousCreator.equals(metadata.value())) response = saveCreator(metadata.source(), false);
+                if (response.status() == 200 && historical != null) {
+                    final Path examples = projectFile.resolveSibling("railix.examples.json");
+                    try {
+                        final String previous = ProjectFiles.readText(examples);
+                        final String restored = ProjectFiles.restoreExpectations(previous,
+                                undo ? historical.expectationsBack() : historical.expectationsForward());
+                        if (!previous.equals(restored)) persist(examples, restored);
+                    } catch (final IOException failure) {
+                        response = json(500, RailixValue.object(Map.of("status", RailixValue.string("failed"),
+                                "message", RailixValue.string("Example expectations could not be restored."))));
+                    }
+                }
                 if (response.status() != 200) {
                     if (!source.equals(previousSource)) {
                         final var retained = ProjectCompiler.compileApplication(previousSource, catalog);
@@ -2290,7 +2599,7 @@ public final class CreatorServer implements AutoCloseable {
                             if (accept(previous, next, false).status() != 200) return unavailable("editor-recovery");
                         }
                     }
-                    final List<String> preserved = recoverEditor(projectFile, Map.of(
+                    final List<String> preserved = ProjectFiles.recover(projectFile, Map.of(
                             "project", candidateSource, "creator", metadata.source()));
                     synchronized (applicationLock) { creatorValue = previousCreator; }
                     final var parsed = (RailixJson.Parsed) RailixJson.parse(new String(response.body(), StandardCharsets.UTF_8));
@@ -2308,13 +2617,12 @@ public final class CreatorServer implements AutoCloseable {
                     if (undo) { editorUndo.removeLast(); editorRedo.addLast(historical); }
                     else if (redo) { editorRedo.removeLast(); editorUndo.addLast(historical); }
                     else if (functional || !previousCreator.equals(creatorValue)) {
-                        editorRedo.clear();
-                        editorUndo.addLast(new EditorHistory(CreatorChanges.delta(project, change.project()),
-                                CreatorChanges.delta(change.project(), project), CreatorChanges.delta(previousCreator, creatorValue),
-                                CreatorChanges.delta(creatorValue, previousCreator), change.selection()));
-                        long bytes = 0;
-                        for (final EditorHistory entry : editorUndo) bytes += entry.bytes();
-                        while (editorUndo.size() > 1 && bytes > MAX_SCENE_BYTES) bytes -= editorUndo.removeFirst().bytes();
+                        final var acceptedProject = (RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(source)).value();
+                        final var nextExpectations = ProjectFiles.expectations(ProjectFiles.readText(projectFile.resolveSibling("railix.examples.json")));
+                        recordHistory(new EditorHistory(CreatorChanges.delta(project, acceptedProject),
+                                CreatorChanges.delta(acceptedProject, project), CreatorChanges.delta(previousCreator, creatorValue),
+                                CreatorChanges.delta(creatorValue, previousCreator), CreatorChanges.diff(previousExpectations, nextExpectations),
+                                CreatorChanges.diff(nextExpectations, previousExpectations), change.selection()));
                     }
                     historyProjectRevision = sourceRevision;
                     historyCreatorRevision = creatorRevision;
@@ -2333,45 +2641,25 @@ public final class CreatorServer implements AutoCloseable {
         return ((RailixValue.NumberValue) request.values().get(key)).value().compareTo(java.math.BigDecimal.valueOf(expected)) == 0;
     }
 
-    private static Path editorJournal(final Path project) { return project.getParent().resolve(".railix/run/editor-transaction.json"); }
-
-    private static List<String> recoverEditor(final Path project, final Map<String, String> candidates) throws IOException {
-        final Path journal = editorJournal(project);
-        if (!Files.exists(journal)) return List.of();
-        final var parsed = RailixJson.parse(Files.readString(journal));
-        if (!(parsed instanceof RailixJson.Parsed valid) || !(valid.value() instanceof RailixValue.ObjectValue backup)
-                || !backup.values().keySet().equals(Set.of("project", "creator"))
-                || !(backup.values().get("project") instanceof RailixValue.StringValue original)
-                || !(backup.values().get("creator") instanceof RailixValue.StringValue metadata))
-            throw new IOException("The interrupted editor transaction is invalid. Preserve " + journal + " for recovery.");
-        final List<String> preserved = new ArrayList<>();
-        for (final String key : List.of("project", "creator")) {
-            final Path target = key.equals("project") ? project : project.resolveSibling("railix.creator.json");
-            final String previous = key.equals("project") ? original.value() : metadata.value();
-            if (candidates.isEmpty()) {
-                persist(target, previous);
-                continue;
-            }
-            final String current;
-            try {
-                current = Files.readString(target);
-            } catch (final NoSuchFileException absent) {
-                preserved.add(target.getFileName().toString());
-                continue;
-            }
-            if (current.equals(candidates.get(key))) persist(target, previous);
-            else if (!current.equals(previous)) preserved.add(target.getFileName().toString());
-        }
-        Files.delete(journal);
-        return List.copyOf(preserved);
+    private void recordHistory(final EditorHistory entry) {
+        editorRedo.clear();
+        editorUndo.addLast(entry);
+        long bytes = 0;
+        for (final EditorHistory retained : editorUndo) bytes += retained.bytes();
+        while (editorUndo.size() > 1 && bytes > MAX_SCENE_BYTES) bytes -= editorUndo.removeFirst().bytes();
+        historyProjectRevision = sourceRevision;
+        historyCreatorRevision = creatorRevision;
     }
 
     private record EditorHistory(CreatorChanges.Delta projectForward, CreatorChanges.Delta projectBack,
-                                 CreatorChanges.Delta creatorForward, CreatorChanges.Delta creatorBack, String selection) {
+                                 CreatorChanges.Delta creatorForward, CreatorChanges.Delta creatorBack,
+                                 RailixValue.ObjectValue expectationsForward, RailixValue.ObjectValue expectationsBack, String selection) {
         private long bytes() {
             return List.of(projectForward, projectBack, creatorForward, creatorBack).stream()
                     .mapToLong(delta -> RailixJson.write(delta.changes()).getBytes(StandardCharsets.UTF_8).length
-                            + delta.positions().values().stream().mapToLong(Map::size).sum() * 160).sum();
+                            + delta.positions().values().stream().mapToLong(Map::size).sum() * 160).sum()
+                    + RailixJson.write(expectationsForward).getBytes(StandardCharsets.UTF_8).length
+                    + RailixJson.write(expectationsBack).getBytes(StandardCharsets.UTF_8).length;
         }
     }
 
@@ -2397,7 +2685,7 @@ public final class CreatorServer implements AutoCloseable {
             )), application()));
         }
         synchronized (buildLock) {
-            return Files.exists(editorJournal(projectFile)) ? unavailable("editor-recovery-restart-required") : saveCreator(metadata, true);
+            return Files.exists(ProjectFiles.journal(projectFile)) ? unavailable("editor-recovery-restart-required") : saveCreator(metadata, true);
         }
     }
 
@@ -2407,7 +2695,7 @@ public final class CreatorServer implements AutoCloseable {
             return bodyResponse(body);
         }
         synchronized (buildLock) {
-            return Files.exists(editorJournal(projectFile)) ? unavailable("editor-recovery-restart-required") : edit(body.value(), project);
+            return Files.exists(ProjectFiles.journal(projectFile)) ? unavailable("editor-recovery-restart-required") : edit(body.value(), project);
         }
     }
 
@@ -2469,7 +2757,9 @@ public final class CreatorServer implements AutoCloseable {
                     ""
             )), application()));
         }
-        final CompileResult result = ProjectCompiler.compileApplication(edited, catalog);
+        final String inputs;
+        synchronized (applicationLock) { inputs = ProjectFiles.inputs(edited, source); }
+        final CompileResult result = ProjectCompiler.compileApplication(inputs, catalog);
         if (result instanceof CompileResult.Rejected rejected) {
             final var document = (RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(edited)).value();
             return rejectedEdit(document, rejected.diagnostics());
@@ -2507,6 +2797,9 @@ public final class CreatorServer implements AutoCloseable {
             if (!result.diagnostics().isEmpty()) {
                 return json(422, diagnostics(result.diagnostics(), applicationSnapshotLocked()));
             }
+            if (Files.exists(ProjectFiles.journal(projectFile)) && !ProjectFiles.matchesPlan(projectFile, "creator", ProjectFiles.readPlan(projectFile)))
+                return json(409, RailixValue.object(Map.of("status", RailixValue.string("edit-conflict"),
+                        "message", RailixValue.string("Creator metadata changed outside Creator and was preserved."))));
             try {
                 persist(creatorFile, result.source());
             } catch (final IOException exception) {
@@ -2525,12 +2818,18 @@ public final class CreatorServer implements AutoCloseable {
 
     private Response accept(final CompileResult.Compiled compiled, final long revision, final boolean fullDocument)
             throws IOException {
-        final String applicationKey = ApplicationBuilder.key(compiled);
+        final String applicationKey;
+        try {
+            applicationKey = ApplicationBuilder.key(compiled);
+        } catch (final ApplicationBuilder.GeneratedCompilationException exception) {
+            return json(422, diagnostics(List.of(Diagnostic.atPath(exception.code(), exception.getMessage(), "")), application()));
+        }
         synchronized (buildLock) {
             final String cleanupPhase = cleanupRetirement();
             long generation = -1;
             boolean reused = false;
             boolean pending = false;
+            boolean ownsJournal = false;
             try {
                 synchronized (applicationLock) {
                     if (!open.get() || revision != projectRevision) {
@@ -2539,12 +2838,25 @@ public final class CreatorServer implements AutoCloseable {
                     if (!cleanupPhase.isEmpty()) {
                         return cleanupPendingLocked();
                     }
+                    final ProjectFiles.Read files;
+                    try { files = ProjectFiles.read(projectFile); }
+                    catch (final IOException unreadable) {
+                        return json(409, RailixValue.object(Map.of("status", RailixValue.string("edit-conflict"),
+                                "message", RailixValue.string("Project files cannot be read. Restore them before editing."))));
+                    }
+                    if (files.examples().isEmpty() || !files.source().equals(source))
+                        return json(409, RailixValue.object(Map.of("status", RailixValue.string("edit-conflict"),
+                                "message", RailixValue.string("Project files changed outside Creator. Restart before editing."))));
+                    if (!Files.exists(ProjectFiles.journal(projectFile))) {
+                        ProjectFiles.begin(projectFile, Map.of("project", compiled.source()));
+                        ownsJournal = true;
+                    }
                     deploymentPending = true;
                     pending = true;
                     if (application.artifact().directory().getFileName().toString().equals(applicationKey)
-                            && application.running()) {
+                            && (application.running() || application instanceof LocalApplication.Prepared)) {
                         try {
-                            persist(projectFile, compiled.source());
+                            ProjectFiles.writeProject(projectFile, compiled.source());
                         } catch (final IOException exception) {
                             return json(500, RailixValue.object(Map.of(
                                     "status", RailixValue.string("failed"),
@@ -2560,11 +2872,25 @@ public final class CreatorServer implements AutoCloseable {
                         generation = nextGeneration++;
                     }
                 }
-                if (reused) {
-                    return json(200, projectPayload(fullDocument));
+                Response response = reused ? json(200, projectPayload(fullDocument))
+                        : buildAndAccept(compiled, revision, generation, fullDocument);
+                if (ownsJournal) {
+                    if (response.status() == 200) Files.delete(ProjectFiles.journal(projectFile));
+                    else {
+                        final var preserved = ProjectFiles.recover(projectFile, Map.of("project", compiled.source()));
+                        if (!preserved.isEmpty()) {
+                            final var parsed = (RailixJson.Parsed) RailixJson.parse(new String(response.body(), StandardCharsets.UTF_8));
+                            final var fields = new LinkedHashMap<>(((RailixValue.ObjectValue) parsed.value()).values());
+                            fields.put("status", RailixValue.string("conflict"));
+                            fields.put("message", RailixValue.string("Files changed outside Creator and were preserved: " + String.join(", ", preserved) + "."));
+                            response = json(409, RailixValue.object(fields));
+                        }
+                    }
                 }
-                return buildAndAccept(compiled, revision, generation, fullDocument);
+                return response;
             } finally {
+                if (ownsJournal && Files.exists(ProjectFiles.journal(projectFile)))
+                    ProjectFiles.recover(projectFile, Map.of("project", compiled.source()));
                 if (pending) {
                     synchronized (applicationLock) {
                         deploymentPending = false;
@@ -2602,7 +2928,7 @@ public final class CreatorServer implements AutoCloseable {
         }
         boolean launched = false;
         try (publication) {
-            final DevelopmentApplication previous;
+            final LocalApplication previous;
             final String previousSource;
             synchronized (applicationLock) {
                 if (!open.get() || revision != projectRevision) {
@@ -2628,14 +2954,18 @@ public final class CreatorServer implements AutoCloseable {
                     supersededBeforeStart = !open.get() || revision != projectRevision;
                 }
                 if (supersededBeforeStart) {
-                    return replacementFailure(recovery, 409, "A newer project revision replaced this build.");
+                    return replacementFailure(recovery, previous instanceof LocalApplication.Prepared, 409, "A newer project revision replaced this build.");
                 }
-                final DevelopmentApplication candidate;
+                LocalApplication candidate = null;
                 try {
                     launched = true;
-                    candidate = DevelopmentApplication.start(generation, publication);
+                    candidate = previous instanceof LocalApplication.Prepared
+                            ? new LocalApplication.Prepared(publication.artifact())
+                            : DevelopmentApplication.start(generation, publication);
+                    publication.close();
                 } catch (final IOException failure) {
-                    return replacementFailure(recovery, 503, "Generated application did not build and start.");
+                    if (candidate != null) discard(candidate);
+                    return replacementFailure(recovery, previous instanceof LocalApplication.Prepared, 503, "Generated application did not build and start.");
                 }
                 boolean superseded;
                 IOException persistenceFailure = null;
@@ -2645,7 +2975,9 @@ public final class CreatorServer implements AutoCloseable {
                     superseded = !open.get() || revision != projectRevision;
                     if (!superseded) {
                         try {
-                            persist(projectFile, compiled.source());
+                            if (!ProjectFiles.read(projectFile).source().equals(previousSource))
+                                throw new IOException("Project files changed outside Creator during replacement.");
+                            ProjectFiles.writeProject(projectFile, compiled.source());
                             persisted = true;
                         } catch (final IOException exception) {
                             persistenceFailure = exception;
@@ -2654,11 +2986,11 @@ public final class CreatorServer implements AutoCloseable {
                 }
                 if (persisted) {
                     try {
-                        candidate.activate();
+                        if (candidate instanceof DevelopmentApplication running) running.activate();
                     } catch (final IOException exception) {
                         activationFailure = exception;
                     }
-                    if (activationFailure == null && !candidate.running()) {
+                    if (activationFailure == null && candidate instanceof DevelopmentApplication && !candidate.running()) {
                         activationFailure = new IOException("Generated application stopped during activation.");
                     }
                 }
@@ -2677,22 +3009,10 @@ public final class CreatorServer implements AutoCloseable {
                 }
                 if (superseded || persistenceFailure != null || activationFailure != null) {
                     discard(candidate);
-                    if (persisted) {
-                        try {
-                            if (!Files.readString(projectFile).equals(compiled.source())) {
-                                return replacementFailure(recovery, 409,
-                                        "The project file changed outside Creator during replacement and was preserved.");
-                            }
-                            persist(projectFile, previousSource);
-                        } catch (final IOException failure) {
-                            return replacementFailure(recovery, 500,
-                                    "The previous project file could not be restored after replacement failed.");
-                        }
-                    }
-                    return replacementFailure(recovery, superseded ? 409 : persistenceFailure != null ? 500 : 503,
+                    return replacementFailure(recovery, previous instanceof LocalApplication.Prepared, superseded ? 409 : persistenceFailure != null ? 500 : 503,
                             superseded ? "A newer project revision replaced this build."
                                     : persistenceFailure != null ? "Project could not be persisted."
-                                    : "Generated application could not be activated.");
+                                    : activationFailure.getMessage() == null ? "Generated application could not be activated." : activationFailure.getMessage());
                 }
             }
         } finally {
@@ -2704,7 +3024,7 @@ public final class CreatorServer implements AutoCloseable {
         return json(200, projectPayload(fullDocument));
     }
 
-    private Response replacementFailure(final ApplicationBuilder.DevelopmentBuild retained, final int status,
+    private Response replacementFailure(final ApplicationBuilder.DevelopmentBuild retained, final boolean prepared, final int status,
                                         final String message) throws IOException {
         final String recovery;
         if (!cleanupRetirement().isEmpty()) {
@@ -2712,15 +3032,16 @@ public final class CreatorServer implements AutoCloseable {
         } else if (!open.get()) {
             recovery = "closed";
         } else {
-            DevelopmentApplication restarted = null;
+            LocalApplication restarted = null;
             String outcome = "failed";
             try {
-                restarted = DevelopmentApplication.start(nextGeneration++, retained);
-                restarted.activate();
+                restarted = prepared ? new LocalApplication.Prepared(retained.artifact())
+                        : DevelopmentApplication.start(nextGeneration++, retained);
+                if (restarted instanceof DevelopmentApplication running) running.activate();
                 synchronized (applicationLock) {
                     application = restarted;
                 }
-                outcome = "restarted";
+                outcome = prepared ? "ready" : "restarted";
             } catch (final IOException failure) {
                 if (restarted != null) {
                     discard(restarted);
@@ -2732,6 +3053,7 @@ public final class CreatorServer implements AutoCloseable {
                 "status", RailixValue.string(status == 409 ? "superseded" : "failed"),
                 "message", RailixValue.string(message + switch (recovery) {
                     case "restarted" -> " The previous application was restarted.";
+                    case "ready" -> " The previous build is ready to start locally.";
                     case "cleanup-pending" -> " Recovery is blocked until application cleanup succeeds.";
                     case "closed" -> " Creator is closing; the previous application was not restarted.";
                     default -> " The previous application could not be restarted; it is not running.";
@@ -2741,7 +3063,7 @@ public final class CreatorServer implements AutoCloseable {
         )));
     }
 
-    private void discard(final DevelopmentApplication candidate) {
+    private void discard(final LocalApplication candidate) {
         synchronized (applicationLock) {
             retirement = candidate;
             retirementDeletesArtifact = !candidate.artifact().directory()
@@ -2752,7 +3074,7 @@ public final class CreatorServer implements AutoCloseable {
     }
 
     private String cleanupRetirement() {
-        final DevelopmentApplication pending;
+        final LocalApplication pending;
         final boolean deleteArtifact;
         synchronized (applicationLock) {
             pending = retirement;
@@ -2783,7 +3105,7 @@ public final class CreatorServer implements AutoCloseable {
         return "";
     }
 
-    private String markRetirement(final DevelopmentApplication pending, final String phase) {
+    private String markRetirement(final LocalApplication pending, final String phase) {
         synchronized (applicationLock) {
             if (retirement == pending) {
                 retirementPhase = phase;
@@ -2820,9 +3142,9 @@ public final class CreatorServer implements AutoCloseable {
             return unavailable("saturated");
         }
         try {
-            final DevelopmentApplication deployed;
+            final LocalApplication deployed;
             synchronized (applicationLock) {
-                if (visibleEdit != null) return unavailable("application");
+                if (visibleEdit != null || !application.running()) return unavailable("not-running");
                 deployed = application;
             }
             final DevelopmentApplication.Response response = "/api/metrics/catalog".equals(exchange.getRequestURI().getPath())
@@ -2845,6 +3167,209 @@ public final class CreatorServer implements AutoCloseable {
                     "message", RailixValue.string(failure.getMessage())
             )));
         } finally {
+            forwarding.release();
+        }
+    }
+
+    private Response savedAssertions(final HttpExchange exchange, final String selection) throws IOException {
+        final String[] target = selection.split("/", -1);
+        if (target.length != 2 || !target[0].matches("[a-z][a-z0-9:-]{0,127}")
+                || !target[1].matches("[a-z][a-z0-9-]{0,63}"))
+            return json(404, RailixValue.object(Map.of("status", RailixValue.string("not-found"))));
+        final boolean save = "POST".equals(exchange.getRequestMethod());
+        if (!save && !"GET".equals(exchange.getRequestMethod())) return methodNotAllowed();
+        RailixValue.ObjectValue request = RailixValue.object(Map.of());
+        if (save) {
+            final BodyRead body = body(exchange, MAX_REQUEST_BYTES);
+            if (!body.diagnostics().isEmpty()) return bodyResponse(body);
+            final var parsed = RailixData.normalize(RailixData.Format.JSON, body.value());
+            if (!(parsed instanceof RailixData.Normalized valid) || !(valid.value() instanceof RailixValue.ObjectValue object)
+                    || !object.values().keySet().equals(Set.of("revision", "source_revision", "checks"))
+                    || !(object.values().get("revision") instanceof RailixValue.StringValue)
+                    || !(object.values().get("source_revision") instanceof RailixValue.NumberValue)
+                    || !(object.values().get("checks") instanceof RailixValue.ArrayValue checks))
+                return json(422, diagnostics(List.of(Diagnostic.atPath("ASSERTION_SAVE_INVALID",
+                        "Save needs the current revisions and field checks.", "")), application()));
+            if (!checks.values().isEmpty()) {
+                final var read = ExampleAssertions.parse(checks);
+                if (!read.diagnostics().isEmpty()) return json(422, diagnostics(read.diagnostics(), application()));
+            }
+            request = object;
+        }
+        synchronized (buildLock) {
+            if (Files.exists(ProjectFiles.journal(projectFile))) return unavailable("editor-recovery-restart-required");
+            final String project;
+            final RailixValue.ObjectValue metadata;
+            final long revision;
+            synchronized (applicationLock) {
+                if (!open.get() || deploymentPending || visibleEdit != null) return unavailable("application");
+                project = source; metadata = creatorValue; revision = sourceRevision;
+            }
+            final var documents = ProjectFiles.read(projectFile);
+            if (documents.examples().isEmpty() || !documents.source().equals(project))
+                return json(409, RailixValue.object(Map.of("status", RailixValue.string("edit-conflict"))));
+            final Path file = projectFile.resolveSibling("railix.examples.json");
+            final String previous = documents.examples();
+            if (save && (!RailixValue.string(contentRevision(previous)).equals(request.values().get("revision"))
+                    || ((RailixValue.NumberValue) request.values().get("source_revision")).value()
+                    .compareTo(java.math.BigDecimal.valueOf(revision)) != 0))
+                return json(409, RailixValue.object(Map.of("status", RailixValue.string("assertion-revision-conflict"))));
+            final boolean ordinary;
+            synchronized (sceneLock) {
+                if (scene == null || !scene.matches(project, metadata)) scene = new CreatorScene(project, metadata, catalog);
+                ordinary = scene.assertionNode(target[1]).isPresent();
+            }
+            if (!ordinary && save && !((RailixValue.ArrayValue) request.values().get("checks")).values().isEmpty())
+                return json(422, diagnostics(List.of(Diagnostic.atPath("ASSERTION_STEP_INVALID", "Select an ordinary Step.", "step")), application()));
+            final var root = (RailixValue.ObjectValue) ((RailixJson.Parsed) RailixJson.parse(previous)).value();
+            final var cases = (RailixValue.ArrayValue) root.values().get("examples");
+            final List<RailixValue> changed = new ArrayList<>();
+            RailixValue.ArrayValue selected = RailixValue.array(List.of());
+            boolean found = false;
+            for (final var item : cases.values()) {
+                final var example = (RailixValue.ObjectValue) item;
+                if (!RailixValue.string(target[0]).equals(example.values().get("id"))) { changed.add(item); continue; }
+                found = true;
+                final List<RailixValue> expectations = new ArrayList<>();
+                final var saved = example.values().getOrDefault("expectations", RailixValue.array(List.of()));
+                for (final var entry : ((RailixValue.ArrayValue) saved).values()) {
+                    final var expectation = (RailixValue.ObjectValue) entry;
+                    if (RailixValue.string(target[1]).equals(expectation.values().get("step")))
+                        selected = (RailixValue.ArrayValue) expectation.values().get("checks");
+                    else expectations.add(entry);
+                }
+                if (save) {
+                    selected = (RailixValue.ArrayValue) request.values().get("checks");
+                    if (!selected.values().isEmpty()) expectations.add(RailixValue.object(Map.of(
+                            "step", RailixValue.string(target[1]), "checks", selected)));
+                    final var fields = new LinkedHashMap<>(example.values());
+                    if (expectations.isEmpty()) fields.remove("expectations");
+                    else fields.put("expectations", RailixValue.array(expectations));
+                    changed.add(RailixValue.object(fields));
+                } else changed.add(example);
+            }
+            if (!found) return json(404, RailixValue.object(Map.of("status", RailixValue.string("not-found"))));
+            final var updated = CreatorChanges.with(root, "examples", RailixValue.array(changed));
+            final String next = save && !root.equals(updated) ? RailixJson.write(updated) : previous;
+            if (save && !previous.equals(next)) {
+                if (!previous.equals(ProjectFiles.readText(file)))
+                    return json(409, RailixValue.object(Map.of("status", RailixValue.string("assertion-revision-conflict"))));
+                persist(file, next);
+                synchronized (applicationLock) {
+                    if (historyProjectRevision != sourceRevision || historyCreatorRevision != creatorRevision) {
+                        editorUndo.clear(); editorRedo.clear();
+                    }
+                    final var empty = new CreatorChanges.Delta(RailixValue.object(Map.of()), Map.of());
+                    final var before = ProjectFiles.expectations(previous);
+                    final var after = ProjectFiles.expectations(next);
+                    recordHistory(new EditorHistory(empty, empty, empty, empty,
+                            CreatorChanges.diff(before, after), CreatorChanges.diff(after, before), target[1]));
+                }
+            }
+            return json(200, RailixValue.object(Map.of("revision", RailixValue.string(contentRevision(next)),
+                    "source_revision", RailixValue.number(revision), "example", RailixValue.string(target[0]),
+                    "step", RailixValue.string(target[1]), "checks", selected)));
+        }
+    }
+
+    private Response checkAssertions(final HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) return methodNotAllowed();
+        final BodyRead body = body(exchange, MAX_REQUEST_BYTES);
+        if (!body.diagnostics().isEmpty()) return bodyResponse(body);
+        final var parsed = RailixData.normalize(RailixData.Format.JSON, body.value());
+        if (!(parsed instanceof RailixData.Normalized normalized)
+                || !(normalized.value() instanceof RailixValue.ObjectValue request)
+                || !request.values().keySet().equals(Set.of("revision", "application_pid", "example", "step", "checks"))
+                || !(request.values().get("revision") instanceof RailixValue.NumberValue revision)
+                || !(request.values().get("application_pid") instanceof RailixValue.NumberValue pid)
+                || !(request.values().get("example") instanceof RailixValue.StringValue example)
+                || !example.value().matches("[a-z][a-z0-9:-]{0,127}")
+                || !(request.values().get("step") instanceof RailixValue.StringValue step))
+            return json(422, diagnostics(List.of(Diagnostic.atPath("ASSERTION_REQUEST_INVALID",
+                    "Select the current Example and Step before checking expectations.", "")), application()));
+        final var checks = ExampleAssertions.parse(request.values().get("checks"));
+        if (!checks.diagnostics().isEmpty()) return json(422, diagnostics(checks.diagnostics(), application()));
+        if (!forwarding.tryAcquire()) return unavailable("saturated");
+        if (!exampleResponses.tryAcquire()) {
+            forwarding.release();
+            return unavailable("saturated");
+        }
+        try {
+            final long deadline = System.nanoTime() + DevelopmentApplication.REQUEST_TIMEOUT.toNanos();
+            final LocalApplication deployed;
+            final String project;
+            final RailixValue.ObjectValue metadata;
+            final RailixValue.NumberValue applicationPid;
+            synchronized (applicationLock) {
+                if (!application.running()) return unavailable("not-running");
+                applicationPid = (RailixValue.NumberValue) application.snapshot().values().get("pid");
+                if (deploymentPending || visibleEdit != null || revision.value().compareTo(java.math.BigDecimal.valueOf(sourceRevision)) != 0
+                        || pid.value().compareTo(applicationPid.value()) != 0)
+                    return json(409, RailixValue.object(Map.of("status", RailixValue.string("assertion-revision-conflict"))));
+                deployed = application;
+                if (!sourceArtifactKey.equals(deployed.artifact().directory().getFileName().toString())) return unavailable("application");
+                project = source;
+                metadata = creatorValue;
+            }
+            final CreatorScene snapshot;
+            synchronized (sceneLock) {
+                if (scene == null || !scene.matches(project, metadata)) scene = new CreatorScene(project, metadata, catalog);
+                snapshot = scene;
+            }
+            final var index = snapshot.assertionNode(step.value());
+            if (index.isEmpty()) return json(422, diagnostics(List.of(Diagnostic.atPath(
+                    "ASSERTION_STEP_INVALID", "Select an ordinary Step in the current project.", "step")), application()));
+            final boolean reached;
+            {
+                final var response = deployed.examples(example.value() + "/view", deadline);
+                if (response == null || response.status() != 200) return unavailable("assertion-evidence");
+                final var document = RailixJson.parse(utf8(response.body()));
+                if (!(document instanceof RailixJson.Parsed valid) || !(valid.value() instanceof RailixValue.ObjectValue summary)
+                        || !applicationPid.equals(summary.values().get("application_pid"))
+                        || !(summary.values().get("nodes") instanceof RailixValue.ArrayValue nodes))
+                    return json(502, RailixValue.object(Map.of("status", RailixValue.string("invalid-assertion-evidence"))));
+                if (!RailixValue.bool(true).equals(summary.values().get("complete"))) return unavailable("assertion-evidence-incomplete");
+                reached = nodes.values().contains(RailixValue.number(index.getAsInt()));
+            }
+            final RailixValue.ObjectValue result;
+            if (!reached) result = RailixValue.object(Map.of("status", RailixValue.string("failed"),
+                    "code", RailixValue.string("ASSERTION_STEP_NOT_REACHED")));
+            else {
+                if (System.nanoTime() >= deadline) return unavailable("assertion-timeout");
+                final var response = deployed.examples(example.value() + "/steps/" + index.getAsInt(), deadline);
+                if (response == null || response.status() != 200) return unavailable("assertion-evidence");
+                final var document = RailixJson.parse(utf8(response.body()));
+                if (!(document instanceof RailixJson.Parsed valid) || !(valid.value() instanceof RailixValue.ObjectValue projection)
+                        || !applicationPid.equals(projection.values().get("application_pid"))
+                        || !step.equals(projection.values().get("id")))
+                    return json(502, RailixValue.object(Map.of("status", RailixValue.string("invalid-assertion-evidence"))));
+                if (!RailixValue.number(1).equals(projection.values().get("visits")))
+                    return json(409, RailixValue.object(Map.of("status", RailixValue.string("unavailable"),
+                            "code", RailixValue.string("ASSERTION_STEP_AMBIGUOUS"))));
+                if (!(RailixValue.string("succeeded").equals(projection.values().get("status"))
+                        || RailixValue.string("continued").equals(projection.values().get("status")))
+                        || !(projection.values().get("context") instanceof RailixValue.ObjectValue context))
+                    return unavailable("assertion-output");
+                result = ExampleAssertions.evaluate(checks.checks(), context, deadline);
+            }
+            synchronized (applicationLock) {
+                if (application != deployed || deploymentPending || visibleEdit != null || !source.equals(project)
+                        || revision.value().compareTo(java.math.BigDecimal.valueOf(sourceRevision)) != 0)
+                    return json(409, RailixValue.object(Map.of("status", RailixValue.string("assertion-revision-conflict"))));
+            }
+            final Map<String, RailixValue> fields = new LinkedHashMap<>(result.values());
+            for (final String name : List.of("revision", "application_pid", "example", "step")) fields.put(name, request.values().get(name));
+            try {
+                return RailixJson.write(RailixValue.object(fields), MAX_REQUEST_BYTES)
+                        .map(value -> new Response(200, "application/json; charset=utf-8", value.getBytes(StandardCharsets.UTF_8)))
+                        .orElseGet(() -> json(413, RailixValue.object(Map.of("status", RailixValue.string("assertion-result-too-large")))));
+            } catch (final IllegalArgumentException unrepresentable) {
+                return json(413, RailixValue.object(Map.of("status", RailixValue.string("assertion-result-unrepresentable"))));
+            }
+        } catch (final IOException invalid) {
+            return json(502, RailixValue.object(Map.of("status", RailixValue.string("invalid-assertion-evidence"))));
+        } finally {
+            exampleResponses.release();
             forwarding.release();
         }
     }
@@ -2875,11 +3400,11 @@ public final class CreatorServer implements AutoCloseable {
         }
         try {
             final DevelopmentApplication.ObservationResponse response;
-            final DevelopmentApplication deployed;
+            final LocalApplication deployed;
             final CreatorScene snapshot;
             try {
                 synchronized (applicationLock) {
-                    if (deploymentPending) {
+                    if (deploymentPending || !application.running()) {
                         return unavailable("application");
                     }
                     deployed = application;
@@ -3009,6 +3534,11 @@ public final class CreatorServer implements AutoCloseable {
             payload.put("project", index.project());
             payload.put("creator", visibleEdit == null ? creatorValue : visibleEdit.creator());
         }
+        if (live != null) {
+            payload.put("changes", live.comparison(source));
+            payload.put("live_application", live.snapshot());
+            payload.put("comparison_instance",RailixValue.string(live.connection.instance()));
+        }
         payload.put("history", RailixValue.object(Map.of("undo", RailixValue.bool(!editorUndo.isEmpty()
                         && historyProjectRevision == sourceRevision && historyCreatorRevision == creatorRevision),
                 "redo", RailixValue.bool(!editorRedo.isEmpty()
@@ -3023,7 +3553,9 @@ public final class CreatorServer implements AutoCloseable {
         return editor;
     }
 
-    private static String defaultProject(final Path project) {
+    private static String defaultProject(final Path project, final StepCatalog catalog) throws IOException {
+        final var app = catalog.definitions().stream().filter(definition -> definition.kind() == StepDefinition.Kind.APP)
+                .findFirst().orElseThrow(() -> new IOException("Default providers contain no App definition."));
         final int combinations = PROJECT_PREFIXES.length * PROJECT_SUBJECTS.length * PROJECT_OBJECTS.length;
         int index = Math.floorMod(project.toString().hashCode(), combinations);
         final String prefix = PROJECT_PREFIXES[index % PROJECT_PREFIXES.length];
@@ -3033,9 +3565,9 @@ public final class CreatorServer implements AutoCloseable {
         final String name = prefix + "-" + subject + "-" + PROJECT_OBJECTS[index];
         return """
                 {"format":1,"id":"%s","nodes":[
-                  {"id":"app","use":"railix.app","inputs":{}}
+                  {"id":"app","use":%s,"inputs":{}}
                 ],"links":[]}
-                """.formatted(name);
+                """.formatted(name, RailixJson.write(RailixValue.string(app.id())));
     }
 
     private RailixValue.ObjectValue application() {
@@ -3070,7 +3602,9 @@ public final class CreatorServer implements AutoCloseable {
     }
 
     private static RailixValue definition(final StepDefinition definition) {
-        return StepContractJson.value(definition);
+        final Map<String, RailixValue> value = new LinkedHashMap<>(StepContractJson.value(definition).values());
+        value.put("native", RailixValue.bool(definition.nativeStep()));
+        return RailixValue.object(value);
     }
 
     private static Response resource(final HttpExchange exchange, final String path) throws IOException {
@@ -3210,6 +3744,8 @@ public final class CreatorServer implements AutoCloseable {
     private boolean isMutation(final HttpExchange exchange, final String path) {
         return ("POST".equals(exchange.getRequestMethod()) || "PATCH".equals(exchange.getRequestMethod()))
                 && ("/api/project".equals(path)
+                || "/api/live".equals(path)
+                || "/api/application".equals(path)
                 || "/api/editor".equals(path)
                 || "/api/creator".equals(path)
                 || "/api/themes".equals(path)
@@ -3356,37 +3892,12 @@ public final class CreatorServer implements AutoCloseable {
         }
     }
 
-    private static String readProject(final Path project) throws IOException {
-        try {
-            return Files.readString(project, StandardCharsets.UTF_8);
-        } catch (final CharacterCodingException exception) {
-            throw new IOException("Creator project is not valid UTF-8.", exception);
-        }
-    }
-
     private static String utf8(final byte[] source) throws CharacterCodingException {
         return StandardCharsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(source))
                 .toString();
-    }
-
-    private static void persist(final Path project, final String source) throws IOException {
-        final Path parent = project.getParent();
-        Files.createDirectories(parent);
-        final Path temporary = Files.createTempFile(parent, "." + project.getFileName(), ".tmp");
-        try {
-            Files.writeString(temporary, source, StandardCharsets.UTF_8);
-            Files.move(
-                    temporary,
-                    project,
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
-        } finally {
-            Files.deleteIfExists(temporary);
-        }
     }
 
     private record BodyRead(

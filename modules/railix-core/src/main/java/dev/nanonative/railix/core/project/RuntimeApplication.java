@@ -9,7 +9,7 @@ import java.util.List;
 
 /**
  * Runtime boundary implemented by every generated Railix application.
- * Implementations execute one complete production flow and retain no request state after completion.
+ * Implementations execute one complete invocation and retain no request state after completion.
  */
 public interface RuntimeApplication {
     /** Default application-wide grace period, also honored by the owning command launcher. */

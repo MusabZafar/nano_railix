@@ -25,6 +25,7 @@ public final class ProductionRuntimeConcurrencySteps {
     public static final class SocketSource {
         public static StepResult pre(final StepInput configuration, final StepInput context) {
             final StepInput.Source source = context.source();
+            final var activePort = context.gauge("active_port");
             final Path marker = Path.of(configuration.string("marker"));
             try {
                 final var server = new java.net.ServerSocket();
@@ -46,6 +47,7 @@ public final class ProductionRuntimeConcurrencySteps {
                             throw new IllegalStateException("Requested source activation failure.");
                         }
                         server.bind(new java.net.InetSocketAddress("127.0.0.1", 0));
+                        activePort.set(server.getLocalPort());
                         Files.writeString(marker, Integer.toString(server.getLocalPort()));
                     } catch (final IOException failure) {
                         throw new java.io.UncheckedIOException(failure);
@@ -62,6 +64,17 @@ public final class ProductionRuntimeConcurrencySteps {
                         } catch (final IOException failure) {
                             if (!server.isClosed()) throw new java.io.UncheckedIOException(failure);
                         }
+                    });
+                    if (configuration.string("mode").equals("late-complete")) Thread.startVirtualThread(() -> {
+                        try {
+                            while (!Files.exists(marker.resolveSibling("complete-after-stop"))) Thread.sleep(5);
+                            String result;
+                            try { source.complete(2); result = "completed"; }
+                            catch (final IllegalStateException failure) { result = failure.getClass().getSimpleName(); }
+                            Files.writeString(marker.resolveSibling("completion-result"), result);
+                        } catch (final InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                        } catch (final IOException failure) { throw new java.io.UncheckedIOException(failure); }
                     });
                 });
                 return StepResult.outcome(context.primaryOutcome());

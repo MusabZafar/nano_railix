@@ -106,6 +106,7 @@ final class RailixCreatorProjectImportBrowserIT extends RailixCreatorBrowserSupp
         page.locator("#project-import-source").press("Tab");
         com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#project-import-source"))
                 .hasAttribute("aria-invalid", "true");
+        assertThat(page.locator("#project-import-file").getAttribute("aria-invalid")).isNull();
         page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Close import").setExact(true)).click();
         selectWorldNode("one");
@@ -172,7 +173,9 @@ final class RailixCreatorProjectImportBrowserIT extends RailixCreatorBrowserSupp
             assertThat(page.locator("#editor-undo").isDisabled()).isTrue();
             page.keyboard().press("ControlOrMeta+z");
             assertThat(edits).isEmpty();
-            pending.removeFirst().resume();
+            final var response = page.waitForResponse(candidate -> candidate.url().endsWith("/api/project")
+                    && candidate.request().method().equals("POST"), () -> pending.removeFirst().resume());
+            assertThat(response.status()).isEqualTo(200);
             com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#project-import-panel")).isHidden();
             assertThat(Files.readString(directory.resolve("project.json"))).contains("uploaded-project");
             assertThat(pageErrors).isEmpty();
@@ -245,6 +248,7 @@ final class RailixCreatorProjectImportBrowserIT extends RailixCreatorBrowserSupp
         page.locator("#project-import-file").setInputFiles(file);
         com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#project-import-file"))
                 .hasAttribute("aria-invalid", "true");
+        assertThat(page.locator("#project-import-source").getAttribute("aria-invalid")).isNull();
         assertThat(page.locator("#project-import-submit").isDisabled()).isTrue();
         assertThat(page.locator("#project-import-preview").isHidden()).isTrue();
         assertThat(Files.readString(directory.resolve("project.json"))).isEqualTo(before);
@@ -285,6 +289,9 @@ final class RailixCreatorProjectImportBrowserIT extends RailixCreatorBrowserSupp
     }
 
     private void openImport() {
+        if (page.viewportSize().width <= 650 && page.locator("#close-inspector").isVisible()) {
+            page.locator("#close-inspector").click();
+        }
         page.locator("#project-menu").click();
         page.locator("#open-project-import").click();
         com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#project-import-panel")).isVisible();

@@ -70,6 +70,59 @@ final class ConvergingFlowE2eTest extends CreatorServerE2eSupport {
     }
 
     @Test
+    void aRejectedArrivalDoesNotFailAnotherArrivalAtTheSameProductionStep() throws Exception {
+        final String source = project().replace(
+                "[\"context\",\"payload\",\"name\"]",
+                "[\"context\",\"payload\",\"request\",\"name\"]"
+        );
+        final var project = directory.resolve("railix.project.json");
+        Files.writeString(project, source);
+        final var compiled = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
+        assertThat(compiled).isInstanceOf(CompileResult.Compiled.class);
+        final var jar = ApplicationBuilder.buildProduction(project, (CompileResult.Compiled) compiled).jar();
+        final String probeClass = "dev.nanonative.railix.core.project.IndependentArrivalProbe";
+        final var probe = CreatorFirstExecutionArtifacts.compileProbe(directory.resolve("probe"), jar,
+                probeClass, """
+                package dev.nanonative.railix.core.project;
+                import dev.nanonative.railix.core.runtime.RunResult;
+                import dev.nanonative.railix.core.value.RailixValue;
+                import java.util.*;
+                import java.util.concurrent.*;
+                public final class IndependentArrivalProbe {
+                    public static void main(String[] arguments) throws Exception {
+                        final RuntimeApplication application = RailixApplication.runtime();
+                        try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+                            for (int round = 0; round < 8; round++) {
+                                final var invalid = workers.submit(() -> application.runSource("application.http",
+                                        Map.of("request", RailixValue.object(Map.of("name", RailixValue.nullValue())))));
+                                final var valid = workers.submit(() -> application.runSource("application.http",
+                                        Map.of("request", RailixValue.object(Map.of("name", RailixValue.string("ALPHA"))))));
+                                final var rejected = invalid.get(10, TimeUnit.SECONDS);
+                                final var succeeded = valid.get(10, TimeUnit.SECONDS);
+                                if (!(rejected.result() instanceof RunResult.Rejected failure)
+                                        || failure.diagnostics().stream().noneMatch(diagnostic ->
+                                                diagnostic.code().equals("RUN_STEP_RECEIVE_INCOMPATIBLE"))) {
+                                    throw new AssertionError("Invalid arrival lost its own field diagnostic: " + rejected);
+                                }
+                                if (!(succeeded.result() instanceof RunResult.Succeeded success)
+                                        || !RailixValue.string("alpha").equals(success.context().values().get("result"))
+                                        || !RailixValue.number(200).equals(succeeded.responses().get("status"))) {
+                                    throw new AssertionError("Rejected arrival affected independent successful arrival: " + succeeded);
+                                }
+                            }
+                        } finally {
+                            application.stop();
+                        }
+                        System.out.print("INDEPENDENT|8 rejected|8 succeeded");
+                    }
+                }
+                """);
+        final var observed = CreatorFirstExecutionArtifacts.runProbe(probe, jar, probeClass);
+        assertThat(observed.exitCode()).as(observed.output()).isZero();
+        assertThat(observed.output()).isEqualTo("INDEPENDENT|8 rejected|8 succeeded");
+    }
+
+    @Test
     void differentSourcesKeepTheirContextsThroughOneContinuation() throws Exception {
         try (var application = GeneratedApplicationFixture.start(directory, project())) {
             for (final String trigger : List.of("command", "http", "command")) {

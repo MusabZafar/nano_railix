@@ -1,5 +1,6 @@
 package dev.nanonative.railix.core.step;
 
+import dev.nanonative.railix.core.runtime.MetricDefinition;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueRefinement;
@@ -18,7 +19,7 @@ public final class StepContractJson {
     private static final Set<String> CONTRACT_FIELDS = Set.of(
             "display_name", "example_target", "examples", "id", "inputs", "kind",
             "maximum_instances", "outcomes", "primary_outcome", "receives", "results",
-            "returns", "search_terms", "source", "version", "jdk_modules"
+            "returns", "search_terms", "source", "version", "jdk_modules", "continuations", "metrics", "dynamic_classes"
     );
 
     private StepContractJson() {
@@ -36,8 +37,17 @@ public final class StepContractJson {
                 .ifPresent(address -> value.put("jdk_modules", strings(address.jdkModules())));
         value.put("display_name", RailixValue.string(definition.displayName()));
         value.put("search_terms", strings(definition.searchTerms()));
+        if (!definition.dynamicClasses().isEmpty()) value.put("dynamic_classes", strings(definition.dynamicClasses()));
+        if (!definition.metrics().isEmpty()) value.put("metrics", RailixValue.array(definition.metrics().stream()
+                .<RailixValue>map(metric -> RailixValue.object(Map.of(
+                        "name", RailixValue.string(metric.name()), "label", RailixValue.string(metric.label()),
+                        "unit", RailixValue.string(metric.unit()),
+                        "kind", RailixValue.string(metric.kind().name().toLowerCase(Locale.ROOT)),
+                        "aggregation", RailixValue.string(metric.aggregation().name().toLowerCase(Locale.ROOT)))))
+                .toList()));
         value.put("kind", RailixValue.string(definition.kind().name().toLowerCase(Locale.ROOT)));
         value.put("primary_outcome", RailixValue.string(definition.primaryOutcome()));
+        if (definition.continuations()) value.put("continuations", RailixValue.bool(true));
         value.put("maximum_instances", RailixValue.number(definition.maximumInstances()));
         definition.source().ifPresent(source -> value.put("source", RailixValue.object(Map.of(
                 "name", RailixValue.string(source.name()),
@@ -72,7 +82,7 @@ public final class StepContractJson {
     /**
      * Generates the canonical bundle manifest from real Step definitions.
      *
-     * @param definitions executable definitions owned by one root bundle
+     * @param definitions definitions owned by one root bundle, including structural App metadata
      * @return canonical {@code META-INF/railix/steps.json} content
      */
     public static String writeManifest(final List<StepDefinition> definitions) {
@@ -114,19 +124,19 @@ public final class StepContractJson {
         final Map<String, RailixValue> manifest = new LinkedHashMap<>(Map.of(
                 "format", RailixValue.number(1),
                 "steps", RailixValue.array(sorted.stream().<RailixValue>map(definition -> {
-                    final StepDefinition.ImplementationAddress implementation =
-                            definition.implementationAddress().orElseThrow(() ->
-                            new IllegalArgumentException("Bundle Step must declare an implementation: "
-                                    + definition.id() + ".")
-                    );
+                    if (definition.kind() != StepDefinition.Kind.APP && definition.implementationAddress().isEmpty())
+                        throw new IllegalArgumentException("Bundle Step must declare an implementation: " + definition.id() + ".");
                     final RailixValue.ObjectValue contract = value(definition);
                     final String digest = sha256(RailixJson.write(contract).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                    return RailixValue.object(Map.of(
+                    final Map<String, RailixValue> item = new LinkedHashMap<>(Map.of(
                             "contract", contract,
-                            "contract_digest", RailixValue.string("sha256:" + digest),
-                            "implementation", RailixValue.string(implementation.sourceName()),
-                            "implementation_entry", RailixValue.string(implementation.classEntry())
+                            "contract_digest", RailixValue.string("sha256:" + digest)
                     ));
+                    definition.implementationAddress().ifPresent(implementation -> {
+                        item.put("implementation", RailixValue.string(implementation.sourceName()));
+                        item.put("implementation_entry", RailixValue.string(implementation.classEntry()));
+                    });
+                    return RailixValue.object(item);
                 }).toList())
         ));
         providers.forEach(provider -> manifest.put("definitions", RailixValue.object(Map.of(
@@ -136,7 +146,7 @@ public final class StepContractJson {
         return RailixJson.write(RailixValue.object(manifest));
     }
 
-    /** Reconstructs one external executable definition without loading its implementation class. */
+    /** Reconstructs one external definition without loading its implementation class. */
     static StepDefinition read(
             final RailixValue.ObjectValue contract,
             final String implementation,
@@ -155,8 +165,25 @@ public final class StepContractJson {
                 .kind(kind)
                 .displayName(text(contract, "display_name", "contract"))
                 .maximumInstances(integer(contract, "maximum_instances", "contract"));
+        if (optionalBoolean(contract, "continuations", "contract").orElse(false)) builder.withContinuations();
         final List<String> terms = strings(contract, "search_terms", "contract");
         builder.searchTerms(terms.toArray(String[]::new));
+        if (contract.values().containsKey("dynamic_classes")) {
+            final List<String> names = strings(contract, "dynamic_classes", "contract");
+            if (names.isEmpty() || !names.equals(names.stream().sorted().distinct().toList()))
+                throw invalid("contract.dynamic_classes", "must contain sorted unique class names");
+            builder.dynamicClassNames(names);
+        }
+        if (contract.values().containsKey("metrics")) {
+            for (final RailixValue value : array(contract, "metrics", "contract").values()) {
+                final var item = object(value, "contract.metrics[]");
+                object(item, Set.of("name", "label", "unit", "kind", "aggregation"), "contract.metrics[]");
+                builder.metric(new MetricDefinition(text(item, "name", "contract.metrics[]"),
+                        text(item, "label", "contract.metrics[]"), text(item, "unit", "contract.metrics[]"),
+                        enumeration(MetricDefinition.Kind.class, text(item, "kind", "contract.metrics[]"), "contract.metrics[].kind"),
+                        enumeration(MetricDefinition.Aggregation.class, text(item, "aggregation", "contract.metrics[]"), "contract.metrics[].aggregation")));
+            }
+        }
         for (final StepDefinition.Port port : ports(contract, "receives", "contract")) {
             builder.receive(port.name(), port.shape(), port.refinement());
         }
@@ -293,6 +320,10 @@ public final class StepContractJson {
             case StepDefinition.MatcherGroupsInput groups -> {
                 value.put("type", RailixValue.string("matcher_groups"));
                 value.put("options", options(groups.options()));
+                if (groups.authoredOutcomes()) {
+                    value.put("authored_outcomes", RailixValue.bool(true));
+                    value.put("route_inputs", fields(groups.routeInputs()));
+                }
             }
             case StepDefinition.StepsInput steps -> {
                 value.put("type", RailixValue.string("steps"));
@@ -426,8 +457,11 @@ public final class StepContractJson {
                 );
             }
             case "matcher_groups" -> {
-                object(value, Set.of("name", "options", "type"), path, Set.of("name"));
-                yield new StepDefinition.MatcherGroupsInput(options(value, path));
+                object(value, Set.of("name", "options", "type", "authored_outcomes", "route_inputs"),
+                        path, Set.of("name", "authored_outcomes", "route_inputs"));
+                yield new StepDefinition.MatcherGroupsInput(options(value, path),
+                        optionalBoolean(value, "authored_outcomes", path).orElse(false),
+                        value.values().containsKey("route_inputs") ? fields(value, "route_inputs", path) : List.of());
             }
             case "steps" -> {
                 object(value, Set.of("name", "propagates_outcomes", "type", "value_source"),
@@ -635,7 +669,7 @@ public final class StepContractJson {
             final Set<String> fields,
             final String path
     ) {
-        object(value, fields, path, Set.of("example_target", "source", "jdk_modules"));
+        object(value, fields, path, Set.of("example_target", "source", "jdk_modules", "continuations", "metrics", "dynamic_classes"));
     }
 
     private static void object(

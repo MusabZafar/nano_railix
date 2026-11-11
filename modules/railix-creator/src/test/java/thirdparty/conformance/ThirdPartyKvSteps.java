@@ -35,4 +35,3 @@ public final class ThirdPartyKvSteps {
                 .implementation(ThirdPartyKvStep.class));
     }
 }
-
