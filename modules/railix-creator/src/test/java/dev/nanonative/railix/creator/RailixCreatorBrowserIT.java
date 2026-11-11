@@ -5019,18 +5019,28 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
                 .isEqualTo(1);
 
         selectTrigger();
-        exampleContext().fill("{\"payload\":{\"value\":7}}");
-        exampleContext().press("Tab");
+        final var observations = new ArrayList<Route>();
+        page.route("**/api/examples/**", observations::add);
+        try {
+            final var saved = page.waitForResponse(response -> response.url().endsWith("/api/editor")
+                    && response.request().method().equals("POST"), () -> {
+                exampleContext().fill("{\"payload\":{\"value\":7}}");
+                exampleContext().press("Tab");
+            });
+            assertThat(saved.status()).isEqualTo(200);
+            page.locator("#close-inspector").click();
+            page.locator(".step-node").click();
+            visibleControl("#steps-search");
+            page.waitForCondition(() -> !observations.isEmpty());
 
-        assertThat(page.locator("#build-state").textContent()).isEqualTo("Building");
-        page.locator("#close-inspector").click();
-        page.locator(".step-node").click();
-        visibleControl("#steps-search");
-
-        assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
-                .isZero();
-        assertThat(page.locator("#steps-options [data-add-nested='number.floor']").count())
-                .isZero();
+            assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
+                    .isZero();
+            assertThat(page.locator("#steps-options [data-add-nested='number.floor']").count())
+                    .isZero();
+        } finally {
+            page.unroute("**/api/examples/**");
+            observations.forEach(Route::resume);
+        }
 
         waitForText("#build-state", "Built");
         visibleControl("#steps-search");
