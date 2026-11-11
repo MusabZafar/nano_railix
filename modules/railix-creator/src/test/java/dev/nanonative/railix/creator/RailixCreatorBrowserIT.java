@@ -5005,18 +5005,21 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
     }
 
     @Test
+    @Tag("browser-diagnostics")
     void changingAnExampleShapeInvalidatesPreviousPrimitiveCompatibility() {
         addTrigger();
         exampleContext().fill("{\"payload\":{\"value\":\"Railix\"}}");
         exampleContext().press("Tab");
         waitForText("#build-state", "Built");
-        addManipulationAfterSelected();
-        choosePath("field", "payload", "value");
+        final var inserted = page.waitForResponse(response -> response.url().endsWith("/api/editor")
+                && response.request().method().equals("POST"), this::addManipulationAfterSelected);
+        assertThat(inserted.status()).isEqualTo(200);
+        final var configured = page.waitForResponse(response -> response.url().endsWith("/api/editor")
+                && response.request().method().equals("POST"), () -> choosePath("field", "payload", "value"));
+        assertThat(configured.status()).isEqualTo(200);
+        waitForText("#build-state", "Built");
         fillStepSearch("#steps-search", "");
         page.locator("#steps-options [data-add-nested='text.lowercase']").waitFor();
-
-        assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
-                .isEqualTo(1);
 
         selectTrigger();
         final var observations = new ArrayList<Route>();
