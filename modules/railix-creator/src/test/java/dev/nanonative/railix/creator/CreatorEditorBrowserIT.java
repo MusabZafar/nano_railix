@@ -3170,14 +3170,19 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    @Tag("browser-diagnostics")
+    @Tag("responsive")
     void typingAndEscapeInAnInputDoNotRunWorldShortcuts() {
         openProject(choiceProject());
         selectWorldNode("choice");
         final var field=page.locator("#inspector-content [data-input-json]:not([type=checkbox])").first();
         field.fill("\"ef\"");
+        // Settle the Inspector resize before taking the camera baseline.
+        awaitScene();
         final String camera=(String)page.evaluate("() => state.world.query");
         field.press("ArrowLeft");
         field.press("Escape");
+        awaitScene();
         assertThat(field.inputValue()).isEqualTo("\"ef\"");
         assertThat(page.locator("#inspector").isVisible()).isTrue();
         assertThat(page.evaluate("() => state.world.query")).isEqualTo(camera);

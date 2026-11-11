@@ -117,6 +117,39 @@ final class ThirdPartyStepBundleE2eTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"header", "class identity", "method body"})
+    void malformedRuntimeClassRejectsTheEditWithoutLosingTheRunningApplication(final String malformed) throws Exception {
+        final Bundle bundle = bundle("malformedhelper", "external.malformed-helper", "helper-", "-resource", Map.of(), Map.of());
+        final String entry = malformed.equals("method body") ? bundle.rootClass() : bundle.helperClass();
+        if (malformed.equals("method body")) {
+            final byte[] valid = java.lang.classfile.ClassFile.of().build(
+                    java.lang.constant.ClassDesc.ofInternalName(entry.substring(0, entry.length() - 6)),
+                    type -> type.withMethod("process", java.lang.constant.MethodTypeDesc.ofDescriptor(
+                            "(Ldev/nanonative/railix/core/step/StepInput;Ldev/nanonative/railix/core/step/StepInput;)Ldev/nanonative/railix/core/step/StepResult;"),
+                            java.lang.classfile.ClassFile.ACC_PUBLIC | java.lang.classfile.ClassFile.ACC_STATIC,
+                            method -> method.withCode(code -> code.aconst_null().areturn())));
+            final String bytes = HexFormat.of().formatHex(valid);
+            assertThat(bytes).containsOnlyOnce("0000000201b0");
+            // Replace the first instruction, keeping the class header, method ABI and Code size valid.
+            rewriteJar(bundle.root(), Map.of(entry, HexFormat.of().parseHex(bytes.replace("0000000201b0", "00000002ffb0"))), Map.of());
+        } else {
+            final byte[] invalid = malformed.equals("header") ? new byte[]{0x42} : HexFormat.of().parseHex(
+                    "cafebabe" + "0000" + "0045" + "0001" + "0021" + "0000" + "0000" + "0000" + "0000" + "0000" + "0000");
+            rewriteJar(bundle.helper(), Map.of(entry, invalid), Map.of());
+        }
+        final Workspace workspace = workspace(List.of(bundle));
+        final Path project = directory.resolve("railix.project.json");
+        Files.writeString(project, CreatorProjects.empty("malformed-helper"));
+        try (var creator = CreatorServer.start(0, project, workspace.railixHome())) {
+            final long pid = CreatorServerE2eSupport.number(CreatorServerE2eSupport.application(creator.baseUri()), "pid");
+            final var edit = CreatorServerE2eSupport.request(creator.baseUri(), "POST", "/api/project", projectSource(bundle.definition().id(), "value"));
+            assertThat(edit.statusCode()).as(edit.body()).isEqualTo(422);
+            assertThat(edit.body()).contains("STEP_RUNTIME_CLASS_INVALID", entry);
+            assertThat(CreatorServerE2eSupport.number(CreatorServerE2eSupport.application(creator.baseUri()), "pid")).isEqualTo(pid);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void artifactProjectSourcesResolveInstalledStepsThroughTheNormalCreator(final boolean include) throws Exception {
         final Workspace workspace = workspace(List.of(bundle("alpha", "external.alpha", "helper-", "-resource", Map.of(), Map.of())));
@@ -788,18 +821,14 @@ final class ThirdPartyStepBundleE2eTest {
     }
 
     @Test
-    void productionBuildRejectsABundleThatProvidesARailixPlatformClass() throws Exception {
+    void installationRejectsABundleThatProvidesARailixPlatformClass() throws Exception {
         final Bundle bundle = bundle("isolated", "external.isolated", "helper-", "-resource", Map.of(), Map.of());
         rewriteJar(bundle.root(), Map.of(), Map.of(
                 "dev/nanonative/railix/development/DevelopmentRuntime.class",
                 classBytes(DevelopmentRuntime.class)
         ));
         final Workspace workspace = workspace(List.of(bundle));
-        final CompileResult.Compiled compiled = compile(workspace, bundle.definition().id());
-
-        assertThatThrownBy(() -> ApplicationBuilder.buildProduction(
-                project(directory.resolve("platform-class"), bundle.definition().id()), compiled
-        )).isInstanceOf(IOException.class)
+        assertThatThrownBy(workspace::catalog).isInstanceOf(IOException.class)
                 .hasMessageStartingWith("DEPENDENCY_PLATFORM_CLASS_FORBIDDEN:")
                 .hasMessageContaining("dev/nanonative/railix/development/DevelopmentRuntime.class");
     }
@@ -940,7 +969,7 @@ final class ThirdPartyStepBundleE2eTest {
         final Path lock = directory.resolve("corrupt.lock.json");
         Files.writeString(lock, RailixJson.write(lockValue), StandardCharsets.UTF_8);
 
-        assertThatThrownBy(() -> StandardLibrary.catalog().install(lock, store))
+        assertThatThrownBy(() -> GeneratedApplicationFixture.catalog().install(lock, store))
                 .isInstanceOf(StepCatalog.DependencyException.class)
                 .hasMessageStartingWith("DEPENDENCY_ARTIFACT_INVALID_JAR:");
     }
@@ -1127,7 +1156,7 @@ final class ThirdPartyStepBundleE2eTest {
     }
 
     @Test
-    void installedBundleCannotDeclareTheReservedApplicationStep() throws Exception {
+    void structuralAppCannotPretendToHaveAProcessImplementation() throws Exception {
         final Bundle bundle = bundle(
                 "application", "external.application", "helper-", "-resource", Map.of(), Map.of()
         );
@@ -1140,7 +1169,7 @@ final class ThirdPartyStepBundleE2eTest {
 
         assertThatThrownBy(workspace::catalog)
                 .isInstanceOf(StepCatalog.DependencyException.class)
-                .hasMessage("STEP_DEPENDENCY_CONTRACT_INVALID: Installed bundles cannot replace railix.app.");
+                .hasMessageStartingWith("STEP_DEPENDENCY_MANIFEST_NON_CANONICAL:");
     }
 
     @Test
@@ -1211,9 +1240,25 @@ final class ThirdPartyStepBundleE2eTest {
                 "external.services",
                 "helper-",
                 "-resource",
-                Map.of(service, "thirdparty.services.Root\nthirdparty.services.Shared # duplicate\n"),
-                Map.of(service, "# helper providers\nthirdparty.services.Helper\nthirdparty.services.Shared\n")
+                Map.of(service, "example.Service$Root\nexample.Service$Shared # duplicate\n"),
+                Map.of(service, "# helper providers\nexample.Service$Helper\nexample.Service$Shared\n")
         );
+        final Path types = directory.resolve("service-types");
+        compileJava(source(directory.resolve("services"), "example", "Service", """
+                package example;
+                public interface Service {
+                    class Root implements Service { }
+                    class Helper implements Service { }
+                    class Shared implements Service { }
+                }
+                """), types, List.of());
+        final var classes = classEntries(types);
+        rewriteJar(bundle.root(), Map.of(), Map.of("example/Service.class", classes.get("example/Service.class"),
+                "example/Service$Root.class", classes.get("example/Service$Root.class"),
+                "example/Service$Shared.class", classes.get("example/Service$Shared.class")));
+        rewriteJar(bundle.helper(), Map.of(), Map.of("example/Service.class", classes.get("example/Service.class"),
+                "example/Service$Helper.class", classes.get("example/Service$Helper.class"),
+                "example/Service$Shared.class", classes.get("example/Service$Shared.class")));
         final Workspace workspace = workspace(List.of(bundle));
 
         final ApplicationBuilder.Artifact application = build(
@@ -1224,8 +1269,27 @@ final class ThirdPartyStepBundleE2eTest {
 
         try (JarFile jar = new JarFile(application.jar().toFile())) {
             assertThat(new String(jar.getInputStream(jar.getJarEntry(service)).readAllBytes(), StandardCharsets.UTF_8))
-                    .isEqualTo("thirdparty.services.Helper\nthirdparty.services.Root\nthirdparty.services.Shared\n");
+                    .isEqualTo("example.Service$Helper\nexample.Service$Root\nexample.Service$Shared\n");
         }
+    }
+
+    @Test
+    void missingDeclaredServiceProviderRejectsPackaging() throws Exception {
+        final Bundle bundle = bundle("missingservice", "external.missing-service", "helper-", "-resource",
+                Map.of("META-INF/services/java.lang.Runnable", "thirdparty.missing.Provider\n"), Map.of());
+        final Workspace workspace = workspace(List.of(bundle));
+        assertThatThrownBy(() -> build(workspace, bundle.definition().id(), directory.resolve("missing-service-app")))
+                .isInstanceOf(IOException.class).hasMessageContaining("STEP_DEPENDENCY_OWNER_MISSING", "thirdparty/missing/Provider.class");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void optionalServiceWithoutItsInterfaceDoesNotForceAnUnusedIntegration(final boolean root) throws Exception {
+        final var service = Map.of("META-INF/services/optional.integration.Service", "optional.integration.Provider\n");
+        final Bundle bundle = bundle("optionalservice", "external.optional-service", "helper-", "-resource",
+                root ? service : Map.of(), root ? Map.of() : service);
+        final Workspace workspace = workspace(List.of(bundle));
+        assertThat(run(workspace, bundle.definition().id(), "VALUE")).isEqualTo(new ProcessResult(0, "\"helper-VALUE-resource\""));
     }
 
     @Test
@@ -2638,7 +2702,7 @@ final class ThirdPartyStepBundleE2eTest {
 
     private record Workspace(Path lock, Path store) {
         StepCatalog catalog() throws StepCatalog.DependencyException {
-            return StandardLibrary.catalog().install(lock, store);
+            return GeneratedApplicationFixture.catalog().install(lock, store);
         }
 
         Path stored(final Path artifact) {

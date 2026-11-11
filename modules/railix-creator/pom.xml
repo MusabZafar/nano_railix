@@ -33,8 +33,15 @@
                                         <exclude>META-INF/MANIFEST.MF</exclude>
                                     </excludes>
                                 </filter>
+                                <filter>
+                                    <artifact>dev.nanonative.railix:railix-stdlib</artifact>
+                                    <excludes><exclude>dev/nanonative/railix/stdlib/**</exclude></excludes>
+                                </filter>
                             </filters>
                             <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
+                                    <resource>META-INF/railix/providers.index</resource>
+                                </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>dev.nanonative.railix.creator.RailixMain</mainClass>
                                 </transformer>
@@ -223,6 +230,7 @@
             <groupId>dev.nanonative.railix</groupId>
             <artifactId>railix-stdlib</artifactId>
             <version>${project.version}</version>
+            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

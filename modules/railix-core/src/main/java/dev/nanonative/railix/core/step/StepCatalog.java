@@ -58,7 +58,14 @@ public final class StepCatalog {
         this.validationProviders = Map.copyOf(validationProviders);
     }
 
-    /** Creates a platform-owned catalog from explicitly constructed definitions. */
+    /**
+     * Creates an explicit authoring catalog for definition checks and source generation.
+     * Packaging requires verified bundles rather than classes borrowed from the host classpath.
+     *
+     * @param definitions explicitly constructed contracts
+     * @return immutable authoring catalog, without artifact ownership
+     * @throws IllegalArgumentException for Java-null or duplicate definitions
+     */
     public static StepCatalog of(final StepDefinition... definitions) {
         if (definitions == null) {
             throw new IllegalArgumentException("Step definitions cannot be Java null.");
@@ -83,7 +90,7 @@ public final class StepCatalog {
                             Ownership.PLATFORM,
                             List.of(),
                             "sha256:" + digest(StepContractJson.write(definition).getBytes(StandardCharsets.UTF_8)),
-                            address.jdkModules()
+                            address.jdkModules(), definition.dynamicClasses()
                     )
             ));
         }
@@ -106,13 +113,152 @@ public final class StepCatalog {
         final Map<String, Implementation> providers = new LinkedHashMap<>();
         catalog.definitions.forEach(definition -> providers.put(definition.id(), new Implementation(
                 provider.getCanonicalName(), provider.getName().replace('.', '/') + ".class", Ownership.PLATFORM,
-                List.of(), "sha256:" + digest(StepContractJson.write(definition).getBytes(StandardCharsets.UTF_8)), List.of())));
+                List.of(), "sha256:" + digest(StepContractJson.write(definition).getBytes(StandardCharsets.UTF_8)), List.of(), List.of())));
         return new StepCatalog(catalog.definitions, catalog.implementations, providers);
     }
 
     /** Returns the explicit validation provider, or empty for a directly constructed in-process catalog. */
     public Optional<Implementation> validationProvider(final String stepId) {
         return Optional.ofNullable(validationProviders.get(stepId));
+    }
+
+    /**
+     * Derives the ordinary dependency lock for a built provider without executing its code.
+     * Copies immutable artifacts into the supplied store. It does not publish a project lock.
+     *
+     * @param bundle root JAR with a canonical Step manifest
+     * @param store content-addressed artifact directory
+     * @param runtime explicit runtime dependency JARs, excluding the Railix host API
+     * @return canonical dependency-lock JSON ready for {@link #installSource(String, Path)}
+     * @throws IllegalArgumentException for missing arguments
+     * @throws IOException for invalid bundles, ownership conflicts or storage errors
+     */
+    public static String bundleLock(final Path bundle, final Path store, final Path... runtime) throws IOException {
+        if (bundle == null || store == null || runtime == null || java.util.Arrays.stream(runtime).anyMatch(java.util.Objects::isNull))
+            throw new IllegalArgumentException("Provider bundle, store and dependencies cannot be Java null.");
+        try (var input = Files.newInputStream(bundle, LinkOption.NOFOLLOW_LINKS)) {
+            return bundleLock(input, store, runtime);
+        }
+    }
+
+    /**
+     * Checks a bundle stream before publishing its immutable artifacts to the shared store.
+     * Used for embedded and local providers through the same resolver. No classes are loaded.
+     *
+     * @param bundle caller-owned root JAR stream, left open
+     * @param store content-addressed artifact directory
+     * @param runtime explicit runtime dependency JARs
+     * @return canonical dependency-lock JSON, without publishing a project selection
+     * @throws IllegalArgumentException for missing arguments
+     * @throws IOException for invalid bundles, damaged existing artifacts or storage errors
+     */
+    public static String bundleLock(final InputStream bundle, final Path store, final Path... runtime) throws IOException {
+        if (bundle == null || store == null || runtime == null || java.util.Arrays.stream(runtime).anyMatch(java.util.Objects::isNull))
+            throw new IllegalArgumentException("Provider bundle, store and dependencies cannot be Java null.");
+        final Path target = store.toAbsolutePath().normalize();
+        Files.createDirectories(target);
+        try (var directory = new StepBundle.ImportDirectory(Files.createTempDirectory(target, ".import-"))) {
+            final Path staging = directory.path();
+            final Map<String, RailixValue> lockedArtifacts = new java.util.TreeMap<>();
+            final List<String> identities = new ArrayList<>();
+            for (int index = 0; index <= runtime.length; index++) {
+                final Path staged;
+                if (index == 0) staged = StepBundle.store(bundle, staging);
+                else try (var input = Files.newInputStream(runtime[index - 1], LinkOption.NOFOLLOW_LINKS)) {
+                    staged = StepBundle.store(input, staging);
+                }
+                final String identity = "sha256:" + staged.getFileName().toString().replace(".jar", "");
+                if (lockedArtifacts.containsKey(identity)) throw failure("DEPENDENCY_LOCK_NON_CANONICAL", "A bundle closure must not repeat an artifact.");
+                identities.add(identity);
+                lockedArtifacts.put(identity, RailixValue.object(Map.of("digest", RailixValue.string(identity),
+                        "origin", RailixValue.string("local"), "size", RailixValue.number(Files.size(staged)))));
+            }
+            final var artifactRoot = RailixValue.object(Map.of("artifacts", RailixValue.array(List.copyOf(lockedArtifacts.values()))));
+            final Map<String, Artifact> verified = artifacts(artifactRoot, staging);
+            final Map<String, ManifestStep> contracts = manifest(verified.get(identities.getFirst()));
+            final List<RailixValue> steps = contracts.values().stream().<RailixValue>map(contract -> {
+                final Map<String, RailixValue> item = new LinkedHashMap<>(Map.of(
+                        "id", RailixValue.string(contract.definition().id()),
+                        "version", RailixValue.string(contract.definition().version()),
+                        "contract", RailixValue.string(contract.contractDigest())));
+                if (contract.definition().executable()) {
+                    item.put("implementation", RailixValue.string(contract.implementation()));
+                    item.put("implementation_entry", RailixValue.string(contract.implementationEntry()));
+                }
+                return RailixValue.object(item);
+            }).toList();
+            final String lock = RailixJson.write(RailixValue.object(Map.of(
+                    "format", RailixValue.number(1), "artifacts", artifactRoot.values().get("artifacts"),
+                    "bundles", RailixValue.array(List.of(RailixValue.object(Map.of(
+                            "artifact", RailixValue.string(identities.getFirst()),
+                            "runtime", RailixValue.array(identities.stream().skip(1).sorted().<RailixValue>map(RailixValue::string).toList()),
+                            "steps", RailixValue.array(steps))))))));
+            of().installSource(lock, staging);
+            for (final Artifact artifact : verified.values()) StepBundle.publish(artifact.path(), target);
+            return lock;
+        }
+    }
+
+    /**
+     * Loads distribution-provided bundles through the ordinary manifest, lock and store resolver.
+     * No provider class is loaded. A missing or invalid distribution fails without a host fallback.
+     *
+     * @param loader distribution classloader containing {@code META-INF/railix/providers.index}
+     * @param store the normal immutable artifact directory
+     * @return checked embedded catalog, ready to add a project's external dependency lock
+     * @throws IllegalArgumentException for missing arguments
+     * @throws IOException for absent resources, invalid bundles or storage errors
+     */
+    public static StepCatalog embedded(final ClassLoader loader, final Path store) throws IOException {
+        if (loader == null || store == null) throw new IllegalArgumentException("Provider loader and store cannot be Java null.");
+        StepCatalog catalog = of();
+        final Set<String> names = new LinkedHashSet<>();
+        final var indexes = loader.getResources(StepBundle.INDEX);
+        while (indexes.hasMoreElements()) {
+            final var index = indexes.nextElement();
+            final String source;
+            try (var input = index.openStream()) {
+                final byte[] bytes = input.readNBytes(MANIFEST_LIMIT + 1);
+                if (bytes.length > MANIFEST_LIMIT) throw failure("STEP_DEPENDENCY_OWNER_MISSING", "Embedded provider index is too large.");
+                source = new String(bytes, StandardCharsets.UTF_8);
+            }
+            for (final String line : source.lines().toList()) {
+                final String name = line.trim();
+                if (name.isEmpty()) continue;
+                if (!name.matches("META-INF/railix/providers/[A-Za-z0-9][A-Za-z0-9._-]*\\.jar") || !names.add(name))
+                    throw failure("STEP_DEPENDENCY_OWNER_MISSING", "Embedded provider resource is invalid or duplicated: " + name + ".");
+                final String address = index.toExternalForm();
+                final var resource = java.net.URI.create(address.substring(0, address.length() - StepBundle.INDEX.length()) + name).toURL();
+                try (var input = resource.openStream()) {
+                    catalog = catalog.installSource(bundleLock(input, store), store);
+                }
+            }
+        }
+        if (names.isEmpty()) throw failure("STEP_DEPENDENCY_OWNER_MISSING", "Distribution contains no embedded provider bundles.");
+        return catalog;
+    }
+
+    /**
+     * Validates a provider entry using the shared import and application-packaging rules.
+     *
+     * @param entry forward-slash JAR entry
+     * @return the validated entry name for continued processing
+     * @throws IllegalArgumentException when the entry is Java {@code null}
+     * @throws DependencyException for unsafe paths, host classes or unsupported JAR metadata
+     */
+    public static String artifactEntry(final String entry) throws DependencyException {
+        if (entry == null) throw new IllegalArgumentException("Artifact entry cannot be Java null.");
+        if (entry.isBlank() || entry.startsWith("/") || entry.contains("\\") || entry.indexOf('\0') >= 0
+                || java.util.Arrays.stream(entry.split("/", -1)).anyMatch(part -> part.isEmpty() || ".".equals(part) || "..".equals(part)))
+            throw failure("DEPENDENCY_LOCAL_ENTRY_UNSAFE", "Provider contains unsafe entry: " + entry + ".");
+        if (entry.endsWith(".class") && (entry.startsWith("dev/nanonative/railix/core/")
+                || entry.startsWith("dev/nanonative/railix/creator/") || entry.startsWith("dev/nanonative/railix/development/")))
+            throw failure("DEPENDENCY_PLATFORM_CLASS_FORBIDDEN", "Provider cannot supply host class: " + entry + ".");
+        final String upper = entry.toUpperCase(java.util.Locale.ROOT);
+        if (entry.endsWith("module-info.class") || upper.startsWith("META-INF/") && (upper.endsWith(".SF")
+                || upper.endsWith(".RSA") || upper.endsWith(".DSA") || upper.endsWith(".EC")))
+            throw failure("DEPENDENCY_ARTIFACT_UNSUPPORTED_METADATA", "Provider contains unsupported module or signature metadata: " + entry + ".");
+        return entry;
     }
 
     /**
@@ -170,6 +316,7 @@ public final class StepCatalog {
         }
         final Map<String, Artifact> artifacts = artifacts(root, store.toAbsolutePath().normalize());
         final List<StepDefinition> nextDefinitions = new ArrayList<>(definitions);
+        final Set<String> nextIds = new LinkedHashSet<>(definitionsById.keySet());
         final Map<String, Implementation> nextImplementations = new LinkedHashMap<>(implementations);
         final Map<String, Implementation> nextProviders = new LinkedHashMap<>(validationProviders);
         final Set<String> referencedArtifacts = new LinkedHashSet<>();
@@ -208,8 +355,6 @@ public final class StepCatalog {
                 final RailixValue.ObjectValue step = object(
                         stepValue, "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]"
                 );
-                exact(step, Set.of("contract", "id", "implementation", "implementation_entry", "version"),
-                        "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]");
                 final String id = text(step, "id", "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]");
                 if (id.compareTo(previousStep) <= 0) {
                     throw failure("DEPENDENCY_LOCK_NON_CANONICAL", "Bundle Steps must be sorted by unique id.");
@@ -220,13 +365,17 @@ public final class StepCatalog {
                 if (installed == null) {
                     throw failure("STEP_DEPENDENCY_OWNER_MISSING", "Bundle manifest does not own Step: " + id + ".");
                 }
+                final boolean executable = installed.definition().executable();
+                exact(step, executable ? Set.of("contract", "id", "implementation", "implementation_entry", "version")
+                                : Set.of("contract", "id", "version"),
+                        "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]");
                 final String version = text(step, "version", "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]");
-                final String implementation = text(
+                final String implementation = executable ? text(
                         step, "implementation", "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]"
-                );
-                final String implementationEntry = text(
+                ) : "";
+                final String implementationEntry = executable ? text(
                         step, "implementation_entry", "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]"
-                );
+                ) : "";
                 final String contract = digest(
                         step, "contract", "DEPENDENCY_LOCK_NON_CANONICAL", "lock.bundles[].steps[]"
                 );
@@ -239,19 +388,19 @@ public final class StepCatalog {
                             "Dependency lock does not match the bundle contract for Step: " + id + "."
                     );
                 }
-                if (find(id).isPresent() || nextImplementations.containsKey(id)) {
+                if (!nextIds.add(id)) {
                     throw failure("STEP_DEPENDENCY_ID_CONFLICT", "Installed Step id is already present: " + id + ".");
                 }
                 nextDefinitions.add(installed.definition());
                 installed.providers().forEach(provider -> nextProviders.put(id, new Implementation(
-                        provider.sourceName(), provider.classEntry(), Ownership.BUNDLE, closure, contract, List.of())));
-                nextImplementations.put(id, new Implementation(
+                        provider.sourceName(), provider.classEntry(), Ownership.BUNDLE, closure, contract, List.of(), List.of())));
+                if (executable) nextImplementations.put(id, new Implementation(
                         implementation,
                         implementationEntry,
                         Ownership.BUNDLE,
                         closure,
                         contract,
-                        installed.definition().implementationAddress().orElseThrow().jdkModules()
+                        installed.definition().implementationAddress().orElseThrow().jdkModules(), installed.definition().dynamicClasses()
                 ));
             }
             if (!manifest.keySet().equals(lockedSteps)) {
@@ -322,11 +471,15 @@ public final class StepCatalog {
             long uncompressedBytes = 0;
             try (JarFile jar = new JarFile(file.toFile(), true)) {
                 final var entries = jar.entries();
+                final Set<String> names = new LinkedHashSet<>();
                 while (entries.hasMoreElements()) {
                     final JarEntry entry = entries.nextElement();
                     if (entry.isDirectory()) {
                         continue;
                     }
+                    final String name = entry.getName();
+                    artifactEntry(name);
+                    if (!names.add(name)) throw failure("DEPENDENCY_ARTIFACT_INVALID_JAR", "Locked artifact repeats entry: " + name + ".");
                     entryCount++;
                     if (entryCount > MAX_ARTIFACT_ENTRIES) {
                         throw failure("DEPENDENCY_ARTIFACT_ENTRY_LIMIT", "Locked artifact contains more than "
@@ -427,19 +580,21 @@ public final class StepCatalog {
             final RailixValue.ObjectValue item = object(
                     value, "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]"
             );
-            exact(item, Set.of("contract", "contract_digest", "implementation", "implementation_entry"),
-                    "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]");
             final RailixValue.ObjectValue contract = object(
                     required(item, "contract", "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]"),
                     "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL",
                     "manifest.steps[].contract"
             );
-            final String implementation = text(
+            final boolean app = "app".equals(text(contract, "kind", "STEP_DEPENDENCY_CONTRACT_INVALID", "contract"));
+            exact(item, app ? Set.of("contract", "contract_digest")
+                            : Set.of("contract", "contract_digest", "implementation", "implementation_entry"),
+                    "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]");
+            final String implementation = !app ? text(
                     item, "implementation", "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]"
-            );
-            final String implementationEntry = text(
+            ) : "";
+            final String implementationEntry = !app ? text(
                     item, "implementation_entry", "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]"
-            );
+            ) : "";
             final String expected = digest(
                     item, "contract_digest", "STEP_DEPENDENCY_MANIFEST_NON_CANONICAL", "manifest.steps[]"
             );
@@ -453,9 +608,6 @@ public final class StepCatalog {
             } catch (final IllegalArgumentException exception) {
                 throw failure("STEP_DEPENDENCY_CONTRACT_INVALID", "Bundle Step contract is invalid: "
                         + exception.getMessage(), exception);
-            }
-            if (definition.kind() == StepDefinition.Kind.APP) {
-                throw failure("STEP_DEPENDENCY_CONTRACT_INVALID", "Installed bundles cannot replace railix.app.");
             }
             if (providers.isEmpty() && !StepValidation.inputs(definition).isEmpty()) {
                 throw failure("STEP_DEPENDENCY_CONTRACT_INVALID", "Bundle validators require a definitions provider.");
@@ -479,6 +631,7 @@ public final class StepCatalog {
                 }
             }
             for (final ManifestStep step : result.values()) {
+                if (!step.definition().executable()) continue;
                 final JarEntry implementation = jar.getJarEntry(step.implementationEntry());
                 if (implementation == null || implementation.isDirectory()) {
                     throw failure(
@@ -719,21 +872,33 @@ public final class StepCatalog {
         }
     }
 
-    /** One direct implementation address and its explicit platform or locked bundle ownership. */
+    /**
+     * One direct implementation address and its explicit authoring or locked bundle ownership.
+     *
+     * @param className Java source name for generated direct calls
+     * @param classEntry owning JAR class entry
+     * @param ownership physical authoring or bundle ownership
+     * @param artifacts immutable bundle closure, empty only for authoring catalogs
+     * @param contractDigest identity of the defining contract
+     * @param jdkModules declared JDK modules needed at compilation
+     * @param dynamicClasses additional dynamically loaded Java binary class names
+     */
     public record Implementation(
             String className,
             String classEntry,
             Ownership ownership,
             List<Artifact> artifacts,
             String contractDigest,
-            List<String> jdkModules
+            List<String> jdkModules,
+            List<String> dynamicClasses
     ) {
         public Implementation {
             if (className == null || className.isBlank() || classEntry == null || classEntry.isBlank() || ownership == null
-                    || artifacts == null || contractDigest == null || contractDigest.isBlank() || jdkModules == null) {
+                    || artifacts == null || contractDigest == null || contractDigest.isBlank() || jdkModules == null || dynamicClasses == null) {
                 throw new IllegalArgumentException("Step implementation ownership must be complete.");
             }
             artifacts = List.copyOf(artifacts);
+            dynamicClasses = dynamicClasses.stream().map(StepDefinition::implementationName).sorted().distinct().toList();
             final Set<String> uniqueModules = new LinkedHashSet<>();
             for (final String module : jdkModules) {
                 if (module == null || module.isBlank()) {
@@ -856,7 +1021,7 @@ public final class StepCatalog {
 
     /** Physical owner used by the application packager. */
     public enum Ownership {
-        /** Railix runtime or standard-library code shipped with Creator. */
+        /** Explicit authoring classes on the host classpath, not deployable provider ownership. */
         PLATFORM,
         /** An immutable root bundle and locked runtime closure. */
         BUNDLE

@@ -2,7 +2,7 @@
 
 ## Human Review
 
-Status: **Existing baseline with accepted target boundaries**, updated on 2026-09-27.
+Status: **Existing baseline with accepted target boundaries.**
 The platform boundaries below record the user's specification-workshop decisions,
 not an implementation or fresh test pass. The roadmap owns delivery status.
 
@@ -12,9 +12,9 @@ Visual grouping belongs to [Creator](creator.md); observations to
 
 Decisions: [ADR 0013](../adr/0013-small-java-product-boundary.md), [ADR 0014](../adr/0014-canonical-primitive-data.md), [ADR 0020](../adr/0020-creator-first-application-graph.md). Historical checks: [verification](../verification.md).
 
-The current file layout still embeds Example inputs in Trigger nodes. The accepted
-[Example-file target](examples-and-validation.md) changes that ownership in a later
-migration; no current parser or project file has changed in this documentation task.
+Example inputs and expectations belong to `railix.examples.json`, separate from the functional
+graph and optional Creator metadata. The [Example contract](examples-and-validation.md) owns
+their persistence, import and validation rules.
 
 ## Accepted Platform Boundaries
 
@@ -46,6 +46,10 @@ accepts measurable performance gates; workload sizes and numeric budgets remain 
   throughput, allocations/memory and Creator interaction cost where applicable. Numeric budgets
   MUST be agreed before the dependent slice is called performance-ready; authored Step count
   alone is not evidence of concurrent execution capacity.
+  Comparisons MUST use equivalent behavior and enabled capabilities, including observation,
+  validation and failure handling. A generated-artifact comparison MUST include a lean hand-written
+  Java reference before claiming a framework advantage. Benchmark tooling MUST remain outside
+  the generated application. No universal superiority over human-written code is assumed.
 
 The product is a system in one deployable application, usable standalone or later in a mesh.
 Kubernetes is inspiration for operational behavior, not a required dependency or an equivalence
@@ -151,11 +155,12 @@ second selected-Step list. Link topology owns execution. JSON object key order d
 This describes the implemented baseline. The planned compilation-selection policy below changes
 artifact inclusion, not ownership of the saved graph or the rule that Creator metadata is optional.
 
-The platform supplies one `railix.app` Step at canonical node ID `app`. It is mandatory, unique,
-persisted, and non-deletable. Trigger definitions are catalog Steps connected from App. Each
-Trigger owns a non-empty list of named Examples. An Example has a required payload and an optional
-whole context object; compilation writes the payload to the Trigger's current example-target path
-inside the development artifact's Example manifest.
+The default provider supplies `railix.app`. The project contains one structural App at canonical
+node ID `app`, mandatory, unique, persisted and non-deletable. Its definition comes from the catalog,
+not a compiler-reserved Step ID. Trigger definitions are catalog Steps connected from App. Named
+Examples refer to their Trigger and are stored in the separate Example document. An Example has
+a required payload and an optional whole context object; compilation writes the payload to the
+Trigger's current example-target path inside the Example-enabled artifact's manifest.
 Every Example is an independent case. The generated application returns the selected case's real
 contexts and Step projections; Creator never unions Example values into synthetic runtime data.
 
@@ -249,6 +254,131 @@ third-party definitions:
 
 Compiler, runtime, and Creator consume this grammar from definitions. They do not branch on a
 standard-library Step ID or input name.
+
+### Portable Step Providers
+
+Status: **Accepted direction; local delivery first, Git-remote resolution later.** The user
+requires default Steps to be authored and integrated like third-party Steps, with simple common
+declarations and later extraction into an independent official repository without hard bindings.
+This extends the common execution contract to authoring, packaging and distribution. It does not
+declare a provider installer or Git resolver implemented.
+
+- **SYS-032:** Built-in and third-party Steps MUST use the same public definition, validation,
+  lifecycle, capability and packaging contracts. Provider identity, Java package name and repository
+  location MUST NOT grant a different execution or integration path. Standard means supplied by
+  default, not privileged. The structural App declaration MUST also come from a provider, without
+  a dummy PROCESS implementation. The kernel enforces its structural role and one instance per
+  project, not a standard-provider Step ID.
+- **SYS-033:** A provider MUST be buildable and testable outside the Railix source checkout through
+  public contracts. A simple Step MUST need only its declaration and static PROCESS implementation.
+  PRE, POST, resources, custom metrics and explicit continuations remain optional existing
+  capabilities. Common declarations and manifest generation MUST be reusable, not copied into
+  each provider or replaced with another mandatory framework.
+- **SYS-034:** A provider's location MUST be separate from its Step identities and behavior.
+  Moving the same provider from this repository to a local external repository and later to an
+  official Git remote MUST NOT require compiler, runtime or Creator special cases. Git is a future
+  acquisition source, not an execution engine. Resolved artifacts MUST continue through the common
+  integrity-checked bundle and dependency-lock path. The built application MUST NOT fetch provider
+  code, resolve Git references or need the provider checkout, repository or Creator at runtime.
+- **SYS-035:** Default providers MUST remain available with Creator without manual installation or
+  a network connection. Embedded and user-supplied provider artifacts MUST reach the same checked
+  integration path. Provider builds MUST derive manifests and contract digests from authoritative
+  definitions. Installation MUST derive artifact identities from received bytes and validate the
+  manifest without executing provider code for discovery. The workflow MUST NOT require users to
+  maintain duplicate copies of derived metadata.
+  Integrity and ownership checks MUST remain effective for both. Providers MUST NOT replace host
+  runtime classes or obtain privilege through a host-owned namespace. The reservation MUST NOT
+  cover the entire organization namespace merely because portable providers share it. Configuration
+  validation may execute its explicitly registered provider later under SYS-019 to SYS-022;
+  discovery is not that execution boundary.
+- **SYS-036:** Every Step definition MUST expose the declaration-based Boolean filter `native`.
+  It MUST default to `true` without an additional declaration. When the author declares additional
+  dynamically loaded classes, it MUST automatically become `false`. Ordinary implementation
+  classes, direct dependencies and JDK-module declarations MUST NOT make it false by themselves.
+  The dynamic class list is authoritative. The flag MUST be derived rather than independently
+  editable or persisted. This classification requires no verification before reporting `true` and
+  is not a Native Image test result, an execution mode, a permission or a general quality score.
+  It MUST NOT select a second Step executor or trigger compilation at application startup.
+
+`Builder.dynamicClasses(Type.class, ...)` declares additional named reference types. The canonical
+contract stores sorted unique binary class names only when nonempty. Catalog discovery reads the
+names without loading or initializing them. `StepDefinition.nativeStep()` derives the flag, and
+Creator's catalog projects it as `native: true/false`. Packaging rejects a referenced declaration
+if the class is absent from both the assembled runtime and the build JDK. This uses the same
+contract for supplied and external providers. The declarations also supply the optional runtime
+roots under SYS-037; the Boolean remains classification-only. File/network/process-effect labels
+and Native Image build verification are not implemented by this Boolean classification.
+
+**Implemented API and packaging boundary:** `StepBundle.write(...)` exports the authoritative definitions and
+compiled provider files. `StepCatalog.bundleLock(...)` derives the existing lock format from JAR
+bytes without executing provider code. It validates in a temporary staging directory, publishes
+only checked immutable artifacts and removes failed imports. `StepCatalog.embedded(...)` reads
+distribution resources through that same path. Creator has no compile dependency on standard
+Step classes, and the packager has no standard-library namespace or source-location branch.
+The reservation protects host packages, not the entire organization namespace. App metadata now
+uses the ordinary manifest without implementation fields. Authoring-only catalogs can still be
+used to test definitions, but building requires verified bundles.
+
+The default bundle selection remains distribution-owned, as before. It is not copied into every
+project's external dependency lock. Its artifact digest now participates in application source
+and build identity. Applications built through the former in-process standard catalog must be
+rebuilt before source-identity matching with this Creator. `build`, `run` and Creator need a writable
+artifact cache. Running a produced application does not need that cache or provider checkout.
+
+**Accepted App decision:** the user approved provider-owned structural metadata. Canonical project
+node ID `app` and the one-App-per-project invariant remain. A provider's App definition ID is not
+reserved by the compiler. New-project creation reads the definition from the supplied catalog.
+
+**Accepted runtime packaging:** the user requested automatic dependency discovery and explicitly
+approved removing unused methods when definition factories and PROCESS share a class.
+
+- **SYS-037:** Application packaging MUST derive provider runtime classes and static methods from
+  the used PROCESS/PRE/POST entrypoints and their dependencies. It MUST support definition factories
+  and runtime functions in the same class without requiring a second class or a manual runtime-file
+  list. Analysis MUST NOT load or initialize provider classes. It MUST run only during the build and
+  MUST use the same path for distributed and external providers.
+- Declared `dynamicClasses` retain their complete methods, including methods reached by reflection,
+  method lookup or a separately started Java program. This can name the implementation class itself.
+  Undeclared runtime-computed names are not a static dependency. The declaration remains necessary
+  when an entrypoint is used outside the generated Flow.
+- Packaging preserves instance methods, fields and class initialization. Referenced static helpers,
+  lambda/bootstrap targets, superclass dependencies and private nest access remain functional.
+  Removing an unused factory is not permission to discard initialization side effects. Reachable code
+  or state that actually requires unavailable authoring APIs MUST fail the build with its class
+  dependency identified instead of producing a broken application.
+- Service registrations whose interface exists in the application or JDK are runtime roots. A
+  missing provider for such a service rejects the build. Optional service descriptors whose
+  interface is absent remain resources without forcing their unused integration. This rule is
+  identical for provider and library artifacts. Ordinary resources, license notices and declared
+  library dependencies remain available. Libraries are not method-pruned. Discovery, integrity,
+  duplicate-entry and resource-conflict checks remain effective before selection.
+- The selection is deterministic and participates in the existing build identity. There is no
+  independently persisted class inventory or runtime selector. Development and production use the
+  same provider selection, apart from their already declared Example capabilities.
+
+Static dependencies use the JDK [Class-File API](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/classfile/ClassFile.html).
+Produced artifacts are checked with ordinary [dependency analysis](https://docs.oracle.com/en/java/javase/25/docs/specs/man/jdeps.html),
+not by suppressing missing dependencies. Runtime-computed reflection still has
+[reachability limits](https://www.graalvm.org/latest/reference-manual/native-image/metadata/).
+
+**Decision before local installer implementation:** whether the developer builds a provider JAR
+before adding it, or Creator builds a selected local source project. This determines who executes
+provider build code. The public bundle API does not make that UI decision. Automatic source
+building and a user-facing installer are not implemented.
+
+**Decisions before Git acquisition:** agree revision selection and update policy,
+remote authentication/trust, source-build ownership and consent, bounded fetching, and offline
+resolution/failure behavior. A repository URL is not permission to execute arbitrary build code.
+These decisions do not block the local provider proof or removal of built-in packaging privileges.
+
+| Requirement | Acceptance through a public boundary | Status / gap |
+| --- | --- | --- |
+| SYS-032/033 | Build an independently maintained provider with one value Step, then exercise its configuration validation, optional lifecycle, resource/metric declarations and explicit branching capabilities without host source edits. Run the resulting application with Creator absent. | Independent fixtures verify these capabilities and public export/import. Separate provider compilation is verified. A guided starter and installation UI remain outside this packaging increment. |
+| SYS-032/034/035 | Package the standard provider through the same path and move its source to a separate local checkout. Preserve the project graph, Step IDs/versions/contract digests and observed behavior without namespace-specific packager logic. Open a fresh Creator offline with its defaults present. | ProviderPortabilityE2eTest compiles the copied sources against only the Core JAR and runs the produced app after removing that checkout. The full local clean gate passed on 2026-11-10. See [packaging evidence and its coverage limitation](../verification.md#portable-provider-packaging). A rebuilt artifact may change its digest and application build identity. Identical artifact bytes retain their digest. |
+| SYS-033/035 | Export and import a JAR without hand-maintained manifests/hashes. Reject damaged or conflicting bundles before publishing a new locked selection. Reject a bundle class in a host-runtime package while accepting the default provider's own package through the same rule. Repeat an unchanged import without changing its identity. | Public API tests cover deterministic export, repeat/concurrent import, malformed bundles, damaged cache preservation and failed-import cleanup. The normal installation UI remains open. |
+| SYS-034 | Run real ingress through the generated artifact with its provider checkout, acquisition service and authoring tools unavailable. | Standalone CLI execution passes after removing the copied provider sources, API JAR, compiled classes and artifact store. Comparative performance acceptance remains under SYS-006. |
+| SYS-036 | Compare an ordinary declaration with one naming dynamic classes. Round-trip through the bundle manifest without executing those classes. Check Creator's Boolean catalog value, run the dynamically selected class from the produced JAR, and reject a missing class without borrowing Creator's application classpath. | Contract and installed-bundle tests cover this increment. Native Image compilation and new visual filter controls are not included. |
+| SYS-037 | Build and execute ordinary and mixed-class providers without authoring APIs, unused Steps or host classpath fallback. Exercise private nest access, lambdas, dynamic roots, services/resources and matching development/production selection. Verify the actual JAR with jdeps and repeated deterministic builds. | Packaging regressions and the full local clean gate pass. Malformed headers, class identities and method bodies produce typed build rejection without replacing the running app. No actionable functional review findings remain. Runtime-bytecode coverage needs a separate matching-variant report; see the verification evidence. |
 
 ### Configuration Validation
 
