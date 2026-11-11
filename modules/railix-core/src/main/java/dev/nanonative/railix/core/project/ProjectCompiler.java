@@ -259,7 +259,7 @@ public final class ProjectCompiler {
             if (definition.kind() == StepDefinition.Kind.APP && !validApp(definition)) {
                 return NodeRead.rejected(
                         "PROJECT_APP_CONTRACT_INVALID",
-                        "railix.app must be a structural App Step with only the start outcome.",
+                        "App must be structural with only the start outcome.",
                         path + ".use"
                 );
             }
@@ -415,7 +415,7 @@ public final class ProjectCompiler {
         if (!hasApp) {
             return NodeRead.rejected(
                     "PROJECT_APP_REQUIRED",
-                    "Project must contain exactly one railix.app node.",
+                    "Project must contain exactly one App node.",
                     "nodes"
             );
         }
@@ -1700,7 +1700,7 @@ public final class ProjectCompiler {
     }
 
     private static boolean validApp(final StepDefinition definition) {
-        return "railix.app".equals(definition.id())
+        return definition.kind() == StepDefinition.Kind.APP
                 && "start".equals(definition.primaryOutcome())
                 && definition.outcomes().size() == 1
                 && definition.receives().isEmpty()

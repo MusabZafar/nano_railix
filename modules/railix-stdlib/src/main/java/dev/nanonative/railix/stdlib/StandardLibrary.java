@@ -1,6 +1,6 @@
 package dev.nanonative.railix.stdlib;
 
-import dev.nanonative.railix.core.step.StepCatalog;
+import dev.nanonative.railix.core.step.StepBundle;
 import dev.nanonative.railix.core.step.StepDefinition;
 import dev.nanonative.railix.core.step.StepDefinition.Input;
 import dev.nanonative.railix.core.runtime.MetricDefinition;
@@ -21,8 +21,17 @@ public final class StandardLibrary {
     private StandardLibrary() {
     }
 
-    public static StepCatalog catalog() {
-        return StepCatalog.of(StandardLibrary.class, definitions().toArray(StepDefinition[]::new));
+    /**
+     * Exports this provider during its own build using the public bundle writer.
+     *
+     * @param arguments compiled classes directory and destination provider JAR
+     * @throws IllegalArgumentException when exactly two paths are not supplied
+     * @throws java.io.IOException when export fails
+     */
+    public static void main(final String[] arguments) throws java.io.IOException {
+        if (arguments.length != 2) throw new IllegalArgumentException("Expected compiled classes and destination bundle paths.");
+        StepBundle.write(java.nio.file.Path.of(arguments[0]), java.nio.file.Path.of(arguments[1]),
+                StandardLibrary.class, definitions());
     }
 
     /** Returns the built-in authoring contracts, also used by the isolated configuration validator. */

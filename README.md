@@ -19,6 +19,7 @@ for execution contracts and the [roadmap](docs/roadmap.md) for supported and pla
 | [Why Railix exists](docs/vision.md) | Founding motivation, product and business rationale, tradeoffs and reference-backed discussion; not implementation requirements. |
 | [.agents/skills/](.agents/skills/) | Standalone project workflow skills, including specification, Java and CSS; no global installation required. |
 | [System model](docs/specs/system-model.md) | Functional graph, Step/context and lifecycle contracts, control routing and compilation. |
+| [Portable Step providers](docs/specs/system-model.md#portable-step-providers) | Accepted common provider path, default-provider parity, local-first delivery and later Git acquisition. |
 | [HTTP Trigger](docs/specs/http-trigger.md) / [HTTP Client](docs/specs/http-client.md) | Current HTTP baseline, planned context-driven HTTPS behavior and shared protocol data rules. |
 | [Standard library](docs/specs/standard-library.md) | Primitive semantics, catalog/support matrix and acceptance. |
 | [Observation](docs/specs/observation.md) | Application-owned execution, shared metrics, management APIs and remaining attachment work. |

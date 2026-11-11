@@ -3,7 +3,6 @@ package dev.nanonative.railix.creator;
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.step.StepCatalog;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,7 +18,7 @@ public final class ThirdPartyBuildProbe {
             throw new IllegalArgumentException("Expected project, lock, and store paths.");
         }
         final Path project = Path.of(arguments[0]);
-        final StepCatalog catalog = StandardLibrary.catalog().install(
+        final StepCatalog catalog = GeneratedApplicationFixture.catalog().install(
                 Path.of(arguments[1]),
                 Path.of(arguments[2])
         );

@@ -11,6 +11,13 @@ type guards without changing those planned families.
 Owns: the finite versioned unary catalog, supported rows, composition and acceptance rules.
 Other routing contracts live in [system model](system-model.md).
 
+The standard catalog is the default distribution of ordinary portable providers, not a privileged
+host implementation. [SYS-032 to SYS-035](system-model.md#portable-step-providers) own identical
+integration and later repository extraction. The common export and embedded-bundle path use the
+same automatic runtime selection under SYS-037. Definition factories need not be shipped in the
+produced application or placed in a separate class. The full local clean gate passed on 2026-11-10.
+See [packaging evidence and its coverage limitation](../verification.md#portable-provider-packaging).
+
 Decisions: [ADR 0021](../adr/0021-total-and-fallible-primitives.md). Historical checks: [verification](../verification.md).
 
 ## Primitive Contract

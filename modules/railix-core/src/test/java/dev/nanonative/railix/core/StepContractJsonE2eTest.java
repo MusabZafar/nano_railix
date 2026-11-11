@@ -26,6 +26,47 @@ final class StepContractJsonE2eTest {
     private static final String IMPLEMENTATION_ENTRY = CodecHandler.class.getName().replace('.', '/') + ".class";
 
     @Test
+    void structuralAppExportsWithoutAnInventedProcessImplementation() {
+        final var definition = StepDefinition.named("provider.app", "1").kind(StepDefinition.Kind.APP).define();
+
+        final String manifest = StepContractJson.writeManifest(List.of(definition));
+
+        assertThat(manifest).contains("\"kind\":\"app\"", "\"id\":\"provider.app\"")
+                .doesNotContain("implementation", "implementation_entry");
+    }
+
+    @Test
+    void dynamicClassesRoundTripWithoutLoadingThemOrPersistingADuplicateNativeFlag() {
+        final var definition = StepDefinition.named("codec.dynamic", "1")
+                .dynamicClasses(Map.Entry.class, String.class).implementation(CodecHandler.class);
+        final var contract = StepContractJson.value(definition);
+
+        assertThat(StepContractJson.write(definition)).contains("\"dynamic_classes\"").doesNotContain("\"native\"");
+        final var decoded = StepContractJson.read(contract, IMPLEMENTATION, IMPLEMENTATION_ENTRY);
+        assertThat(decoded.nativeStep()).isFalse();
+        assertThat(decoded.dynamicClasses()).containsExactly("java.lang.String", "java.util.Map$Entry");
+        assertThat(StepContractJson.write(decoded)).isEqualTo(StepContractJson.write(definition));
+        assertThat(StepContractJson.write(definition())).doesNotContain("dynamic_classes");
+    }
+
+    @Test
+    void dynamicClassMetadataCanBeReadWithoutResolvingAnUnavailableClass() {
+        final var declared = with(contract(), "dynamic_classes", RailixValue.array(List.of(
+                RailixValue.string("unavailable.provider.DynamicTarget"))));
+        final var decoded = StepContractJson.read(declared, IMPLEMENTATION, IMPLEMENTATION_ENTRY);
+        assertThat(decoded.nativeStep()).isFalse();
+        assertThat(decoded.dynamicClasses()).containsExactly("unavailable.provider.DynamicTarget");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[]", "[null]", "[1]", "[\"\"]", "[\"bad/name\"]", "[\"int[]\"]", "[\"java.lang.String\",\"java.lang.String\"]", "[\"java.util.Map$Entry\",\"java.lang.String\"]"})
+    void malformedDynamicClassMetadataIsRejected(final String source) {
+        final var invalid = ((RailixJson.Parsed) RailixJson.parse(source)).value();
+        assertThatThrownBy(() -> StepContractJson.read(with(contract(), "dynamic_classes", invalid), IMPLEMENTATION, IMPLEMENTATION_ENTRY))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void jdkRequirementsRoundTripWithoutChangingContractsThatDeclareNone() {
         assertThat(contract().values()).doesNotContainKey("jdk_modules");
         final var definition=StepDefinition.named("codec.modules","1")

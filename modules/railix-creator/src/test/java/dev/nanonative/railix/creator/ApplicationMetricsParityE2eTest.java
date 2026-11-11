@@ -4,7 +4,6 @@ import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -34,7 +33,7 @@ final class ApplicationMetricsParityE2eTest {
                   {"from":"command.next","to":"lower"},{"from":"lower.ok","to":"end"}]}
                 """;
         Files.writeString(project, source);
-        final var compiled = (CompileResult.Compiled) ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final var compiled = (CompileResult.Compiled) ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         final Path jar;
         if (examples) {
             try (final var build = ApplicationBuilder.build(project, compiled)) {

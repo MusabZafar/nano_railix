@@ -5,7 +5,6 @@ import dev.nanonative.railix.core.value.ValueShape;
 import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.step.StepDefinition;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import thirdparty.production.ResourceLifecycleSteps;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -78,7 +77,7 @@ final class ConvergingFlowE2eTest extends CreatorServerE2eSupport {
         );
         final var project = directory.resolve("railix.project.json");
         Files.writeString(project, source);
-        final var compiled = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final var compiled = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         assertThat(compiled).isInstanceOf(CompileResult.Compiled.class);
         final var jar = ApplicationBuilder.buildProduction(project, (CompileResult.Compiled) compiled).jar();
         final String probeClass = "dev.nanonative.railix.core.project.IndependentArrivalProbe";
