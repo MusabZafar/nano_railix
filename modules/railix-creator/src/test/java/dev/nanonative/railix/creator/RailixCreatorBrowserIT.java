@@ -6867,9 +6867,11 @@ abstract class RailixCreatorBrowserSupport {
 
     Locator visibleControl(final String selector) {
         final Locator field = page.locator(selector);
+        field.waitFor(new Locator.WaitForOptions().setState(com.microsoft.playwright.options.WaitForSelectorState.ATTACHED));
         for (final Locator details : field.locator("xpath=ancestor::details").all()) {
             if (details.getAttribute("open") == null) details.locator(":scope > summary").click();
         }
+        field.waitFor();
         return field;
     }
 
