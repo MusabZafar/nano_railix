@@ -1345,8 +1345,8 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
+    @Tag("responsive")
     void closingProblemsAlsoCancelsAnEditorReadRetriedAfterASave() {
-        page.clock().install();
         openProject(attentionProject());
         page.locator("#issue-count").click();
         page.locator("[data-example-issue]").waitFor();
@@ -1355,10 +1355,15 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
         selectWorldNode("result");
         openInspectorTab("appearance");
         final var held = new ArrayList<Route>();
+        final var saves = new ArrayList<Route>();
         page.route("**/api/editor?node=normalize&**", held::add);
-        page.clock().pauseAt(((Number) page.evaluate("Date.now()")).longValue() + 10);
-        // Hold only the debounce, not the real save or editor requests.
-        page.evaluate("""
+        page.route("**/api/editor", route -> {
+            if (route.request().method().equals("POST")) saves.add(route);
+            else route.resume();
+        });
+        try {
+            // Start navigation before the debounce fires, then control the real save/read ordering.
+            page.evaluate("""
                 async () => {
                   const name = document.querySelector('#presentation-name');
                   name.value = 'Renamed normalizer';
@@ -1369,21 +1374,26 @@ final class CreatorEditorBrowserIT extends RailixCreatorBrowserSupport {
                   document.querySelector('[data-example-issue]').click();
                 }
                 """);
-        page.waitForCondition(() -> held.size() == 1);
-        page.clock().runFor(121);
-        page.waitForCondition(() -> (Boolean) page.evaluate(
-                "() => !state.writeActive && state.savedCreator.steps.result?.name === 'Renamed normalizer'"));
-        held.getFirst().resume();
-        page.waitForCondition(() -> held.size() == 2);
-        page.clock().resume();
-        page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
-                new Page.GetByRoleOptions().setName("Close problems").setExact(true)).click();
-        page.unroute("**/api/editor?node=normalize&**");
-        held.getLast().resume();
-        page.waitForFunction("() => !state.editorController");
-        assertThat(page.locator("#inspector").isHidden()).isTrue();
-        assertThat(page.locator("#inspector").getAttribute("data-selection")).isEqualTo("result");
-        assertThat(pageErrors).isEmpty();
+            page.waitForCondition(() -> held.size() == 1 && saves.size() == 1);
+            final var saved = page.waitForResponse(response -> response.url().endsWith("/api/editor")
+                    && response.request().method().equals("POST"), () -> saves.removeFirst().resume());
+            assertThat(saved.status()).isEqualTo(200);
+            page.waitForFunction("() => !state.writeActive && state.savedCreator.steps.result?.name === 'Renamed normalizer'");
+            held.removeFirst().resume();
+            page.waitForCondition(() -> held.size() == 1);
+            page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                    new Page.GetByRoleOptions().setName("Close problems").setExact(true)).click();
+            held.removeFirst().resume();
+            page.waitForFunction("() => !state.editorController");
+            assertThat(page.locator("#inspector").isHidden()).isTrue();
+            assertThat(page.locator("#inspector").getAttribute("data-selection")).isEqualTo("result");
+            assertThat(pageErrors).isEmpty();
+        } finally {
+            page.unroute("**/api/editor");
+            page.unroute("**/api/editor?node=normalize&**");
+            saves.forEach(Route::abort);
+            held.forEach(Route::abort);
+        }
     }
 
     @Test
