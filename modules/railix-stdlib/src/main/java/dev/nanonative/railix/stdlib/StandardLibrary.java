@@ -140,8 +140,9 @@ public final class StandardLibrary {
                         .defaultValue(RailixValue.string("default"))
                         .validation(String.class, value -> DatabaseStepHandlers.validCollectionName(value)
                                 ? Optional.empty()
-                                : Optional.of("Collection must start with an ASCII letter or digit and contain 1 to 64 "
-                                        + "ASCII letters, digits, '.', '_', or '-'.")))
+                                : Optional.of("Collection must start and end with a lowercase ASCII letter or digit, "
+                                        + "contain 1 to 64 lowercase ASCII letters, digits, '.', '_', or '-', and "
+                                        + "avoid OS-reserved device names.")))
                 .input("directory", Input.json(ValueShape.STRING)
                         .defaultValue(RailixValue.string(".railix/data"))
                         .validation(String.class, value -> DatabaseStepHandlers.validStorageDirectory(value)
@@ -153,49 +154,23 @@ public final class StandardLibrary {
                         .validation(String.class, value -> DatabaseStepHandlers.validKeyField(value)
                                 ? Optional.empty()
                                 : Optional.of("Key field must be a non-blank UTF-8 string up to 128 bytes.")))
-                .input("unique_fields", Input.json(ValueShape.ARRAY)
-                        .defaultValue(RailixValue.array(List.of()))
-                        .validation(RailixValue.ArrayValue.class, DatabaseStepHandlers::fieldListRejection))
-                .input("index_fields", Input.json(ValueShape.ARRAY)
-                        .defaultValue(RailixValue.array(List.of()))
-                        .validation(RailixValue.ArrayValue.class, DatabaseStepHandlers::fieldListRejection))
+                .input("unique_fields", databaseFieldListInput())
+                .input("index_fields", databaseFieldListInput())
                 .input("operation", Input.options(
                         Input.option("upsert")
                                 .input("document", Input.path(READ).defaultPath("context", "payload"))
                                 .input("auto_key", Input.json(ValueShape.BOOLEAN)
                                         .defaultValue(RailixValue.bool(true)))
-                                .input("fields", Input.json(ValueShape.ARRAY)
-                                        .defaultValue(RailixValue.array(List.of()))
-                                        .validation(RailixValue.ArrayValue.class,
-                                                DatabaseStepHandlers::fieldListRejection)),
-                        Input.option("bulk_upsert")
-                                .input("documents", Input.path(READ).defaultPath("context", "payload"))
-                                .input("auto_key", Input.json(ValueShape.BOOLEAN)
-                                        .defaultValue(RailixValue.bool(true)))
-                                .input("fields", Input.json(ValueShape.ARRAY)
-                                        .defaultValue(RailixValue.array(List.of()))
-                                        .validation(RailixValue.ArrayValue.class,
-                                                DatabaseStepHandlers::fieldListRejection)),
+                                .input("fields", databaseFieldListInput()),
                         Input.option("get")
-                                .input("key", Input.path(READ).defaultPath("context", "payload", "_id"))
-                                .input("fields", Input.json(ValueShape.ARRAY)
-                                        .defaultValue(RailixValue.array(List.of()))
-                                        .validation(RailixValue.ArrayValue.class,
-                                                DatabaseStepHandlers::fieldListRejection))
-                                .input("defaults", Input.json(ValueShape.OBJECT)
-                                        .defaultValue(RailixValue.object(Map.of()))
-                                        .validation(RailixValue.ObjectValue.class,
-                                                DatabaseStepHandlers::defaultsRejection)),
+                                .input("key", databaseKeyPathInput())
+                                .input("fields", databaseFieldListInput())
+                                .input("defaults", databaseDefaultsInput()),
                         Input.option("find")
                                 .input("filter", Input.path(READ).defaultPath("context", "payload"))
-                                .input("fields", Input.json(ValueShape.ARRAY)
-                                        .defaultValue(RailixValue.array(List.of()))
-                                        .validation(RailixValue.ArrayValue.class,
-                                                DatabaseStepHandlers::fieldListRejection))
-                                .input("defaults", Input.json(ValueShape.OBJECT)
-                                        .defaultValue(RailixValue.object(Map.of()))
-                                        .validation(RailixValue.ObjectValue.class,
-                                                DatabaseStepHandlers::defaultsRejection))
+                                .input("after", Input.path(READ).optional())
+                                .input("fields", databaseFieldListInput())
+                                .input("defaults", databaseDefaultsInput())
                                 .input("limit", Input.json(ValueShape.NUMBER)
                                         .defaultValue(RailixValue.number(DatabaseStepHandlers.DEFAULT_FIND_LIMIT))
                                         .between(RailixValue.number(1),
@@ -206,12 +181,28 @@ public final class StandardLibrary {
                                                         : Optional.of("Limit must be between 1 and "
                                                                 + DatabaseStepHandlers.MAX_FIND_LIMIT + "."))),
                         Input.option("delete")
-                                .input("key", Input.path(READ).defaultPath("context", "payload", "_id"))
+                                .input("key", databaseKeyPathInput())
                 ).defaultOption("upsert"))
                 .input("target", Input.path(WRITE).defaultPath("context", "result"))
                 .outcome("not_found")
                 .outcome("invalid")
                 .implementation(DatabaseStepHandlers.class);
+    }
+
+    private static StepDefinition.JsonInput databaseFieldListInput() {
+        return Input.json(ValueShape.ARRAY)
+                .defaultValue(RailixValue.array(List.of()))
+                .validation(RailixValue.ArrayValue.class, DatabaseStepHandlers::fieldListRejection);
+    }
+
+    private static StepDefinition.JsonInput databaseDefaultsInput() {
+        return Input.json(ValueShape.OBJECT)
+                .defaultValue(RailixValue.object(Map.of()))
+                .validation(RailixValue.ObjectValue.class, DatabaseStepHandlers::defaultsRejection);
+    }
+
+    private static StepDefinition.PathInput databaseKeyPathInput() {
+        return Input.path(READ).defaultPath("context", "payload", "_id");
     }
 
     private static StepDefinition fieldManipulation() {

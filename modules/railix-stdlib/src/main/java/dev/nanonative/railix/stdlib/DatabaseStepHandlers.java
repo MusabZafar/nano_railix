@@ -31,6 +31,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -40,10 +41,48 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32;
 
 /**
- * Pure-JDK local document collection persistence Step implementation.
+ * Pure-JDK local document collection persistence Step implementation ({@code railix.database}).
  *
- * <p>Kept free of nested classes so generated applications package only a single class entry when
- * {@code railix.database} is referenced and omit it completely otherwise.</p>
+ * <h2>Durability and Recovery Guarantees</h2>
+ * <ul>
+ *   <li>Every committed {@code upsert} (single document or batch array) and {@code delete} appends
+ *       CRC32-checksummed binary frames to {@code journal.wal} and flushes file content via
+ *       {@link FileChannel#force(boolean) journal.force(false)} before returning {@code ok}.</li>
+ *   <li>On startup, {@link #replayJournal()} distinguishes an interrupted trailing write at EOF
+ *       (a partial header matching the valid header prefix or a valid header whose declared payload
+ *       extends past EOF) from data corruption (invalid header magic/bounds, CRC32 mismatch on a
+ *       complete frame, invalid UTF-8 key, bucket mismatch, or corrupted JSON payload). Incomplete
+ *       trailing writes at EOF are truncated cleanly; corruption throws {@link IllegalStateException}
+ *       with {@code DATABASE_JOURNAL_CORRUPTED} while preserving the damaged {@code journal.wal}
+ *       file intact on disk without truncating subsequent records.</li>
+ *   <li>When superseded and tombstoned bytes reach {@link #COMPACT_MIN_DEAD_BYTES} and exceed live
+ *       payload bytes, compaction rewrites live records sequentially to {@code journal.wal.compact},
+ *       forces it to disk, and atomically replaces {@code journal.wal}.</li>
+ * </ul>
+ *
+ * <h2>Concurrency and Scope</h2>
+ * <ul>
+ *   <li>Cross-process ownership is enforced via an exclusive OS {@link FileLock} on
+ *       {@code collection.lock}, which also records the canonical collection name to detect
+ *       filesystem path or case-insensitivity collisions.</li>
+ *   <li>Within one running application, placements referencing the same collection directory share
+ *       one store instance via {@code context.resource} and coordinate concurrent virtual-thread
+ *       reads and serialized writes through a {@link ReentrantReadWriteLock}.</li>
+ *   <li>Multi-node replication and cross-document/multi-collection transactions are out of scope.</li>
+ * </ul>
+ *
+ * <h2>Storage Location and Safety Bounds</h2>
+ * <ul>
+ *   <li>Absolute {@code directory} paths are used directly; relative paths resolve against the
+ *       {@code railix.data.dir} system property, the {@code RAILIX_DATA_DIR} environment variable,
+ *       the Creator project root (when launched from {@code .railix/build/<entry>/application.jar}),
+ *       or the process working directory.</li>
+ *   <li>{@link #MAX_PAYLOAD_BYTES} (1 MiB) matches {@link RailixData#DEFAULT_MAX_SOURCE_BYTES} to
+ *       bound per-document memory during concurrent reads and compaction; {@link #MAX_FIELD_NAMES}
+ *       (32) bounds per-placement secondary index maintenance and projection fan-out; {@code find}
+ *       returns pages of up to {@link #MAX_FIND_LIMIT} (1,000) documents with keyset continuation
+ *       via the optional {@code after} input.</li>
+ * </ul>
  */
 public final class DatabaseStepHandlers {
     static final int BUCKET_COUNT = 1_024;
@@ -57,26 +96,53 @@ public final class DatabaseStepHandlers {
     private static final byte KEY_NUMBER = 2;
 
     private static final int MAX_KEY_BYTES = 1_024;
-    private static final int MAX_PAYLOAD_BYTES = RailixData.DEFAULT_MAX_SOURCE_BYTES;
-    private static final int MAX_BULK_FRAME_BYTES = RailixData.MAX_SOURCE_BYTES;
-    private static final int LENGTH_BITS = 21;
-    private static final long LENGTH_MASK = (1L << LENGTH_BITS) - 1L;
+    /** Matches {@link RailixData#DEFAULT_MAX_SOURCE_BYTES} (1 MiB) to bound single-document heap allocations. */
+    static final int MAX_PAYLOAD_BYTES = RailixData.DEFAULT_MAX_SOURCE_BYTES;
+    /** Matches {@link RailixData#MAX_SOURCE_BYTES} (16 MiB) to bound total buffered bytes in one batch write. */
+    static final int MAX_BULK_FRAME_BYTES = RailixData.MAX_SOURCE_BYTES;
     private static final long COMPACT_MIN_DEAD_BYTES = 65_536L;
 
+    /** Caps per-placement field lists so secondary-index maintenance and projection fan-out remain bounded. */
     static final int MAX_FIELD_NAMES = 32;
     static final int DEFAULT_FIND_LIMIT = 100;
     static final int MAX_FIND_LIMIT = 1_000;
+
+    private static final Set<String> RESERVED_DEVICE_NAMES = Set.of(
+            "con", "prn", "aux", "nul",
+            "com0", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+            "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"
+    );
 
     private static final ValueRefinement DOCUMENT_REFINEMENT = ValueRefinement.canonical()
             .withMaxJsonBytes(MAX_PAYLOAD_BYTES);
     private static final RailixValue.ObjectValue NO_DEFAULTS = RailixValue.object(Map.of());
 
+    private record RecordLocation(long payloadOffset, int keyLength, int payloadLength) {
+        long frameOffset() {
+            return payloadOffset - HEADER_BYTES - keyLength;
+        }
+    }
+
+    private record PreparedWrite(
+            String indexKey,
+            byte keyType,
+            short bucket,
+            byte[] keyBytes,
+            byte[] payloadBytes,
+            RailixValue.ObjectValue document
+    ) {
+        long frameBytes() {
+            return (long) HEADER_BYTES + keyBytes.length + payloadBytes.length;
+        }
+    }
+
+    private final String collectionName;
     private final Path directory;
     private final Path lockPath;
     private final Path journalPath;
     private final Path compactPath;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
-    private final Map<String, Long> index = new HashMap<>();
+    private final Map<String, RecordLocation> index = new HashMap<>();
     /** Secondary index field -> primary index key -> encoded scalar value; mutated only under the write lock. */
     private final Map<String, Map<String, String>> indexValueByKey = new HashMap<>();
     /** Secondary index field -> encoded scalar value -> primary index keys; mutated only under the write lock. */
@@ -91,9 +157,13 @@ public final class DatabaseStepHandlers {
     private long writeOffset;
     private long livePayloadBytes;
     private long deadBytes;
+    private volatile long lastCompactionPauseNanos;
+    private String configuredKeyField;
+    private boolean initialized;
     private boolean closed;
 
-    private DatabaseStepHandlers(final Path collectionDirectory) {
+    private DatabaseStepHandlers(final String collectionName, final Path collectionDirectory) {
+        this.collectionName = collectionName;
         this.directory = collectionDirectory;
         this.lockPath = collectionDirectory.resolve("collection.lock");
         this.journalPath = collectionDirectory.resolve("journal.wal");
@@ -108,21 +178,23 @@ public final class DatabaseStepHandlers {
      * @param configuration compiled collection, directory, key_field, index, and operation configuration
      * @param context lifecycle context supplying placement-owned resource management
      * @return primary outcome once the collection journal is replayed, locked, and indexed
-     * @throws IllegalStateException when existing records violate a declared unique index
+     * @throws IllegalStateException when existing records violate a declared unique index or journal is corrupted
      */
     public static StepResult pre(final StepInput configuration, final StepInput context) {
+        final String collection = configuration.string("collection");
         final Path collectionDirectory = resolveCollectionDirectory(
                 configuration.string("directory"),
-                configuration.string("collection")
+                collection
         );
         final DatabaseStepHandlers store = context.resource(
                 "store",
                 DatabaseStepHandlers.class,
                 collectionDirectory,
-                () -> openStore(collectionDirectory),
+                () -> openStore(collection, collectionDirectory),
                 DatabaseStepHandlers::closeStore
         );
         store.ensureIndexes(
+                collection,
                 configuration.string("key_field"),
                 fieldNames(configuration.optionalValue("unique_fields")),
                 fieldNames(configuration.optionalValue("index_fields"))
@@ -131,8 +203,8 @@ public final class DatabaseStepHandlers {
     }
 
     /**
-     * Executes the configured collection operation ({@code upsert}, {@code bulk_upsert}, {@code get},
-     * {@code find}, or {@code delete}).
+     * Executes the configured collection operation ({@code upsert}, {@code get}, {@code find}, or {@code delete}).
+     * {@code upsert} accepts either a single document ({@code OBJECT}) or a batch list of documents ({@code ARRAY}).
      *
      * @param configuration compiled Step settings
      * @param input resolved runtime invocation values
@@ -148,13 +220,17 @@ public final class DatabaseStepHandlers {
                     keyField,
                     booleanOption(selected, "auto_key"),
                     fieldNames(selected.optionalValue("fields")),
-                    selected.optionalValue("document").orElse(null)
+                    selected.optionalValue("document")
+                            .or(() -> selected.optionalValue("documents"))
+                            .orElse(null)
             );
-            case "bulk_upsert" -> store.bulkUpsert(
+            case "bulk_upsert" -> store.upsertBatch(
                     keyField,
                     booleanOption(selected, "auto_key"),
                     fieldNames(selected.optionalValue("fields")),
-                    selected.optionalValue("documents").orElse(null)
+                    selected.optionalValue("documents")
+                            .or(() -> selected.optionalValue("document"))
+                            .orElse(null)
             );
             case "get" -> store.get(
                     keyField,
@@ -167,7 +243,8 @@ public final class DatabaseStepHandlers {
                     fieldNames(selected.optionalValue("fields")),
                     defaults(selected),
                     limit(selected),
-                    selected.optionalValue("filter").orElse(null)
+                    selected.optionalValue("filter").orElse(null),
+                    selected.optionalValue("after").orElse(null)
             );
             case "delete" -> store.delete(selected.optionalValue("key").orElse(null));
             default -> throw new IllegalArgumentException("Unsupported database operation: " + operation);
@@ -190,6 +267,10 @@ public final class DatabaseStepHandlers {
         } finally {
             rwLock.readLock().unlock();
         }
+    }
+
+    long lastCompactionPauseNanos() {
+        return lastCompactionPauseNanos;
     }
 
     private static boolean booleanOption(final StepInput selected, final String name) {
@@ -280,11 +361,27 @@ public final class DatabaseStepHandlers {
      * Existing indexes are kept; newly requested fields are built from stored documents, and newly
      * unique fields are verified before any writes are admitted.
      */
-    private void ensureIndexes(final String keyField, final List<String> unique, final List<String> indexed) {
+    private void ensureIndexes(
+            final String requestedCollection,
+            final String keyField,
+            final List<String> unique,
+            final List<String> indexed
+    ) {
         rwLock.writeLock().lock();
         final List<String> added = new ArrayList<>();
         try {
             ensureOpen();
+            if (!collectionName.equals(requestedCollection)) {
+                throw new IllegalStateException("DATABASE_COLLECTION_COLLISION: Directory " + directory
+                        + " belongs to collection '" + collectionName + "', not '" + requestedCollection + "'.");
+            }
+            if (configuredKeyField == null) {
+                configuredKeyField = keyField;
+            } else if (!configuredKeyField.equals(keyField)) {
+                throw new IllegalStateException("DATABASE_KEY_FIELD_MISMATCH: Collection '" + collectionName
+                        + "' in " + directory + " uses key_field '" + configuredKeyField
+                        + "', not '" + keyField + "'.");
+            }
             final Set<String> nextUnique = new LinkedHashSet<>(uniqueFields);
             final Set<String> nextIndexed = new LinkedHashSet<>(indexedFields);
             for (final String field : unique) {
@@ -311,7 +408,7 @@ public final class DatabaseStepHandlers {
                 indexValueByKey.put(field, new HashMap<>());
                 indexKeysByValue.put(field, new HashMap<>());
             }
-            for (final Map.Entry<String, Long> entry : index.entrySet()) {
+            for (final Map.Entry<String, RecordLocation> entry : index.entrySet()) {
                 final RailixValue.ObjectValue document = parseStoredObject(readPayloadBytes(journal, entry.getValue()));
                 for (final String field : nextUnique) {
                     if (!uniqueCompatible(document.values().get(field))) {
@@ -476,31 +573,51 @@ public final class DatabaseStepHandlers {
         }
         final Path configured = Path.of(configuredDirectory);
         final Path base = configured.isAbsolute()
-                ? configured.normalize()
-                : defaultBaseDirectory().resolve(configured).normalize();
+                ? configured.toAbsolutePath().normalize()
+                : defaultBaseDirectory().resolve(configured).toAbsolutePath().normalize();
         return base.resolve(collection).normalize();
     }
 
+    /**
+     * Enforces portable, OS-independent collection naming: 1 to 64 characters starting and ending
+     * with a lowercase ASCII letter or digit, containing only {@code a-z}, {@code 0-9}, {@code .},
+     * {@code _}, or {@code -} without consecutive dots or Windows-reserved device names.
+     */
     static boolean validCollectionName(final String value) {
         if (value == null || value.isEmpty() || value.length() > 64) {
             return false;
         }
-        final char first = value.charAt(0);
-        if (!asciiAlphanumeric(first)) {
+        if (!lowercaseAlphanumeric(value.charAt(0)) || !lowercaseAlphanumeric(value.charAt(value.length() - 1))) {
             return false;
         }
-        for (int i = 1; i < value.length(); i++) {
+        char previous = 0;
+        for (int i = 0; i < value.length(); i++) {
             final char c = value.charAt(i);
-            if (!asciiAlphanumeric(c) && c != '.' && c != '_' && c != '-') {
+            if (!lowercaseAlphanumeric(c) && c != '.' && c != '_' && c != '-') {
                 return false;
             }
+            if (c == '.' && previous == '.') {
+                return false;
+            }
+            previous = c;
         }
-        return true;
+        final int dot = value.indexOf('.');
+        final String stem = (dot >= 0 ? value.substring(0, dot) : value).toLowerCase(Locale.ROOT);
+        return !RESERVED_DEVICE_NAMES.contains(stem);
     }
 
     static boolean validStorageDirectory(final String value) {
-        if (value == null || value.isBlank() || value.length() > 512 || value.indexOf('\0') >= 0) {
+        if (value == null || value.isBlank() || value.length() > 512) {
             return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            final char c = value.charAt(i);
+            if (c < 32 || c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*') {
+                return false;
+            }
+            if (c == ':' && !(i == 1 && asciiLetter(value.charAt(0)))) {
+                return false;
+            }
         }
         final Path path;
         try {
@@ -509,7 +626,8 @@ public final class DatabaseStepHandlers {
             return false;
         }
         for (final Path segment : path) {
-            if ("..".equals(segment.toString())) {
+            final String part = segment.toString();
+            if ("..".equals(part) || ".".equals(part) || part.endsWith(" ") || part.endsWith(".")) {
                 return false;
             }
         }
@@ -523,11 +641,19 @@ public final class DatabaseStepHandlers {
         return value.getBytes(StandardCharsets.UTF_8).length <= 128;
     }
 
-    private static boolean asciiAlphanumeric(final char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    private static boolean asciiLetter(final char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    private static boolean lowercaseAlphanumeric(final char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
     }
 
     private static Path defaultBaseDirectory() {
+        final String prop = System.getProperty("railix.data.dir");
+        if (prop != null && !prop.isBlank()) {
+            return Path.of(prop).toAbsolutePath().normalize();
+        }
         final String env = System.getenv("RAILIX_DATA_DIR");
         if (env != null && !env.isBlank()) {
             return Path.of(env).toAbsolutePath().normalize();
@@ -553,8 +679,8 @@ public final class DatabaseStepHandlers {
         return Path.of("").toAbsolutePath().normalize();
     }
 
-    private static DatabaseStepHandlers openStore(final Path collectionDirectory) {
-        final DatabaseStepHandlers store = new DatabaseStepHandlers(collectionDirectory);
+    private static DatabaseStepHandlers openStore(final String collectionName, final Path collectionDirectory) {
+        final DatabaseStepHandlers store = new DatabaseStepHandlers(collectionName, collectionDirectory);
         try {
             store.initialize();
             return store;
@@ -572,7 +698,12 @@ public final class DatabaseStepHandlers {
 
     private void initialize() throws IOException {
         Files.createDirectories(directory);
-        lockChannel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+        lockChannel = FileChannel.open(
+                lockPath,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE
+        );
         try {
             fileLock = lockChannel.tryLock();
         } catch (final OverlappingFileLockException lockedInJvm) {
@@ -583,6 +714,7 @@ public final class DatabaseStepHandlers {
                     "DATABASE_COLLECTION_LOCKED: Collection is already locked by another writer: " + directory
             );
         }
+        verifyOrRecordCollectionOwner();
         if (!Files.exists(journalPath) && Files.exists(compactPath)) {
             moveJournal(compactPath, journalPath);
         } else {
@@ -598,15 +730,62 @@ public final class DatabaseStepHandlers {
         if (shouldCompact()) {
             compactUnderWriteLock();
         }
+        initialized = true;
     }
 
+    private void verifyOrRecordCollectionOwner() throws IOException {
+        final long lockSize = lockChannel.size();
+        if (lockSize > 0L) {
+            final int length = (int) Math.min(lockSize, 256L);
+            final byte[] bytes = new byte[length];
+            readFully(lockChannel, ByteBuffer.wrap(bytes), 0L);
+            final String recorded = decodeUtf8(bytes, 0, length);
+            final String existing = recorded == null ? "" : recorded.strip();
+            if (!existing.isEmpty() && !existing.equals(collectionName)) {
+                throw new IllegalStateException("DATABASE_COLLECTION_COLLISION: Directory " + directory
+                        + " belongs to collection '" + existing + "', not '" + collectionName + "'.");
+            }
+            if (!existing.isEmpty()) {
+                return;
+            }
+        }
+        final byte[] ownerBytes = (collectionName + "\n").getBytes(StandardCharsets.UTF_8);
+        writeFully(lockChannel, ByteBuffer.wrap(ownerBytes), 0L);
+        lockChannel.force(false);
+    }
+
+    /**
+     * Replays committed frames from {@code journal.wal}.
+     *
+     * <p>Only an incomplete trailing write at EOF (a partial frame header matching the valid header
+     * prefix or a valid header whose declared payload extends beyond EOF) is truncated. Any invalid
+     * magic, invalid header field, CRC32 mismatch on a complete frame, invalid UTF-8 key, bucket
+     * mismatch, or corrupted JSON payload throws {@link IllegalStateException} without truncating
+     * {@code journal.wal} so damaged files are preserved intact.</p>
+     */
     private void replayJournal() throws IOException {
         final long fileSize = journal.size();
         final ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES);
         long offset = 0L;
-        while (offset + HEADER_BYTES <= fileSize) {
+        boolean incompleteTrailingWrite = false;
+
+        while (offset < fileSize) {
+            final long remaining = fileSize - offset;
+            if (remaining < HEADER_BYTES) {
+                final byte[] partial = new byte[(int) remaining];
+                if (!readFully(journal, ByteBuffer.wrap(partial), offset)) {
+                    incompleteTrailingWrite = true;
+                    break;
+                }
+                if (!validPartialHeader(partial)) {
+                    throw corruptedJournal(offset, "Invalid partial frame header");
+                }
+                incompleteTrailingWrite = true;
+                break;
+            }
             header.clear();
             if (!readFully(journal, header, offset)) {
+                incompleteTrailingWrite = true;
                 break;
             }
             header.flip();
@@ -618,53 +797,113 @@ public final class DatabaseStepHandlers {
             final int payloadLength = header.getInt();
             final int expectedCrc = header.getInt();
             if (!validFrameHeader(magic, op, keyType, bucket, keyLength, payloadLength)) {
-                break;
+                throw corruptedJournal(offset, "Invalid frame header");
             }
             final long frameBytes = (long) HEADER_BYTES + keyLength + payloadLength;
             if (offset + frameBytes > fileSize) {
+                incompleteTrailingWrite = true;
                 break;
             }
             final byte[] body = new byte[keyLength + payloadLength];
             if (!readFully(journal, ByteBuffer.wrap(body), offset + HEADER_BYTES)) {
+                incompleteTrailingWrite = true;
                 break;
             }
             if (frameChecksum(op, keyType, (short) bucket, keyLength, payloadLength, body) != expectedCrc) {
-                break;
+                throw corruptedJournal(offset, "Frame CRC32 checksum mismatch");
             }
             final String rawKey = decodeUtf8(body, 0, keyLength);
             if (rawKey == null) {
-                break;
+                throw corruptedJournal(offset, "Invalid UTF-8 key");
             }
             final String indexKey = (keyType == KEY_STRING ? "s:" : "n:") + rawKey;
             if (bucketOf(indexKey) != bucket) {
-                break;
+                throw corruptedJournal(offset, "Key partition bucket mismatch");
             }
             if (op == OP_UPSERT) {
+                if (!validJsonObjectDelimiters(body, keyLength, payloadLength)) {
+                    throw corruptedJournal(offset, "Corrupted JSON document payload");
+                }
                 final long payloadOffset = offset + HEADER_BYTES + keyLength;
-                final Long previous = index.put(indexKey, pack(payloadOffset, payloadLength));
+                final RecordLocation previous = index.put(
+                        indexKey,
+                        new RecordLocation(payloadOffset, keyLength, payloadLength)
+                );
                 if (previous != null) {
-                    final int prevLen = unpackLength(previous);
-                    livePayloadBytes -= prevLen;
-                    deadBytes += (long) HEADER_BYTES + keyLength + prevLen;
+                    livePayloadBytes -= previous.payloadLength();
+                    deadBytes += (long) HEADER_BYTES + previous.keyLength() + previous.payloadLength();
                 }
                 livePayloadBytes += payloadLength;
             } else {
-                final Long previous = index.remove(indexKey);
+                final RecordLocation previous = index.remove(indexKey);
                 if (previous != null) {
-                    final int prevLen = unpackLength(previous);
-                    livePayloadBytes -= prevLen;
-                    deadBytes += (long) HEADER_BYTES + keyLength + prevLen + HEADER_BYTES + keyLength;
+                    livePayloadBytes -= previous.payloadLength();
+                    deadBytes += (long) HEADER_BYTES + previous.keyLength() + previous.payloadLength()
+                            + HEADER_BYTES + keyLength;
                 } else {
                     deadBytes += (long) HEADER_BYTES + keyLength;
                 }
             }
             offset += frameBytes;
         }
-        if (offset < fileSize) {
+        for (final RecordLocation location : index.values()) {
+            parseStoredObject(readPayloadBytes(journal, location));
+        }
+        if (incompleteTrailingWrite && offset < fileSize) {
             journal.truncate(offset);
             journal.force(false);
         }
         writeOffset = offset;
+    }
+
+    private IllegalStateException corruptedJournal(final long offset, final String detail) {
+        return new IllegalStateException("DATABASE_JOURNAL_CORRUPTED: " + detail + " at byte offset " + offset
+                + " in " + journalPath + "; damaged journal preserved without truncation.");
+    }
+
+    private static boolean validPartialHeader(final byte[] partial) {
+        final int len = partial.length;
+        for (int i = 0; i < Math.min(len, 4); i++) {
+            final byte expectedMagicByte = (byte) ((MAGIC >>> (24 - i * 8)) & 0xff);
+            if (partial[i] != expectedMagicByte) {
+                return false;
+            }
+        }
+        final ByteBuffer buf = ByteBuffer.wrap(partial);
+        if (len >= 5) {
+            final byte op = buf.get(4);
+            if (op != OP_UPSERT && op != OP_DELETE) {
+                return false;
+            }
+            if (len >= 6) {
+                final byte keyType = buf.get(5);
+                if (keyType != KEY_STRING && keyType != KEY_NUMBER) {
+                    return false;
+                }
+            }
+            if (len >= 8) {
+                final int bucket = Short.toUnsignedInt(buf.getShort(6));
+                if (bucket >= BUCKET_COUNT) {
+                    return false;
+                }
+            }
+            if (len >= 12) {
+                final int keyLength = buf.getInt(8);
+                if (keyLength < 1 || keyLength > MAX_KEY_BYTES) {
+                    return false;
+                }
+            }
+            if (len >= 16) {
+                final int payloadLength = buf.getInt(12);
+                final boolean validPayload = op == OP_UPSERT
+                        ? payloadLength >= 2 && payloadLength <= MAX_PAYLOAD_BYTES
+                        : payloadLength == 0;
+                if (!validPayload) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static boolean validFrameHeader(
@@ -701,62 +940,23 @@ public final class DatabaseStepHandlers {
             final List<String> fields,
             final RailixValue candidate
     ) {
+        if (candidate instanceof RailixValue.ArrayValue array) {
+            return upsertBatch(keyField, autoKey, fields, array);
+        }
         if (!(candidate instanceof RailixValue.ObjectValue rawObject)) {
             return StepResult.outcome("invalid");
         }
-        final RailixValue.ObjectValue document = prepareDocumentKey(rawObject, keyField, autoKey);
-        if (document == null) {
+        final PreparedWrite prepared = prepareWrite(rawObject, keyField, autoKey, fields);
+        if (prepared == null) {
             return StepResult.outcome("invalid");
         }
-        final String indexKey = encodeIndexKey(document.values().get(keyField));
-        if (indexKey == null || DOCUMENT_REFINEMENT.rejection(document).isPresent()) {
+        if (!commitPreparedWrites(List.of(prepared), Map.of(prepared.indexKey(), prepared.document()), "upsert")) {
             return StepResult.outcome("invalid");
         }
-        final RailixValue.ObjectValue canonicalDocument = canonicalObject(project(document, keyField, fields));
-        if (!uniqueFieldsCompatible(uniqueFields, canonicalDocument)) {
-            return StepResult.outcome("invalid");
-        }
-        final Optional<String> serialized = RailixJson.write(canonicalDocument, MAX_PAYLOAD_BYTES);
-        if (serialized.isEmpty()) {
-            return StepResult.outcome("invalid");
-        }
-        final byte[] payloadBytes = serialized.get().getBytes(StandardCharsets.UTF_8);
-        final byte keyType = indexKey.charAt(0) == 's' ? KEY_STRING : KEY_NUMBER;
-        final byte[] keyBytes = indexKey.substring(2).getBytes(StandardCharsets.UTF_8);
-        final ByteBuffer frame = buildFrame(OP_UPSERT, keyType, (short) bucketOf(indexKey), keyBytes, payloadBytes);
-
-        rwLock.writeLock().lock();
-        try {
-            ensureOpen();
-            if (!uniqueFields.isEmpty() && uniqueConflict(Map.of(indexKey, canonicalDocument))) {
-                return StepResult.outcome("invalid");
-            }
-            final long frameOffset = writeOffset;
-            writeFully(journal, frame, frameOffset);
-            journal.force(false);
-            writeOffset = frameOffset + HEADER_BYTES + keyBytes.length + payloadBytes.length;
-            final long payloadOffset = frameOffset + HEADER_BYTES + keyBytes.length;
-            final Long previous = index.put(indexKey, pack(payloadOffset, payloadBytes.length));
-            if (previous != null) {
-                final int prevLen = unpackLength(previous);
-                livePayloadBytes -= prevLen;
-                deadBytes += (long) HEADER_BYTES + keyBytes.length + prevLen;
-            }
-            livePayloadBytes += payloadBytes.length;
-            reindex(indexKey, canonicalDocument);
-            if (shouldCompact()) {
-                compactUnderWriteLock();
-            }
-        } catch (final IOException exception) {
-            rollbackJournalTail(exception);
-            throw new UncheckedIOException("Database upsert failed in collection " + directory + ".", exception);
-        } finally {
-            rwLock.writeLock().unlock();
-        }
-        return StepResult.outcome("ok").write("target", canonicalDocument);
+        return StepResult.outcome("ok").write("target", prepared.document());
     }
 
-    private StepResult bulkUpsert(
+    private StepResult upsertBatch(
             final String keyField,
             final boolean autoKey,
             final List<String> fields,
@@ -770,58 +970,80 @@ public final class DatabaseStepHandlers {
             return StepResult.outcome("ok").write("target", RailixValue.array(List.of()));
         }
         final int count = items.size();
+        final List<PreparedWrite> preparedWrites = new ArrayList<>(count);
         final List<RailixValue> savedDocuments = new ArrayList<>(count);
         final Map<String, RailixValue.ObjectValue> finalDocuments = new LinkedHashMap<>();
-        final String[] indexKeys = new String[count];
-        final byte[][] keyBytesList = new byte[count][];
-        final byte[][] payloadBytesList = new byte[count][];
         long totalFrameBytes = 0L;
 
         for (int i = 0; i < count; i++) {
             if (!(items.get(i) instanceof RailixValue.ObjectValue rawObject)) {
                 return StepResult.outcome("invalid");
             }
-            final RailixValue.ObjectValue document = prepareDocumentKey(rawObject, keyField, autoKey);
-            if (document == null) {
+            final PreparedWrite prepared = prepareWrite(rawObject, keyField, autoKey, fields);
+            if (prepared == null) {
                 return StepResult.outcome("invalid");
             }
-            final String indexKey = encodeIndexKey(document.values().get(keyField));
-            if (indexKey == null || DOCUMENT_REFINEMENT.rejection(document).isPresent()) {
-                return StepResult.outcome("invalid");
-            }
-            final RailixValue.ObjectValue canonicalDocument = canonicalObject(project(document, keyField, fields));
-            if (!uniqueFieldsCompatible(uniqueFields, canonicalDocument)) {
-                return StepResult.outcome("invalid");
-            }
-            final Optional<String> serialized = RailixJson.write(canonicalDocument, MAX_PAYLOAD_BYTES);
-            if (serialized.isEmpty()) {
-                return StepResult.outcome("invalid");
-            }
-            final byte[] keyBytes = indexKey.substring(2).getBytes(StandardCharsets.UTF_8);
-            final byte[] payloadBytes = serialized.get().getBytes(StandardCharsets.UTF_8);
-            final long frameBytes = (long) HEADER_BYTES + keyBytes.length + payloadBytes.length;
-            totalFrameBytes += frameBytes;
+            totalFrameBytes += prepared.frameBytes();
             if (totalFrameBytes > MAX_BULK_FRAME_BYTES) {
                 return StepResult.outcome("invalid");
             }
-            indexKeys[i] = indexKey;
-            keyBytesList[i] = keyBytes;
-            payloadBytesList[i] = payloadBytes;
-            savedDocuments.add(canonicalDocument);
-            finalDocuments.put(indexKey, canonicalDocument);
+            preparedWrites.add(prepared);
+            savedDocuments.add(prepared.document());
+            finalDocuments.put(prepared.indexKey(), prepared.document());
         }
+        if (!commitPreparedWrites(preparedWrites, finalDocuments, "upsert")) {
+            return StepResult.outcome("invalid");
+        }
+        return StepResult.outcome("ok").write("target", RailixValue.array(savedDocuments));
+    }
 
-        final ByteBuffer batch = ByteBuffer.allocate((int) totalFrameBytes);
-        for (int i = 0; i < count; i++) {
-            final byte keyType = indexKeys[i].charAt(0) == 's' ? KEY_STRING : KEY_NUMBER;
-            appendFrame(
-                    batch,
-                    OP_UPSERT,
-                    keyType,
-                    (short) bucketOf(indexKeys[i]),
-                    keyBytesList[i],
-                    payloadBytesList[i]
-            );
+    private PreparedWrite prepareWrite(
+            final RailixValue.ObjectValue rawObject,
+            final String keyField,
+            final boolean autoKey,
+            final List<String> fields
+    ) {
+        final RailixValue.ObjectValue document = prepareDocumentKey(rawObject, keyField, autoKey);
+        if (document == null) {
+            return null;
+        }
+        final String indexKey = encodeIndexKey(document.values().get(keyField));
+        if (indexKey == null || DOCUMENT_REFINEMENT.rejection(document).isPresent()) {
+            return null;
+        }
+        final RailixValue.ObjectValue canonicalDocument = canonicalObject(project(document, keyField, fields));
+        if (!uniqueFieldsCompatible(uniqueFields, canonicalDocument)) {
+            return null;
+        }
+        final Optional<String> serialized = RailixJson.write(canonicalDocument, MAX_PAYLOAD_BYTES);
+        if (serialized.isEmpty()) {
+            return null;
+        }
+        final byte keyType = indexKey.charAt(0) == 's' ? KEY_STRING : KEY_NUMBER;
+        final byte[] keyBytes = indexKey.substring(2).getBytes(StandardCharsets.UTF_8);
+        final byte[] payloadBytes = serialized.get().getBytes(StandardCharsets.UTF_8);
+        return new PreparedWrite(
+                indexKey,
+                keyType,
+                (short) bucketOf(indexKey),
+                keyBytes,
+                payloadBytes,
+                canonicalDocument
+        );
+    }
+
+    private boolean commitPreparedWrites(
+            final List<PreparedWrite> writes,
+            final Map<String, RailixValue.ObjectValue> finalDocuments,
+            final String operationLabel
+    ) {
+        long totalBytes = 0L;
+        for (final PreparedWrite write : writes) {
+            totalBytes += write.frameBytes();
+        }
+        final ByteBuffer batch = ByteBuffer.allocate((int) totalBytes);
+        for (final PreparedWrite write : writes) {
+            appendFrame(batch, OP_UPSERT, write.keyType(), write.bucket(), write.keyBytes(), write.payloadBytes());
         }
         batch.flip();
 
@@ -829,25 +1051,26 @@ public final class DatabaseStepHandlers {
         try {
             ensureOpen();
             if (!uniqueFields.isEmpty() && uniqueConflict(finalDocuments)) {
-                return StepResult.outcome("invalid");
+                return false;
             }
             final long startOffset = writeOffset;
             writeFully(journal, batch, startOffset);
             journal.force(false);
             long cursor = startOffset;
-            for (int i = 0; i < count; i++) {
-                final String indexKey = indexKeys[i];
-                final int keyLen = keyBytesList[i].length;
-                final int payloadLen = payloadBytesList[i].length;
+            for (final PreparedWrite write : writes) {
+                final int keyLen = write.keyBytes().length;
+                final int payloadLen = write.payloadBytes().length;
                 final long payloadOffset = cursor + HEADER_BYTES + keyLen;
-                final Long previous = index.put(indexKey, pack(payloadOffset, payloadLen));
+                final RecordLocation previous = index.put(
+                        write.indexKey(),
+                        new RecordLocation(payloadOffset, keyLen, payloadLen)
+                );
                 if (previous != null) {
-                    final int prevLen = unpackLength(previous);
-                    livePayloadBytes -= prevLen;
-                    deadBytes += (long) HEADER_BYTES + keyLen + prevLen;
+                    livePayloadBytes -= previous.payloadLength();
+                    deadBytes += (long) HEADER_BYTES + previous.keyLength() + previous.payloadLength();
                 }
                 livePayloadBytes += payloadLen;
-                cursor += (long) HEADER_BYTES + keyLen + payloadLen;
+                cursor += write.frameBytes();
             }
             writeOffset = cursor;
             for (final Map.Entry<String, RailixValue.ObjectValue> entry : finalDocuments.entrySet()) {
@@ -856,13 +1079,16 @@ public final class DatabaseStepHandlers {
             if (shouldCompact()) {
                 compactUnderWriteLock();
             }
+            return true;
         } catch (final IOException exception) {
             rollbackJournalTail(exception);
-            throw new UncheckedIOException("Database bulk_upsert failed in collection " + directory + ".", exception);
+            throw new UncheckedIOException(
+                    "Database " + operationLabel + " failed in collection " + directory + ".",
+                    exception
+            );
         } finally {
             rwLock.writeLock().unlock();
         }
-        return StepResult.outcome("ok").write("target", RailixValue.array(savedDocuments));
     }
 
     private StepResult get(
@@ -879,11 +1105,11 @@ public final class DatabaseStepHandlers {
         rwLock.readLock().lock();
         try {
             ensureOpen();
-            final Long packed = index.get(indexKey);
-            if (packed == null) {
+            final RecordLocation location = index.get(indexKey);
+            if (location == null) {
                 return StepResult.outcome("not_found");
             }
-            payloadBytes = readPayloadBytes(journal, packed);
+            payloadBytes = readPayloadBytes(journal, location);
         } catch (final IOException exception) {
             throw new UncheckedIOException("Database get failed in collection " + directory + ".", exception);
         } finally {
@@ -898,11 +1124,21 @@ public final class DatabaseStepHandlers {
             final List<String> fields,
             final RailixValue.ObjectValue defaults,
             final int limit,
-            final RailixValue filterCandidate
+            final RailixValue filterCandidate,
+            final RailixValue afterCandidate
     ) {
         if (filterCandidate != null && !(filterCandidate instanceof RailixValue.ObjectValue)
                 && !(filterCandidate instanceof RailixValue.NullValue)) {
             return StepResult.outcome("invalid");
+        }
+        final String afterIndexKey;
+        if (afterCandidate == null || afterCandidate instanceof RailixValue.NullValue) {
+            afterIndexKey = null;
+        } else {
+            afterIndexKey = encodeIndexKey(afterCandidate);
+            if (afterIndexKey == null) {
+                return StepResult.outcome("invalid");
+            }
         }
         final RailixValue.ObjectValue filter = filterCandidate instanceof RailixValue.ObjectValue object
                 ? object
@@ -925,21 +1161,20 @@ public final class DatabaseStepHandlers {
                 return StepResult.outcome("ok").write("target", RailixValue.array(List.of()));
             }
 
-            final List<String> targetKeys;
-            if (candidateKeys != null) {
-                targetKeys = new ArrayList<>(candidateKeys);
-                targetKeys.sort(String::compareTo);
-            } else {
-                targetKeys = new ArrayList<>(index.keySet());
-                targetKeys.sort(String::compareTo);
-            }
+            final List<String> targetKeys = candidateKeys != null
+                    ? new ArrayList<>(candidateKeys)
+                    : new ArrayList<>(index.keySet());
+            targetKeys.sort(DatabaseStepHandlers::compareIndexKeys);
 
             for (final String indexKey : targetKeys) {
-                final Long packed = index.get(indexKey);
-                if (packed == null) {
+                if (afterIndexKey != null && compareIndexKeys(indexKey, afterIndexKey) <= 0) {
                     continue;
                 }
-                final byte[] payloadBytes = readPayloadBytes(journal, packed);
+                final RecordLocation location = index.get(indexKey);
+                if (location == null) {
+                    continue;
+                }
+                final byte[] payloadBytes = readPayloadBytes(journal, location);
                 final RailixValue.ObjectValue stored = parseStoredObject(payloadBytes);
                 if (matchesFilter(stored, filter)) {
                     results.add(readView(stored, keyField, fields, defaults));
@@ -956,23 +1191,59 @@ public final class DatabaseStepHandlers {
         return StepResult.outcome("ok").write("target", RailixValue.array(results));
     }
 
+    private static int compareIndexKeys(final String left, final String right) {
+        if (left.equals(right)) {
+            return 0;
+        }
+        final char leftType = left.charAt(0);
+        final char rightType = right.charAt(0);
+        if (leftType != rightType) {
+            return leftType == 'n' ? -1 : 1;
+        }
+        if (leftType == 'n') {
+            return new BigDecimal(left.substring(2)).compareTo(new BigDecimal(right.substring(2)));
+        }
+        return left.substring(2).compareTo(right.substring(2));
+    }
+
     private Set<String> resolveCandidateKeys(final String keyField, final RailixValue.ObjectValue filter) {
         if (filter.values().containsKey(keyField)) {
             final String primary = encodeIndexKey(filter.values().get(keyField));
             return primary == null ? Set.of() : (index.containsKey(primary) ? Set.of(primary) : Set.of());
         }
+        List<Set<String>> matchedSets = null;
         for (final String indexed : indexedFields) {
             if (filter.values().containsKey(indexed)) {
                 final String enc = indexValue(filter.values().get(indexed));
                 if (enc == null) {
-                    return null;
+                    continue;
                 }
                 final Map<String, Set<String>> byValue = indexKeysByValue.get(indexed);
                 final Set<String> matching = byValue == null ? null : byValue.get(enc);
-                return matching == null ? Set.of() : Set.copyOf(matching);
+                if (matching == null || matching.isEmpty()) {
+                    return Set.of();
+                }
+                if (matchedSets == null) {
+                    matchedSets = new ArrayList<>(2);
+                }
+                matchedSets.add(matching);
             }
         }
-        return null;
+        if (matchedSets == null) {
+            return null;
+        }
+        if (matchedSets.size() == 1) {
+            return Set.copyOf(matchedSets.getFirst());
+        }
+        matchedSets.sort(Comparator.comparingInt(Set::size));
+        final Set<String> intersection = new LinkedHashSet<>(matchedSets.getFirst());
+        for (int i = 1; i < matchedSets.size(); i++) {
+            intersection.retainAll(matchedSets.get(i));
+            if (intersection.isEmpty()) {
+                return Set.of();
+            }
+        }
+        return intersection;
     }
 
     private static boolean matchesFilter(
@@ -1013,7 +1284,7 @@ public final class DatabaseStepHandlers {
         rwLock.writeLock().lock();
         try {
             ensureOpen();
-            final Long existing = index.get(indexKey);
+            final RecordLocation existing = index.get(indexKey);
             if (existing == null) {
                 return StepResult.outcome("not_found");
             }
@@ -1024,9 +1295,9 @@ public final class DatabaseStepHandlers {
             writeOffset = frameOffset + HEADER_BYTES + keyBytes.length;
             index.remove(indexKey);
             reindex(indexKey, null);
-            final int prevLen = unpackLength(existing);
-            livePayloadBytes -= prevLen;
-            deadBytes += (long) HEADER_BYTES + keyBytes.length + prevLen + HEADER_BYTES + keyBytes.length;
+            livePayloadBytes -= existing.payloadLength();
+            deadBytes += (long) HEADER_BYTES + existing.keyLength() + existing.payloadLength()
+                    + HEADER_BYTES + keyBytes.length;
             if (shouldCompact()) {
                 compactUnderWriteLock();
             }
@@ -1044,10 +1315,11 @@ public final class DatabaseStepHandlers {
     }
 
     private void compactUnderWriteLock() throws IOException {
-        final List<Map.Entry<String, Long>> ordered = new ArrayList<>(index.entrySet());
-        ordered.sort(Comparator.comparingLong(entry -> unpackOffset(entry.getValue())));
+        final long pauseStart = System.nanoTime();
+        final List<Map.Entry<String, RecordLocation>> ordered = new ArrayList<>(index.entrySet());
+        ordered.sort(Comparator.comparingLong(entry -> entry.getValue().frameOffset()));
 
-        final Map<String, Long> compactedIndex = new HashMap<>(Math.max(16, ordered.size() * 2));
+        final Map<String, RecordLocation> compactedIndex = new HashMap<>(Math.max(16, ordered.size() * 2));
         long compactedOffset = 0L;
         long compactedLiveBytes = 0L;
         Files.deleteIfExists(compactPath);
@@ -1056,7 +1328,7 @@ public final class DatabaseStepHandlers {
                 StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE
         )) {
-            for (final Map.Entry<String, Long> entry : ordered) {
+            for (final Map.Entry<String, RecordLocation> entry : ordered) {
                 final String indexKey = entry.getKey();
                 final byte keyType = indexKey.charAt(0) == 's' ? KEY_STRING : KEY_NUMBER;
                 final byte[] keyBytes = indexKey.substring(2).getBytes(StandardCharsets.UTF_8);
@@ -1070,7 +1342,7 @@ public final class DatabaseStepHandlers {
                 );
                 writeFully(target, frame, compactedOffset);
                 final long payloadOffset = compactedOffset + HEADER_BYTES + keyBytes.length;
-                compactedIndex.put(indexKey, pack(payloadOffset, payloadBytes.length));
+                compactedIndex.put(indexKey, new RecordLocation(payloadOffset, keyBytes.length, payloadBytes.length));
                 compactedOffset += (long) HEADER_BYTES + keyBytes.length + payloadBytes.length;
                 compactedLiveBytes += payloadBytes.length;
             }
@@ -1092,6 +1364,7 @@ public final class DatabaseStepHandlers {
         writeOffset = compactedOffset;
         livePayloadBytes = compactedLiveBytes;
         deadBytes = 0L;
+        lastCompactionPauseNanos = System.nanoTime() - pauseStart;
     }
 
     private static void moveJournal(final Path source, final Path target) throws IOException {
@@ -1139,7 +1412,9 @@ public final class DatabaseStepHandlers {
             if (journal != null) {
                 try {
                     if (journal.isOpen()) {
-                        journal.force(true);
+                        if (initialized) {
+                            journal.force(true);
+                        }
                         journal.close();
                     }
                 } catch (final IOException failure) {
@@ -1309,24 +1584,14 @@ public final class DatabaseStepHandlers {
         crc.update(value & 0xff);
     }
 
-    private static long pack(final long offset, final int length) {
-        return (offset << LENGTH_BITS) | (length & LENGTH_MASK);
-    }
-
-    private static long unpackOffset(final long packed) {
-        return packed >>> LENGTH_BITS;
-    }
-
-    private static int unpackLength(final long packed) {
-        return (int) (packed & LENGTH_MASK);
-    }
-
-    private static byte[] readPayloadBytes(final FileChannel channel, final long packed) throws IOException {
-        final long offset = unpackOffset(packed);
-        final int length = unpackLength(packed);
-        final byte[] bytes = new byte[length];
-        if (!readFully(channel, ByteBuffer.wrap(bytes), offset)) {
-            throw new IOException("Truncated journal payload at offset " + offset + " (" + length + " bytes).");
+    private static byte[] readPayloadBytes(
+            final FileChannel channel,
+            final RecordLocation location
+    ) throws IOException {
+        final byte[] bytes = new byte[location.payloadLength()];
+        if (!readFully(channel, ByteBuffer.wrap(bytes), location.payloadOffset())) {
+            throw new IOException("Truncated journal payload at offset " + location.payloadOffset()
+                    + " (" + location.payloadLength() + " bytes).");
         }
         return bytes;
     }
@@ -1371,12 +1636,18 @@ public final class DatabaseStepHandlers {
         }
     }
 
+    private static boolean validJsonObjectDelimiters(final byte[] bytes, final int offset, final int length) {
+        return length >= 2 && bytes[offset] == '{' && bytes[offset + length - 1] == '}';
+    }
+
     private static RailixValue.ObjectValue parseStoredObject(final byte[] payloadBytes) {
         final String text = decodeUtf8(payloadBytes, 0, payloadBytes.length);
         if (text != null && RailixJson.parse(text) instanceof RailixJson.Parsed(RailixValue.ObjectValue object)) {
             return object;
         }
-        throw new IllegalStateException("Corrupted stored JSON document in database journal.");
+        throw new IllegalStateException(
+                "DATABASE_JOURNAL_CORRUPTED: Corrupted stored JSON document in database journal."
+        );
     }
 
     private static RailixValue.ObjectValue canonicalObject(final RailixValue.ObjectValue object) {

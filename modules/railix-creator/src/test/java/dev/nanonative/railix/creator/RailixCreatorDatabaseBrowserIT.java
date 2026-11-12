@@ -26,7 +26,7 @@ final class RailixCreatorDatabaseBrowserIT extends RailixCreatorBrowserSupport {
         PlaywrightAssertions.assertThat(page.locator("#directory-value")).hasValue(".railix/data");
         PlaywrightAssertions.assertThat(page.locator("#key-field-value")).hasValue("_id");
         PlaywrightAssertions.assertThat(page.locator("#operation-option")).hasValue("upsert");
-        assertThat(page.locator("#operation-option option").allTextContents()).hasSize(5);
+        assertThat(page.locator("#operation-option option").allTextContents()).hasSize(4);
         PlaywrightAssertions.assertThat(page.locator("#target-path")).isVisible();
 
         chooseVisibleExample("command:0");
@@ -38,7 +38,7 @@ final class RailixCreatorDatabaseBrowserIT extends RailixCreatorBrowserSupport {
         page.locator("#collection-value").fill("../invalid");
         page.locator("#collection-value").press("Tab");
         PlaywrightAssertions.assertThat(page.locator("#collection-error"))
-                .containsText("Collection must start with an ASCII letter or digit");
+                .containsText("Collection must start and end with a lowercase ASCII letter or digit");
 
         page.locator("#collection-value").fill("orders");
         page.locator("#collection-value").press("Tab");
@@ -195,9 +195,9 @@ final class RailixCreatorDatabaseBrowserIT extends RailixCreatorBrowserSupport {
                     "directory": ".railix/data",
                     "key_field": "_id",
                     "operation": {
-                      "option": "bulk_upsert",
+                      "option": "upsert",
                       "inputs": {
-                        "documents": ["context", "payload", "batch"],
+                        "document": ["context", "payload", "batch"],
                         "auto_key": true
                       }
                     },

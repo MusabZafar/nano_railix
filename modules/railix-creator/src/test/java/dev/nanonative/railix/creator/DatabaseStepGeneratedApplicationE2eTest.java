@@ -49,9 +49,7 @@ class DatabaseStepGeneratedApplicationE2eTest {
         final Path withDbJar = productionArtifact(withDbProject, withDbSource).jar();
         try (JarFile jar = new JarFile(withDbJar.toFile())) {
             final List<String> entries = jar.stream().map(entry -> entry.getName()).toList();
-            assertThat(entries)
-                    .contains("dev/nanonative/railix/stdlib/DatabaseStepHandlers.class")
-                    .noneMatch(entry -> entry.startsWith("dev/nanonative/railix/stdlib/DatabaseStepHandlers$"));
+            assertThat(entries).contains("dev/nanonative/railix/stdlib/DatabaseStepHandlers.class");
         }
     }
 
@@ -604,9 +602,9 @@ class DatabaseStepGeneratedApplicationE2eTest {
                       "inputs": {
                         "collection": "orders",
                         "operation": {
-                          "option": "bulk_upsert",
+                          "option": "upsert",
                           "inputs": {
-                            "documents": ["context", "payload", "batch"],
+                            "document": ["context", "payload", "batch"],
                             "auto_key": false
                           }
                         },

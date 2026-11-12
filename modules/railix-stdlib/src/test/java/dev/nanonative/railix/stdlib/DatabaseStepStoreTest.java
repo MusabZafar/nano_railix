@@ -22,8 +22,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -64,7 +66,10 @@ class DatabaseStepStoreTest {
                 .isInstanceOfSatisfying(StepDefinition.OptionsInput.class, operation -> {
                     assertThat(operation.defaultOption()).contains("upsert");
                     assertThat(operation.options()).extracting(StepDefinition.Option::name)
-                            .containsExactly("upsert", "bulk_upsert", "get", "find", "delete");
+                            .containsExactly("upsert", "get", "find", "delete");
+                    final StepDefinition.Option find = operation.options().get(2);
+                    assertThat(find.inputs()).extracting(StepDefinition.Field::name)
+                            .containsExactly("filter", "after", "fields", "defaults", "limit");
                 });
     }
 
@@ -74,6 +79,16 @@ class DatabaseStepStoreTest {
             "collection, .hidden",
             "collection, ../escape",
             "collection, 'bad name'",
+            "collection, Orders",
+            "collection, mixedCase",
+            "collection, orders.",
+            "collection, orders-",
+            "collection, orders..v1",
+            "collection, con",
+            "collection, nul",
+            "collection, aux.v1",
+            "collection, com1",
+            "collection, lpt9.bak",
             "directory, '   '",
             "directory, ../outside",
             "directory, data/../escape",
@@ -120,6 +135,41 @@ class DatabaseStepStoreTest {
                 assertThat(rejected.diagnostics())
                         .extracting(Diagnostic::code)
                         .contains("PROJECT_INPUT_VALIDATION_INVALID"));
+    }
+
+    @Test
+    void collectionDirectoryRejectsCollisionWhenLockIdentifiesDifferentLogicalCollection() throws Exception {
+        final Path dataDir = tempDir.resolve("collision-check");
+        final Path ordersDir = Files.createDirectories(dataDir.resolve("orders"));
+        Files.writeString(ordersDir.resolve("collection.lock"), "other-collection\n", StandardCharsets.UTF_8);
+
+        assertThatThrownBy(() -> StoreHarness.open(dataDir, "orders", "_id"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("DATABASE_COLLECTION_COLLISION");
+    }
+
+    @Test
+    void configurableStorageLocationResolvesRelativeAndAbsoluteDirectoriesPredictably() {
+        final Path customBase = tempDir.resolve("custom-base-dir");
+        final String previousProp = System.getProperty("railix.data.dir");
+        try {
+            System.setProperty("railix.data.dir", customBase.toString());
+            final Path resolvedRelative = DatabaseStepHandlers.resolveCollectionDirectory("store/app-data", "orders");
+            assertThat(resolvedRelative).isEqualTo(customBase.resolve("store/app-data/orders").normalize());
+
+            final Path explicitAbsolute = tempDir.resolve("explicit-abs").toAbsolutePath().normalize();
+            final Path resolvedAbsolute = DatabaseStepHandlers.resolveCollectionDirectory(
+                    explicitAbsolute.toString(),
+                    "orders"
+            );
+            assertThat(resolvedAbsolute).isEqualTo(explicitAbsolute.resolve("orders").normalize());
+        } finally {
+            if (previousProp == null) {
+                System.clearProperty("railix.data.dir");
+            } else {
+                System.setProperty("railix.data.dir", previousProp);
+            }
+        }
     }
 
     @Test
@@ -278,14 +328,14 @@ class DatabaseStepStoreTest {
     }
 
     @Test
-    void bulkUpsertValidatesAtomicallyAndResolvesDuplicateKeysInBatchOrder() {
+    void upsertAcceptsSingleDocumentOrBatchArrayAtomicallyAndResolvesDuplicateKeysInBatchOrder() {
         final Path dataDir = tempDir.resolve("bulk");
         try (StoreHarness store = StoreHarness.open(dataDir, "events", "_id")) {
-            final StepResult emptyBatch = store.bulkUpsert(RailixValue.array(List.of()), true);
+            final StepResult emptyBatch = store.upsert(RailixValue.array(List.of()), true);
             assertThat(emptyBatch.outcome()).isEqualTo("ok");
             assertThat(emptyBatch.writes().get("target")).isEqualTo(RailixValue.array(List.of()));
 
-            final StepResult atomicReject = store.bulkUpsert(RailixValue.array(List.of(
+            final StepResult atomicReject = store.upsert(RailixValue.array(List.of(
                     RailixValue.object(Map.of("_id", RailixValue.string("valid-1"), "v", RailixValue.number(1))),
                     RailixValue.object(Map.of("v", RailixValue.number(2)))
             )), false);
@@ -293,7 +343,7 @@ class DatabaseStepStoreTest {
             assertThat(atomicReject.writes()).isEmpty();
             assertThat(store.get(RailixValue.string("valid-1")).outcome()).isEqualTo("not_found");
 
-            final StepResult committed = store.bulkUpsert(RailixValue.array(List.of(
+            final StepResult committed = store.upsert(RailixValue.array(List.of(
                     RailixValue.object(Map.of("_id", RailixValue.string("dup"), "seq", RailixValue.number(1))),
                     RailixValue.object(Map.of("_id", RailixValue.string("unique"), "seq", RailixValue.number(2))),
                     RailixValue.object(Map.of("_id", RailixValue.string("dup"), "seq", RailixValue.number(3)))
@@ -330,10 +380,10 @@ class DatabaseStepStoreTest {
                     "bad", RailixValue.number(oversizedNumber)
             )), false).outcome()).isEqualTo("invalid");
 
+            assertThat(store.upsert(RailixValue.array(List.of(RailixValue.number(1))), true).outcome())
+                    .isEqualTo("invalid");
             assertThat(store.bulkUpsert(null, true).outcome()).isEqualTo("invalid");
             assertThat(store.bulkUpsert(RailixValue.object(Map.of()), true).outcome()).isEqualTo("invalid");
-            assertThat(store.bulkUpsert(RailixValue.array(List.of(RailixValue.number(1))), true).outcome())
-                    .isEqualTo("invalid");
 
             assertThat(store.get(null).outcome()).isEqualTo("invalid");
             assertThat(store.get(RailixValue.nullValue()).outcome()).isEqualTo("invalid");
@@ -345,7 +395,7 @@ class DatabaseStepStoreTest {
     }
 
     @Test
-    void startupTruncatesTornAndCorruptedTrailingJournalFrames() throws Exception {
+    void startupTruncatesIncompleteTrailingWriteAtEndOfJournal() throws Exception {
         final Path dataDir = tempDir.resolve("torn-wal");
         final RailixValue.ObjectValue first = RailixValue.object(Map.of(
                 "_id", RailixValue.string("keep-1"),
@@ -358,29 +408,91 @@ class DatabaseStepStoreTest {
         }
 
         final Path walPath = dataDir.resolve("wal/journal.wal");
-        final ByteBuffer corruptFrame = ByteBuffer.allocate(32);
-        corruptFrame.putInt(DatabaseStepHandlers.MAGIC);
-        corruptFrame.put((byte) 1);
-        corruptFrame.put((byte) 1);
-        corruptFrame.putShort((short) 0);
-        corruptFrame.putInt(4);
-        corruptFrame.putInt(8);
-        corruptFrame.putInt(0xDEAD_BEEF);
-        corruptFrame.put(new byte[12]);
-        Files.write(walPath, corruptFrame.array(), StandardOpenOption.APPEND);
-        assertThat(Files.size(walPath)).isEqualTo(validSize + 32);
+        // Case 1: valid 20-byte frame header at EOF whose body was cut short (only 4 of 12 body bytes written).
+        final ByteBuffer incompleteBodyFrame = ByteBuffer.allocate(DatabaseStepHandlers.HEADER_BYTES + 4);
+        incompleteBodyFrame.putInt(DatabaseStepHandlers.MAGIC);
+        incompleteBodyFrame.put((byte) 1);
+        incompleteBodyFrame.put((byte) 1);
+        incompleteBodyFrame.putShort((short) 0);
+        incompleteBodyFrame.putInt(4);
+        incompleteBodyFrame.putInt(8);
+        incompleteBodyFrame.putInt(0x1234_5678);
+        incompleteBodyFrame.put(new byte[]{'k', 'e', 'y', '2'});
+        Files.write(walPath, incompleteBodyFrame.array(), StandardOpenOption.APPEND);
+        assertThat(Files.size(walPath)).isEqualTo(validSize + DatabaseStepHandlers.HEADER_BYTES + 4);
 
         try (StoreHarness recovered = StoreHarness.open(dataDir, "wal", "_id")) {
             assertThat(Files.size(walPath)).isEqualTo(validSize);
             assertThat(recovered.get(RailixValue.string("keep-1")).writes().get("target")).isEqualTo(first);
         }
 
+        // Case 2: partial 3-byte header prefix matching MAGIC at EOF.
         Files.write(walPath, new byte[]{0x52, 0x44, 0x42}, StandardOpenOption.APPEND);
         try (StoreHarness recoveredPartialHeader = StoreHarness.open(dataDir, "wal", "_id")) {
             assertThat(Files.size(walPath)).isEqualTo(validSize);
             assertThat(recoveredPartialHeader.get(RailixValue.string("keep-1")).writes().get("target"))
                     .isEqualTo(first);
         }
+    }
+
+    @Test
+    void startupPreservesDamagedJournalAndFailsOnMidFileOrTrailingChecksumCorruption() throws Exception {
+        final Path dataDir = tempDir.resolve("corrupt-wal");
+        final RailixValue.ObjectValue rec1 = RailixValue.object(Map.of(
+                "_id", RailixValue.string("rec-1"),
+                "value", RailixValue.string("first-record")
+        ));
+        final RailixValue.ObjectValue rec2 = RailixValue.object(Map.of(
+                "_id", RailixValue.string("rec-2"),
+                "value", RailixValue.string("second-record")
+        ));
+        final RailixValue.ObjectValue rec3 = RailixValue.object(Map.of(
+                "_id", RailixValue.string("rec-3"),
+                "value", RailixValue.string("third-record")
+        ));
+
+        final long rec1OffsetEnd;
+        try (StoreHarness store = StoreHarness.open(dataDir, "wal", "_id")) {
+            assertThat(store.upsert(rec1, false).outcome()).isEqualTo("ok");
+            rec1OffsetEnd = store.instance().journalSizeBytes();
+            assertThat(store.upsert(rec2, false).outcome()).isEqualTo("ok");
+            assertThat(store.upsert(rec3, false).outcome()).isEqualTo("ok");
+        }
+
+        final Path walPath = dataDir.resolve("wal/journal.wal");
+        final byte[] cleanBytes = Files.readAllBytes(walPath);
+
+        // Subcase A: Corrupt one byte inside rec-2's payload in the middle of the file (followed by valid rec-3).
+        final byte[] midFileCorrupted = Arrays.copyOf(cleanBytes, cleanBytes.length);
+        final int rec2PayloadByteIndex = (int) rec1OffsetEnd + DatabaseStepHandlers.HEADER_BYTES + 6;
+        midFileCorrupted[rec2PayloadByteIndex] ^= 0x01;
+        Files.write(walPath, midFileCorrupted, StandardOpenOption.TRUNCATE_EXISTING);
+
+        assertThatThrownBy(() -> StoreHarness.open(dataDir, "wal", "_id"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("DATABASE_JOURNAL_CORRUPTED")
+                .hasMessageContaining("offset " + rec1OffsetEnd);
+        // Damaged file must be preserved intact on disk without truncating rec-2 or rec-3.
+        assertThat(Files.readAllBytes(walPath)).isEqualTo(midFileCorrupted);
+
+        // Subcase B: Restore clean bytes, then append a complete 32-byte frame with a bad CRC32 checksum.
+        Files.write(walPath, cleanBytes, StandardOpenOption.TRUNCATE_EXISTING);
+        final ByteBuffer corruptTrailingFrame = ByteBuffer.allocate(32);
+        corruptTrailingFrame.putInt(DatabaseStepHandlers.MAGIC);
+        corruptTrailingFrame.put((byte) 1);
+        corruptTrailingFrame.put((byte) 1);
+        corruptTrailingFrame.putShort((short) 0);
+        corruptTrailingFrame.putInt(4);
+        corruptTrailingFrame.putInt(8);
+        corruptTrailingFrame.putInt(0xDEAD_BEEF);
+        corruptTrailingFrame.put(new byte[12]);
+        Files.write(walPath, corruptTrailingFrame.array(), StandardOpenOption.APPEND);
+        final byte[] withCorruptTail = Files.readAllBytes(walPath);
+
+        assertThatThrownBy(() -> StoreHarness.open(dataDir, "wal", "_id"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("DATABASE_JOURNAL_CORRUPTED");
+        assertThat(Files.readAllBytes(walPath)).isEqualTo(withCorruptTail);
     }
 
     @Test
@@ -405,6 +517,7 @@ class DatabaseStepStoreTest {
             }
             assertThat(compacted).isTrue();
             assertThat(store.instance().journalSizeBytes()).isLessThan(peakSize);
+            assertThat(store.instance().lastCompactionPauseNanos()).isPositive();
             assertThat(((RailixValue.ObjectValue) store.get(RailixValue.string("hot-key")).writes().get("target"))
                     .values().get("version")).isEqualTo(RailixValue.number(80));
         }
@@ -554,7 +667,7 @@ class DatabaseStepStoreTest {
             )), false);
             assertThat(selfUpdate.outcome()).isEqualTo("ok");
 
-            final StepResult batchWithInternalConflict = store.bulkUpsert(RailixValue.array(List.of(
+            final StepResult batchWithInternalConflict = store.upsert(RailixValue.array(List.of(
                     RailixValue.object(Map.of(
                             "_id", RailixValue.string("b-1"), "email", RailixValue.string("b1@x.com")
                     )),
@@ -581,7 +694,7 @@ class DatabaseStepStoreTest {
         try (StoreHarness store = StoreHarness.open(
                 dataDir, "orders", "_id", List.of(), List.of("status", "customer_id")
         )) {
-            store.bulkUpsert(RailixValue.array(List.of(
+            store.upsert(RailixValue.array(List.of(
                     RailixValue.object(Map.of("_id", RailixValue.string("o-1"), "status", RailixValue.string("open"),
                             "customer_id", RailixValue.string("c-1"), "amount", RailixValue.number(100))),
                     RailixValue.object(Map.of("_id", RailixValue.string("o-2"), "status", RailixValue.string("open"),
@@ -619,6 +732,264 @@ class DatabaseStepStoreTest {
             );
             assertThat(noMatch.outcome()).isEqualTo("ok");
             assertThat(((RailixValue.ArrayValue) noMatch.writes().get("target")).values()).isEmpty();
+        }
+    }
+
+    @Test
+    void findPaginationWithAfterCursorIteratesBeyondSinglePageCeiling() {
+        final Path dataDir = tempDir.resolve("find-pagination");
+        final int totalRecords = 1_250;
+        try (StoreHarness store = StoreHarness.open(
+                dataDir, "ledger", "_id", List.of(), List.of("tenant")
+        )) {
+            final List<RailixValue> batch = new ArrayList<>(totalRecords);
+            for (int i = 1; i <= totalRecords; i++) {
+                batch.add(RailixValue.object(Map.of(
+                        "_id", RailixValue.number(i),
+                        "tenant", RailixValue.string("acme"),
+                        "seq", RailixValue.number(i)
+                )));
+            }
+            assertThat(store.upsert(RailixValue.array(batch), false).outcome()).isEqualTo("ok");
+
+            final List<Integer> collectedIds = new ArrayList<>();
+            RailixValue afterCursor = null;
+            int pages = 0;
+            while (true) {
+                final StepResult pageResult = store.find(
+                        RailixValue.object(Map.of("tenant", RailixValue.string("acme"))),
+                        List.of("seq"),
+                        null,
+                        400,
+                        afterCursor
+                );
+                assertThat(pageResult.outcome()).isEqualTo("ok");
+                final List<RailixValue> pageItems =
+                        ((RailixValue.ArrayValue) pageResult.writes().get("target")).values();
+                if (pageItems.isEmpty()) {
+                    break;
+                }
+                pages++;
+                for (final RailixValue item : pageItems) {
+                    final RailixValue key = ((RailixValue.ObjectValue) item).values().get("_id");
+                    collectedIds.add(((RailixValue.NumberValue) key).value().intValueExact());
+                }
+                afterCursor = ((RailixValue.ObjectValue) pageItems.getLast()).values().get("_id");
+                if (pageItems.size() < 400) {
+                    break;
+                }
+            }
+
+            assertThat(pages).isEqualTo(4);
+            assertThat(collectedIds).hasSize(totalRecords);
+            assertThat(collectedIds.getFirst()).isEqualTo(1);
+            assertThat(collectedIds.getLast()).isEqualTo(totalRecords);
+            assertThat(collectedIds).isSorted();
+
+            final StepResult invalidCursor = store.find(
+                    RailixValue.object(Map.of()),
+                    List.of(),
+                    null,
+                    10,
+                    RailixValue.string("")
+            );
+            assertThat(invalidCursor.outcome()).isEqualTo("invalid");
+        }
+    }
+
+    @Test
+    void realisticWorkloadMeasuresStartupReplayReadsWritesAndCompactionPauses() {
+        final Path dataDir = tempDir.resolve("benchmark");
+        final int recordCount = 200;
+        final String summaryPayload = "invoice-line-item-description-".repeat(12);
+        final List<RailixValue> initialBatch = new ArrayList<>(recordCount);
+        for (int i = 0; i < recordCount; i++) {
+            initialBatch.add(RailixValue.object(Map.of(
+                    "_id", RailixValue.string("inv-" + i),
+                    "sku", RailixValue.string("SKU-" + i),
+                    "status", RailixValue.string(i % 4 == 0 ? "settled" : "open"),
+                    "customer_id", RailixValue.string("cust-" + (i % 25)),
+                    "total", RailixValue.number(new BigDecimal(i + ".95")),
+                    "notes", RailixValue.string(summaryPayload)
+            )));
+        }
+
+        final long batchWriteNanos;
+        final long singleWriteMedianNanos;
+        final long getReadMedianNanos;
+        final long findReadMedianNanos;
+        final long compactionPauseNanos;
+
+        try (StoreHarness store = StoreHarness.open(
+                dataDir,
+                "invoices",
+                "_id",
+                List.of("sku"),
+                List.of("status", "customer_id")
+        )) {
+            final long batchStart = System.nanoTime();
+            assertThat(store.upsert(RailixValue.array(initialBatch), false).outcome()).isEqualTo("ok");
+            batchWriteNanos = System.nanoTime() - batchStart;
+
+            final long[] getSamples = new long[100];
+            for (int i = 0; i < getSamples.length; i++) {
+                final long start = System.nanoTime();
+                assertThat(store.get(RailixValue.string("inv-" + (i * 2))).outcome()).isEqualTo("ok");
+                getSamples[i] = System.nanoTime() - start;
+            }
+            Arrays.sort(getSamples);
+            getReadMedianNanos = getSamples[getSamples.length / 2];
+
+            final long[] findSamples = new long[40];
+            for (int i = 0; i < findSamples.length; i++) {
+                final long start = System.nanoTime();
+                final StepResult found = store.find(
+                        RailixValue.object(Map.of(
+                                "customer_id", RailixValue.string("cust-" + (i % 25)),
+                                "status", RailixValue.string("open")
+                        )),
+                        List.of("total", "status"),
+                        null,
+                        50
+                );
+                assertThat(found.outcome()).isEqualTo("ok");
+                findSamples[i] = System.nanoTime() - start;
+            }
+            Arrays.sort(findSamples);
+            findReadMedianNanos = findSamples[findSamples.length / 2];
+
+            final long[] writeSamples = new long[220];
+            for (int i = 0; i < writeSamples.length; i++) {
+                final int idx = i % recordCount;
+                final RailixValue.ObjectValue update = RailixValue.object(Map.of(
+                        "_id", RailixValue.string("inv-" + idx),
+                        "sku", RailixValue.string("SKU-" + idx),
+                        "status", RailixValue.string("settled"),
+                        "customer_id", RailixValue.string("cust-" + (idx % 25)),
+                        "total", RailixValue.number(new BigDecimal((idx + i) + ".50")),
+                        "notes", RailixValue.string(summaryPayload)
+                ));
+                final long start = System.nanoTime();
+                assertThat(store.upsert(update, false).outcome()).isEqualTo("ok");
+                writeSamples[i] = System.nanoTime() - start;
+            }
+            Arrays.sort(writeSamples);
+            singleWriteMedianNanos = writeSamples[writeSamples.length / 2];
+            compactionPauseNanos = store.instance().lastCompactionPauseNanos();
+            assertThat(compactionPauseNanos).isPositive();
+        }
+
+        final long replayStart = System.nanoTime();
+        try (StoreHarness reopened = StoreHarness.open(
+                dataDir,
+                "invoices",
+                "_id",
+                List.of("sku"),
+                List.of("status", "customer_id")
+        )) {
+            final long startupReplayNanos = System.nanoTime() - replayStart;
+            assertThat(reopened.get(RailixValue.string("inv-0")).outcome()).isEqualTo("ok");
+            System.out.printf(
+                    Locale.ROOT,
+                    "RAILIX_DATABASE_BENCHMARK advisory=true records=%d batch_write_ms=%.3f single_write_p50_ms=%.3f "
+                            + "get_p50_ms=%.3f find_p50_ms=%.3f compaction_pause_ms=%.3f startup_replay_ms=%.3f%n",
+                    recordCount,
+                    batchWriteNanos / 1_000_000.0,
+                    singleWriteMedianNanos / 1_000_000.0,
+                    getReadMedianNanos / 1_000_000.0,
+                    findReadMedianNanos / 1_000_000.0,
+                    compactionPauseNanos / 1_000_000.0,
+                    startupReplayNanos / 1_000_000.0
+            );
+        }
+    }
+
+    @Test
+    void multiIndexFindIntersectsCandidateSetsAndHandlesNullIndexedFilter() {
+        final Path dataDir = tempDir.resolve("multi-index-intersection");
+        try (StoreHarness store = StoreHarness.open(
+                dataDir,
+                "tickets",
+                "_id",
+                List.of(),
+                List.of("status", "region", "assignee")
+        )) {
+            final Map<String, RailixValue> unassigned = new LinkedHashMap<>();
+            unassigned.put("_id", RailixValue.string("t-1"));
+            unassigned.put("status", RailixValue.string("open"));
+            unassigned.put("region", RailixValue.string("eu"));
+            unassigned.put("assignee", RailixValue.nullValue());
+
+            final Map<String, RailixValue> assignedEu = new LinkedHashMap<>();
+            assignedEu.put("_id", RailixValue.string("t-2"));
+            assignedEu.put("status", RailixValue.string("open"));
+            assignedEu.put("region", RailixValue.string("eu"));
+            assignedEu.put("assignee", RailixValue.string("alice"));
+
+            final Map<String, RailixValue> assignedUs = new LinkedHashMap<>();
+            assignedUs.put("_id", RailixValue.string("t-3"));
+            assignedUs.put("status", RailixValue.string("open"));
+            assignedUs.put("region", RailixValue.string("us"));
+            assignedUs.put("assignee", RailixValue.string("alice"));
+
+            assertThat(store.upsert(
+                    RailixValue.array(List.of(
+                            RailixValue.object(unassigned),
+                            RailixValue.object(assignedEu),
+                            RailixValue.object(assignedUs)
+                    )),
+                    false
+            ).outcome()).isEqualTo("ok");
+
+            final Map<String, RailixValue> nullAndIndexedFilter = new LinkedHashMap<>();
+            nullAndIndexedFilter.put("assignee", RailixValue.nullValue());
+            nullAndIndexedFilter.put("status", RailixValue.string("open"));
+            nullAndIndexedFilter.put("region", RailixValue.string("eu"));
+            final StepResult nullMatch = store.find(
+                    RailixValue.object(nullAndIndexedFilter),
+                    List.of("region"),
+                    null,
+                    10
+            );
+            assertThat(nullMatch.outcome()).isEqualTo("ok");
+            final List<RailixValue> items = ((RailixValue.ArrayValue) nullMatch.writes().get("target")).values();
+            assertThat(items).hasSize(1);
+            assertThat(((RailixValue.ObjectValue) items.getFirst()).values().get("_id"))
+                    .isEqualTo(RailixValue.string("t-1"));
+        }
+    }
+
+    @Test
+    void sharedPlacementRejectsMismatchedKeyFieldAndNonPortableDirectoryCharacters() {
+        assertThat(DatabaseStepHandlers.validStorageDirectory("data*bad")).isFalse();
+        assertThat(DatabaseStepHandlers.validStorageDirectory("data?bad")).isFalse();
+        assertThat(DatabaseStepHandlers.validStorageDirectory("data:bad")).isFalse();
+        assertThat(DatabaseStepHandlers.validStorageDirectory("data/trailing.")).isFalse();
+        assertThat(DatabaseStepHandlers.validStorageDirectory("data/trailing ")).isFalse();
+        assertThat(DatabaseStepHandlers.validStorageDirectory("data/railix-store")).isTrue();
+
+        final Path dataDir = tempDir.resolve("shared-key-mismatch");
+        try (StoreHarness store = StoreHarness.open(dataDir, "orders", "_id")) {
+            final Map<String, RailixValue> mismatchValues = new LinkedHashMap<>();
+            mismatchValues.put("collection", RailixValue.string("orders"));
+            mismatchValues.put("directory", RailixValue.string(dataDir.toString()));
+            mismatchValues.put("key_field", RailixValue.string("order_id"));
+            mismatchValues.put("unique_fields", RailixValue.array(List.of()));
+            mismatchValues.put("index_fields", RailixValue.array(List.of()));
+            final StepInput mismatchConfig = new StepInput(
+                    mismatchValues,
+                    Map.of("operation", "get"),
+                    Map.of(),
+                    Map.of("operation", new StepInput(Map.of(), Map.of(), Map.of(), Map.of(), "ok")),
+                    "ok"
+            );
+            final SharedProbeResources sharedProbe = new SharedProbeResources(store.resources);
+            assertThatThrownBy(() -> DatabaseStepHandlers.pre(
+                    mismatchConfig,
+                    StepInput.lifecycle("ok", null, sharedProbe)
+            ))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("DATABASE_KEY_FIELD_MISMATCH");
         }
     }
 
@@ -738,9 +1109,22 @@ class DatabaseStepStoreTest {
                 final RailixValue defaults,
                 final Integer limit
         ) {
+            return find(filter, fields, defaults, limit, null);
+        }
+
+        StepResult find(
+                final RailixValue filter,
+                final List<String> fields,
+                final RailixValue defaults,
+                final Integer limit,
+                final RailixValue after
+        ) {
             final Map<String, RailixValue> child = new LinkedHashMap<>();
             if (filter != null) {
                 child.put("filter", filter);
+            }
+            if (after != null) {
+                child.put("after", after);
             }
             if (!fields.isEmpty()) {
                 child.put("fields",
