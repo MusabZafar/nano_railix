@@ -921,6 +921,7 @@ public final class StepDefinition {
     private final String version;
     private final String displayName;
     private final List<String> searchTerms;
+    private final List<String> dynamicClasses;
     private final List<MetricDefinition> metrics;
     private final Kind kind;
     private final List<Port> receives;
@@ -943,6 +944,7 @@ public final class StepDefinition {
         version = requiredText(builder.version, "Step version");
         displayName = builder.displayName == null ? displayName(id) : builder.displayName;
         searchTerms = immutable(builder.searchTerms);
+        dynamicClasses = builder.dynamicClasses.stream().sorted().toList();
         metrics = immutable(builder.metrics);
         kind = builder.kind;
         receives = immutable(builder.receives);
@@ -966,6 +968,10 @@ public final class StepDefinition {
         distinct(inputs.stream().map(Field::name).toList(), "Input names");
         distinct(results.stream().map(Result::name).toList(), "Result names");
         distinct(searchTerms, "Step search terms");
+        distinct(dynamicClasses, "Dynamic class names");
+        if (!dynamicClasses.isEmpty() && kind == Kind.APP) {
+            throw new IllegalArgumentException("Only executable Steps may declare dynamic classes.");
+        }
         distinct(metrics.stream().map(MetricDefinition::name).toList(), "Step metric names");
         if (!metrics.isEmpty() && kind == Kind.APP) {
             throw new IllegalArgumentException("Only executable Steps may declare custom metrics.");
@@ -1057,6 +1063,26 @@ public final class StepDefinition {
      */
     public List<String> searchTerms() {
         return searchTerms;
+    }
+
+    /**
+     * Returns explicitly declared dynamically loaded classes as sorted Java binary names.
+     * Ordinary direct implementation dependencies do not need this declaration.
+     *
+     * @return immutable additional class names, empty for the default declaration
+     */
+    public List<String> dynamicClasses() {
+        return dynamicClasses;
+    }
+
+    /**
+     * Returns the authoring classification used by catalog filters.
+     * This is derived from the declaration, not a Native Image build or test result.
+     *
+     * @return {@code true} when no additional dynamic classes are declared
+     */
+    public boolean nativeStep() {
+        return dynamicClasses.isEmpty();
     }
 
     /**
@@ -1279,6 +1305,7 @@ public final class StepDefinition {
         private final String version;
         private String displayName;
         private final List<String> searchTerms = new ArrayList<>();
+        private final List<String> dynamicClasses = new ArrayList<>();
         private final List<MetricDefinition> metrics = new ArrayList<>();
         private Kind kind = Kind.STEP;
         private final List<Port> receives = new ArrayList<>();
@@ -1297,6 +1324,33 @@ public final class StepDefinition {
         private Builder(final String id, final String version) {
             this.id = id;
             this.version = version;
+        }
+
+        /**
+         * Declares classes reached dynamically rather than through ordinary direct calls.
+         * Any nonempty declaration automatically makes {@link StepDefinition#nativeStep()} false.
+         * No class is initialized and no runtime Step instance is created by this declaration.
+         *
+         * @param classes additional named reference types, excluding primitives and arrays
+         * @return this builder
+         * @throws IllegalArgumentException for missing or unnamed types, primitives or arrays
+         */
+        public Builder dynamicClasses(final Class<?>... classes) {
+            if (classes == null) throw new IllegalArgumentException("Dynamic classes cannot be Java null.");
+            final List<String> names = new ArrayList<>(classes.length);
+            for (final Class<?> type : classes) {
+                if (type == null || type.isPrimitive() || type.isArray() || type.getCanonicalName() == null)
+                    throw new IllegalArgumentException("Dynamic classes must be named Java reference types.");
+                names.add(type.getName());
+            }
+            return dynamicClassNames(names);
+        }
+
+        /** Decodes declared names without resolving or initializing provider classes. */
+        Builder dynamicClassNames(final List<String> names) {
+            final List<String> checked = names.stream().map(StepDefinition::implementationName).toList();
+            dynamicClasses.addAll(checked);
+            return this;
         }
 
         /**
@@ -1656,7 +1710,7 @@ public final class StepDefinition {
         return value;
     }
 
-    private static String implementationName(final String className) {
+    static String implementationName(final String className) {
         final String value = requiredText(className, "Step implementation class");
         final String[] parts = value.split("\\.", -1);
         if (parts.length < 2) {

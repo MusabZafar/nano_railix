@@ -54,6 +54,13 @@ final class CreatorFirstCompilerRejectionE2eTest {
     }
 
     @Test
+    void appDefinitionIdentityBelongsToTheProviderNotTheCompiler() {
+        final var app = StepDefinition.named("provider.application", "1").kind(StepDefinition.Kind.APP).define();
+        assertThat(ProjectCompiler.compileApplication(baseProject(inputs()).replace("\"railix.app\"", "\"provider.application\""),
+                catalog(app, trigger(), step(), primitive()))).isInstanceOf(CompileResult.Compiled.class);
+    }
+
+    @Test
     void malformedAppDefinitionIsRejectedAtTheProjectBoundary() {
         final StepDefinition malformed = StepDefinition.named("railix.app", "1")
                 .kind(StepDefinition.Kind.APP)
@@ -794,8 +801,6 @@ final class CreatorFirstCompilerRejectionE2eTest {
 
     private static Stream<Arguments> malformedAppContracts() {
         return Stream.of(
-                Arguments.of("wrong reserved definition id", StepDefinition.named("example.app", "1")
-                        .kind(StepDefinition.Kind.APP).define()),
                 Arguments.of("wrong primary outcome", StepDefinition.named("railix.app", "1")
                         .kind(StepDefinition.Kind.APP).primaryOutcome("next").define()),
                 Arguments.of("additional outcome", StepDefinition.named("railix.app", "1")

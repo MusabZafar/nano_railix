@@ -4,7 +4,6 @@ import dev.nanonative.railix.core.project.Diagnostic;
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.step.StepCatalog;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
 
@@ -42,8 +41,8 @@ final class ProjectFiles {
     /** Uses the same installed bundle resolver for local and restored project documents. */
     static StepCatalog catalog(final Path project, final Path home) throws IOException {
         final Path lock = project.resolveSibling("railix.dependencies.lock.json");
-        return Files.exists(lock) ? StandardLibrary.catalog().install(lock, home.resolve("artifacts"))
-                : StandardLibrary.catalog();
+        final var catalog = StepCatalog.embedded(ProjectFiles.class.getClassLoader(), home.resolve("artifacts"));
+        return Files.exists(lock) ? catalog.install(lock, home.resolve("artifacts")) : catalog;
     }
 
     /** Identifies the compiled source and locked implementations, not Examples or presentation. */
@@ -88,8 +87,8 @@ final class ProjectFiles {
         final Read snapshot = examples == null ? new Read(identify(graph, true), List.of()) : combine(graph, examples);
         if (!snapshot.diagnostics().isEmpty()) return new Build(new CompileResult.Rejected(snapshot.diagnostics()), Map.of());
         final String lock = documents.get(ARCHIVE_ROOT + "railix.dependencies.lock.json");
-        final StepCatalog catalog = lock == null ? StandardLibrary.catalog()
-                : StandardLibrary.catalog().installSource(lock, home.resolve("artifacts"));
+        final StepCatalog defaults = StepCatalog.embedded(ProjectFiles.class.getClassLoader(), home.resolve("artifacts"));
+        final StepCatalog catalog = lock == null ? defaults : defaults.installSource(lock, home.resolve("artifacts"));
         final var result = ProjectCompiler.compileApplication(snapshot.source(), catalog);
         if (result instanceof CompileResult.Rejected rejected) {
             return new Build(new CompileResult.Rejected(snapshot.locations(rejected.diagnostics())), Map.of());
@@ -237,9 +236,10 @@ final class ProjectFiles {
             if (Files.isRegularFile(local)) {
                 final var result = build(local, home, true);
                 if (result.result() instanceof CompileResult.Compiled compiled && identity(compiled).equals(revision)) {
+                    final StepCatalog defaults = StepCatalog.embedded(ProjectFiles.class.getClassLoader(), home.resolve("artifacts"));
                     final StepCatalog catalog = result.documents().containsKey(ARCHIVE_ROOT + "railix.dependencies.lock.json")
-                            ? StandardLibrary.catalog().installSource(result.documents().get(ARCHIVE_ROOT + "railix.dependencies.lock.json"), home.resolve("artifacts"))
-                            : StandardLibrary.catalog();
+                            ? defaults.installSource(result.documents().get(ARCHIVE_ROOT + "railix.dependencies.lock.json"), home.resolve("artifacts"))
+                            : defaults;
                     final var metadata = CreatorDocument.parse(result.documents().getOrDefault(ARCHIVE_ROOT + "railix.creator.json", CreatorDocument.EMPTY), compiled.source(), catalog);
                     if (!metadata.diagnostics().isEmpty()) throw new IOException("Observed Creator metadata is invalid.");
                     return new Snapshot(compiled.source(), metadata.value(), catalog);

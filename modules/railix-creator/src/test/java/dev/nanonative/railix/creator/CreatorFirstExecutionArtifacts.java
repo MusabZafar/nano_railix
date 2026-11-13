@@ -2,7 +2,6 @@ package dev.nanonative.railix.creator;
 
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaFileObject;
@@ -29,7 +28,7 @@ final class CreatorFirstExecutionArtifacts {
         Files.createDirectories(workspace);
         final Path project = workspace.resolve("railix.project.json");
         Files.writeString(project, source, StandardCharsets.UTF_8);
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         if (!(result instanceof CompileResult.Compiled compiled)) {
             throw new IOException("Production conformance project did not compile: " + result);
         }

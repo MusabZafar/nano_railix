@@ -32,6 +32,7 @@ import static dev.nanonative.railix.core.value.ValueShape.NUMBER;
 import static dev.nanonative.railix.core.value.ValueShape.STRING;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 final class StepDefinitionContractE2eTest {
     private static final Class<?> NEXT = NextHandler.class;
@@ -50,6 +51,53 @@ final class StepDefinitionContractE2eTest {
         final StepDefinition definition = StepDefinition.named("example.named", "1").implementation(NextHandler.class);
 
         assertThat(definition.executable()).isTrue();
+    }
+
+    @Test
+    void nativeClassificationDefaultsToTrueWithoutAnExtraDeclaration() {
+        final var definition = StepDefinition.named("example.native", "1")
+                .implementation(NextHandler.class, "java.net.http");
+
+        assertThat(definition.nativeStep()).isTrue();
+        assertThat(definition.dynamicClasses()).isEmpty();
+    }
+
+    @Test
+    void declaringDynamicClassesDerivesFalseWithoutASeparateNativeFlag() {
+        final var definition = StepDefinition.named("example.dynamic", "1")
+                .dynamicClasses(String.class, Map.Entry.class)
+                .implementation(NextHandler.class);
+
+        assertThat(definition.nativeStep()).isFalse();
+        assertThat(definition.dynamicClasses()).containsExactly("java.lang.String", "java.util.Map$Entry");
+    }
+
+    @Test
+    void emptyDynamicClassesDoNotChangeTheDefaultClassification() {
+        assertThat(StepDefinition.named("example.empty", "1").dynamicClasses()
+                .implementation(NextHandler.class).nativeStep()).isTrue();
+    }
+
+    @Test
+    void dynamicClassesAreImmutableAndCanonicalAcrossDeclarationOrder() {
+        final var first = StepDefinition.named("example.dynamic", "1")
+                .dynamicClasses(Map.Entry.class, String.class).implementation(NextHandler.class);
+        final var second = StepDefinition.named("example.dynamic", "1")
+                .dynamicClasses(String.class, Map.Entry.class).implementation(NextHandler.class);
+        assertThat(first.dynamicClasses()).isEqualTo(second.dynamicClasses());
+        assertThatThrownBy(() -> first.dynamicClasses().clear()).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void invalidDynamicClassesAreRejectedAtTheDeveloperBoundary() {
+        assertThatIllegalArgumentException().isThrownBy(() -> StepDefinition.named("example.null", "1").dynamicClasses((Class<?>[]) null));
+        assertThatIllegalArgumentException().isThrownBy(() -> StepDefinition.named("example.null", "1").dynamicClasses((Class<?>) null));
+        assertThatIllegalArgumentException().isThrownBy(() -> StepDefinition.named("example.primitive", "1").dynamicClasses(int.class));
+        assertThatIllegalArgumentException().isThrownBy(() -> StepDefinition.named("example.array", "1").dynamicClasses(String[].class));
+        assertThatIllegalArgumentException().isThrownBy(() -> StepDefinition.named("example.duplicate", "1")
+                .dynamicClasses(String.class, String.class).implementation(NextHandler.class));
+        assertThatIllegalArgumentException().isThrownBy(() -> StepDefinition.named("example.app", "1")
+                .kind(StepDefinition.Kind.APP).dynamicClasses(String.class).define());
     }
 
     @Test

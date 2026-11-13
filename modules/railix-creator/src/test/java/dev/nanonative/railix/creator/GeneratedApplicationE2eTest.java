@@ -8,7 +8,6 @@ import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueShape;
 import dev.nanonative.railix.development.ArtifactLease;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import dev.nanonative.railix.stdlib.StandardStepHandlers;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -84,7 +83,7 @@ final class GeneratedApplicationE2eTest {
     }
 
     @Test
-    void manyFlowSceneKeepsItsAppAndFocusedTriggerAccessible() {
+    void manyFlowSceneKeepsItsAppAndFocusedTriggerAccessible() throws Exception {
         final TriggerScale scale = triggerScale(32);
         assertThat(ProjectCompiler.compileApplication(scale.source(), scale.catalog())).isInstanceOf(CompileResult.Compiled.class);
         final CreatorScene scene = new CreatorScene(scale.source(), RailixValue.object(Map.of(
@@ -169,7 +168,7 @@ final class GeneratedApplicationE2eTest {
     void generatedApplicationContinuesWhenNestedTraceObservationStops() throws Exception {
         final String projectSource = CreatorProjects.nestedLowercase();
         final Path project = project(directory.resolve("nested-trace-backpressure"), projectSource);
-        final CompileResult result = ProjectCompiler.compileApplication(projectSource, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(projectSource, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         try (ApplicationBuilder.DevelopmentBuild build = ApplicationBuilder.build(
                 project,
@@ -352,7 +351,7 @@ final class GeneratedApplicationE2eTest {
         final String examplePayload = "development-example-payload-sentinel-4c91";
         final String source = authoredExample(exampleName, examplePayload);
         final Path project = project(directory.resolve("development-example-manifest"), source);
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         try (ApplicationBuilder.DevelopmentBuild build = ApplicationBuilder.build(
                 project,
@@ -377,11 +376,11 @@ final class GeneratedApplicationE2eTest {
         final String secondSource = firstSource.replace("Hello RAILIX", "Different Example");
         final CompileResult firstResult = ProjectCompiler.compileApplication(
                 firstSource,
-                StandardLibrary.catalog()
+                GeneratedApplicationFixture.catalog()
         );
         final CompileResult secondResult = ProjectCompiler.compileApplication(
                 secondSource,
-                StandardLibrary.catalog()
+                GeneratedApplicationFixture.catalog()
         );
         assertThat(firstResult).isInstanceOf(CompileResult.Compiled.class);
         assertThat(secondResult).isInstanceOf(CompileResult.Compiled.class);
@@ -583,7 +582,7 @@ final class GeneratedApplicationE2eTest {
     @ValueSource(strings = {"-1", "65536", "8080.5", "\"not-a-port\""})
     void httpConfigurationRejectsInvalidPortsBeforeGeneration(final String port) {
         final String source = httpEchoProject().replace("\"port\":0", "\"port\":" + port);
-        assertThat(ProjectCompiler.compileApplication(source, StandardLibrary.catalog()))
+        assertThat(ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog()))
                 .isInstanceOfSatisfying(CompileResult.Rejected.class, rejected ->
                         assertThat(rejected.diagnostics()).anySatisfy(diagnostic ->
                                 assertThat(diagnostic.path()).contains("inputs.port")));
@@ -1236,10 +1235,6 @@ final class GeneratedApplicationE2eTest {
                             || entry.contains("StepCatalog$")
                             || entry.endsWith("StepContractJson.class")
                             || entry.startsWith("dev/nanonative/railix/creator/")
-                            || entry.endsWith("StandardLibrary.class")
-                            || entry.endsWith("PrimitiveSteps.class")
-                            || entry.endsWith("StandardStepHandlers$FieldManipulation.class")
-                            || entry.endsWith("PrimitiveStepHandlers$Uppercase.class")
                             || entry.startsWith("dev/nanonative/railix/creator/web/")
             );
         }
@@ -1394,7 +1389,7 @@ final class GeneratedApplicationE2eTest {
         final Path workspace = directory.resolve("publication-lease");
         final String lowercase = CreatorProjects.lowercaseCli();
         final Path project = project(workspace, lowercase);
-        final CompileResult result = ProjectCompiler.compileApplication(lowercase, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(lowercase, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         final Path reserved;
 
@@ -1423,7 +1418,7 @@ final class GeneratedApplicationE2eTest {
         final Path workspace = directory.resolve("runtime-publication-lease");
         final String source = CreatorProjects.lowercaseCli();
         final Path project = project(workspace, source);
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         final Path pendingRuntime;
         final ApplicationBuilder.Artifact artifact;
@@ -1450,7 +1445,7 @@ final class GeneratedApplicationE2eTest {
         final Path workspace = directory.resolve("stale-runtime-startup");
         final String source = CreatorProjects.lowercaseCli();
         final Path project = project(workspace, source);
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         final Path staleRuntime;
 
@@ -1473,7 +1468,7 @@ final class GeneratedApplicationE2eTest {
         final Path workspace = directory.resolve("stale-root-lease");
         final String source = CreatorProjects.lowercaseCli();
         final Path project = project(workspace, source);
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         final ApplicationBuilder.Artifact artifact;
 
@@ -1497,7 +1492,7 @@ final class GeneratedApplicationE2eTest {
         final Path workspace = directory.resolve("stale-pid");
         final String lowercase = CreatorProjects.lowercaseCli();
         final Path project = project(workspace, lowercase);
-        final CompileResult result = ProjectCompiler.compileApplication(lowercase, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(lowercase, GeneratedApplicationFixture.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         final ApplicationBuilder.Artifact stale;
         try (ApplicationBuilder.DevelopmentBuild publication = ApplicationBuilder.build(
@@ -1866,7 +1861,7 @@ final class GeneratedApplicationE2eTest {
         return nodes.append(links).append("]}").toString();
     }
 
-    private static TriggerScale triggerScale(final int count) {
+    private TriggerScale triggerScale(final int count) throws IOException {
         final StepDefinition[] definitions = new StepDefinition[count + 1];
         definitions[0] = StepDefinition.named("railix.app", "1")
                 .kind(StepDefinition.Kind.APP)
@@ -1894,7 +1889,11 @@ final class GeneratedApplicationE2eTest {
             links.append("{\"from\":\"app.start\",\"to\":\"").append(node).append("\"},")
                     .append("{\"from\":\"").append(node).append(".next\",\"to\":\"end\"}");
         }
-        return new TriggerScale(nodes.append(links).append("]}").toString(), StepCatalog.of(definitions));
+        final var catalog = GeneratedApplicationFixture.installedCatalog(
+                Files.createDirectories(directory.resolve("trigger-provider-" + count)),
+                java.util.Arrays.stream(definitions).filter(definition -> definition.kind() != StepDefinition.Kind.APP).toList(),
+                StandardStepHandlers.Cli.class);
+        return new TriggerScale(nodes.append(links).append("]}").toString(), catalog);
     }
 
     private static String outOfOrderLowercase() {
@@ -2112,7 +2111,7 @@ final class GeneratedApplicationE2eTest {
         return project.append("]}").toString();
     }
 
-    private static TriggerScale widePlanPartition() {
+    private TriggerScale widePlanPartition() throws IOException {
         final StepDefinition.Builder wide = StepDefinition.named("partition.wide", "1");
         for (int index = 0; index < 100; index++) {
             wide.input(
@@ -2120,14 +2119,14 @@ final class GeneratedApplicationE2eTest {
                     StepDefinition.Input.json(ValueShape.ANY).defaultValue(RailixValue.number(index))
             );
         }
-        final StepCatalog catalog = StepCatalog.of(
-                StepDefinition.named("railix.app", "1").kind(StepDefinition.Kind.APP).define(),
+        final StepCatalog catalog = GeneratedApplicationFixture.installedCatalog(
+                Files.createDirectories(directory.resolve("wide-provider")), List.of(
                 StepDefinition.named("partition.trigger", "1")
                         .kind(StepDefinition.Kind.TRIGGER)
                         .source("application.arguments")
                         .implementation(StandardStepHandlers.Cli.class),
-                wide.implementation(StandardStepHandlers.FieldManipulation.class)
-        );
+                wide.implementation(StandardStepHandlers.FieldManipulation.class)),
+                StandardStepHandlers.Cli.class, StandardStepHandlers.FieldManipulation.class);
         final StringBuilder nodes = new StringBuilder("""
                 {"format":1,"id":"wide-plan-partition","nodes":[
                   {"id":"app","use":"railix.app","inputs":{}},
@@ -2162,7 +2161,7 @@ final class GeneratedApplicationE2eTest {
             final Path project,
             final String source
     ) throws IOException {
-        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
         if (!(result instanceof CompileResult.Compiled compiled)) {
             throw new IOException("Development application did not compile: " + result);
         }
@@ -2175,7 +2174,7 @@ final class GeneratedApplicationE2eTest {
             final Path project,
             final String source
     ) throws IOException {
-        return productionArtifact(project, source, StandardLibrary.catalog());
+        return productionArtifact(project, source, GeneratedApplicationFixture.catalog());
     }
 
     private static ApplicationBuilder.Artifact productionArtifact(

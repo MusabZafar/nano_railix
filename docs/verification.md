@@ -1679,3 +1679,111 @@ narrow port screenshots are retained in ignored `evidence/publication-followup/`
 `publication-followup-final-clean-verify.log`. No product code changed in this follow-up.
 The initial published `fb087d1` GitHub check failed. The local gate does not replace the required
 green GitHub check on the corrected commit before merging.
+
+### Portable Provider Packaging
+
+Scope: SYS-032 to SYS-037. Distribution defaults and local providers now use the same
+manifest, immutable artifact store, lock resolution and application packager. App definitions
+are provider-owned structural metadata. No provider checkout or Creator is required to run the
+produced application. Provider acquisition UI, Git fetching and Native Image builds are not
+certified by this increment.
+
+The original default application failed `jdeps --print-module-deps` because complete bundles
+copied definition factories that referenced intentionally omitted build APIs. Public-JAR
+regressions reproduced the leak, unrelated nest-member retention, mixed-enum retention and
+missing active service providers before their corrections. Packaging now selects runtime classes
+and static methods from the declared lifecycle, called helpers and explicit dynamic roots.
+It preserves state and initialization rather than silently discarding their side effects.
+Remaining authoring dependencies are explicit build rejections. Class hierarchy analysis reads
+verified bytecode and actual JDK modules, never Creator's application class loader.
+
+`ProviderPortabilityE2eTest` covers standalone standard-provider compilation against the Core SDK,
+execution after removing that checkout, mixed factory/PROCESS classes, nested private access,
+pattern switches, inherited helpers, implicit enum entrypoints, serializable lambdas, declared
+reflection, generic/annotation metadata, resources and real service loading. It checks deterministic
+rebuilt JARs, matching development/production provider sets and ordinary jdeps without missing-dependency
+suppression. The SDK proof supports both a classes-directory CodeSource during `test` and the
+packaged Core JAR during `verify`.
+
+The 1,024-helper mixed-provider regression verifies the static call-graph closure without a full
+class transform per helper. Its build-time samples are advisory, not a fixed performance gate.
+Optional service descriptors are retained without forcing integrations whose service interface
+is absent, following the JDK's [on-demand service discovery](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/ServiceLoader.html).
+The same rule applies to provider and library JARs. A malformed runtime helper or missing active
+provider rejects the build; the Creator's 422 regression retains the prior application's PID.
+Further regressions reproduced HTTP 500 for a valid header with a broken class identity and for
+an invalid PROCESS opcode. Lazy class-model reads now share the typed rejection boundary.
+All three malformed-class cases return `STEP_RUNTIME_CLASS_INVALID` with the class name and
+preserve the prior application's PID. No broad runtime-exception or fatal-error catch was added.
+
+Five fresh JVMs per version were interleaved on the same host and JDK 25.0.1. Both versions built
+and executed the same lowercase CLI project with observation enabled. The warmed flow probe used
+five warmup and nine measured rounds of 100,000 calls per JVM. Values below are medians of the
+five per-JVM medians. CLI process duration includes JVM startup, one real invocation and shutdown.
+The memory column is the maximum RSS reported by the operating system for that process, not heap.
+Cold CLI runs use `-Xms32m -Xmx128m`, warmed flows use `-Xms64m -Xmx256m`, and both use Serial GC.
+The CLI build comparison reuses each variant's existing artifact cache. It measures startup,
+dependency analysis and cache validation, not a fresh Java compilation. These final measurements
+were repeated after the completed clean gate with no test or browser workers running.
+
+| Measure | Full-bundle baseline | Selected runtime |
+| --- | --- | --- |
+| Application JAR | 304,385 bytes, 166 classes | 234,411 bytes, 122 classes |
+| CLI process duration | 169.92 ms | 161.12 ms |
+| Process maximum RSS | 118,685,696 bytes | 119,406,592 bytes |
+| Warmed flow latency | 1,010.6 ns | 1,010.3 ns |
+| Allocated bytes per flow | 4,440 | 4,440 |
+| CLI build/cache check, five interleaved fresh JVMs | 890.82 ms | 930.25 ms |
+
+The artifact is about 23 percent smaller. This does not establish a runtime speedup or memory
+reduction. Runtime timings overlap, measured allocation is unchanged, and the build pays about
+39 ms for dependency analysis in this small workload. It is not a framework comparison, large-library
+build budget or sustained-load certification. No runtime dependency or second executor was added.
+
+The exact `./mvnw clean verify` passed on 2026-11-10 at 22:32 CET in 34:54, using an identical
+source snapshot under ignored `.railix/provider-portability/release-check/` to preserve existing
+previews. All 247 non-Markdown source files match that snapshot. The normal project defaults
+were used, without test exclusions or fork overrides. XML reports record 3,900 passed, zero
+failures/errors and one optional renderer-comparison skip:
+
+| Suite | Discovered | Failed / errored | Skipped |
+| --- | --- | --- | --- |
+| Core | 907 | 0 | 0 |
+| Standard library | 77 | 0 | 0 |
+| Creator Java | 1,927 | 0 | 0 |
+| Desktop browser | 829 | 0 | 1 |
+| Packaged artifact and soak | 45 | 0 | 0 |
+| 320-pixel browser | 116 | 0 | 0 |
+
+The optional `compareProductionVariantsWith128VisibleStations` case requires the explicit
+`railix.renderer.comparison` property. It is not an omitted functional gate. Fresh desktop and
+narrow screenshots are retained in the snapshot's `target/screenshots/` directory. The package
+tests exercise both `railix.jar` and the macOS app image, and the soak includes one million calls.
+
+The review/fix loop also corrected test synchronization problems without changing product
+behavior, timeouts or tolerances: wait for the held import response, split the long Branch
+journey while preserving earlier-edit Undo checks, and settle the Inspector resize before
+comparing camera queries. The persistent Example chooser is now captured through a waiting
+locator rather than a nullable one-shot query. All original identity, readability and touch-size
+assertions remain. Independent reviews found no remaining actionable functional findings.
+An earlier host-sleep interruption was stopped and is not counted as a successful run. Temporary
+idle prevention was process-scoped; thermal and closed-lid protection were not disabled.
+
+**Coverage measurement limitation:** raw aggregate coverage is 91.06% line and 82.80% branch,
+below the non-gating 95%/90% goals. Runtime pruning changes provider class bytes and therefore
+their [JaCoCo class identifiers](https://www.jacoco.org/jacoco/trunk/doc/classids.html).
+The existing report analyzes original provider classes, so execution of transformed versions
+cannot be matched and produces warnings and false zeroes. In particular, the standard-library
+31.18%/2.36% figures are not complete runtime coverage measurements. They must not be compared
+with the pre-pruning aggregate or used as evidence that those functions were not exercised.
+The packaged functional regressions remain valid, but coverage reporting for matching emitted
+variants is a remaining tooling task. Production packaging is not bypassed or changed for tests.
+Creator/Core coverage is still partial. Unexercised packaging paths include filesystem races or
+storage failures, unavailable SHA-256 handling, and defensive class-file transformation catches.
+No full-coverage claim is made.
+
+Raw regressions, review outputs, performance probes and results are retained under ignored
+`.railix/provider-portability/`. Task-owned Maven, browser, benchmark and review processes have
+ended. Grype is unavailable on this host. Local checks do not establish public CI or release
+evidence. Public CI must validate the published commit before merging. No production,
+cross-platform or Native Image certification follows from these local checks.

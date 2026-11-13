@@ -4,7 +4,6 @@ import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepDefinition;
-import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -423,7 +422,7 @@ final class CreatorSceneObservationsE2eTest extends CreatorServerE2eSupport {
     @Test
     void sampledOperationalHttpExecutionsAreAggregatedWithoutAddingFlowTotalsTwice() throws Exception {
         final String source = threeStepProject().replace("\"id\":\"two\",", "\"id\":\"two\",\"metrics\":false,");
-        final RailixValue.ObjectValue observed = operationalObservations(source, StandardLibrary.catalog(), 1025, 200);
+        final RailixValue.ObjectValue observed = operationalObservations(source, GeneratedApplicationFixture.catalog(), 1025, 200);
         final RailixValue.ObjectValue region = entry(observed, "group-region:normalize:one");
 
         assertThat(metricNumber(region, "executions")).isEqualTo(2054);

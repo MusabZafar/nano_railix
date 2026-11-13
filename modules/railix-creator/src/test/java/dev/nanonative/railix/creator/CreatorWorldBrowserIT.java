@@ -3284,6 +3284,7 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
 
     @ParameterizedTest
     @Tag("responsive")
+    @Tag("browser-diagnostics")
     @ValueSource(strings = {"ellipse", "triangle", "diamond", "rectangle", "hexagon", "event", "storage", "subsystem"})
     void shapeCornersDoNotCaptureClicksOutsideTheirOutline(final String shape) {
         openProject(fourStepProject());
@@ -3300,8 +3301,6 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         page.evaluate("() => { state.world.focus('one'); }");
         awaitScene();
         final BoundingBox outline = stationBounds("one");
-        final double x = outline.x + outline.width/2;
-        final double y = outline.y + outline.height/2;
         final double outsideX = shape.equals("triangle") ? outline.x + outline.width - 1 : outline.x + 1;
         final double outsideY = outline.y + 1;
         assertThat(page.evaluate("point => document.elementFromPoint(...point)?.closest('[data-world-id]') === null",
@@ -3310,6 +3309,10 @@ final class CreatorWorldBrowserIT extends RailixCreatorBrowserSupport {
         page.waitForFunction("() => !state.editorController");
         assertThat(page.evaluate("() => state.world._surface.stations.some(item=>item.node.id==='one' && item.look.selected)")).isEqualTo(false);
         page.screenshot(new Page.ScreenshotOptions().setPath(Path.of("target", "screenshots", "shape-hit-" + shape + ".png")));
+        awaitScene();
+        final BoundingBox body = stationBounds("one");
+        final double x = body.x + body.width/2;
+        final double y = body.y + body.height/2;
         assertThat(page.evaluate("""
                 point => {
                   const target = document.elementFromPoint(...point);
