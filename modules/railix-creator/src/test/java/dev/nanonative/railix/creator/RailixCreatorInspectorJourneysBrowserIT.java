@@ -203,11 +203,10 @@ final class RailixCreatorInspectorJourneysBrowserIT extends RailixCreatorBrowser
     @ParameterizedTest
     @ValueSource(ints = {320, 390})
     @Tag("responsive")
-    @Tag("browser-diagnostics")
     void failedExampleNamesRemainReadableAlongsideTheirActions(final int width) throws Exception {
         page.setViewportSize(width, 844);
         openProject(CreatorEditorBrowserIT.attentionProject());
-        final var chooser = page.locator("#visible-example").elementHandle();
+        final var chooser = page.querySelector("#visible-example");
         page.locator("#issue-count").click();
         page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Inspect Example: invalid-name").setExact(true)).click();

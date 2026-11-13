@@ -3,7 +3,6 @@ package dev.nanonative.railix.stdlib;
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.Diagnostic;
 import dev.nanonative.railix.core.project.ProjectCompiler;
-import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepDefinition;
 import dev.nanonative.railix.core.step.StepDefinition.Input;
 import dev.nanonative.railix.core.value.RailixData;
@@ -22,10 +21,6 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class PrimitiveStepsCreatorProjectE2eTest {
-    static StepCatalog catalog() {
-        return StepCatalog.of(StandardLibrary.class, StandardLibrary.definitions().toArray(StepDefinition[]::new));
-    }
-
     @Test
     void builtInValueOperationsAreOrdinaryUnarySteps() {
         assertThat(PrimitiveSteps.definitions()).allSatisfy(definition -> {
@@ -52,7 +47,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
             final String displayName,
             final String searchTerms
     ) {
-        final StepDefinition definition = catalog().find(primitive).orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find(primitive).orElseThrow();
 
         assertThat(definition.displayName()).isEqualTo(displayName);
         assertThat(definition.searchTerms()).containsExactly(searchTerms.split(" "));
@@ -60,7 +55,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void fieldManipulationDeclaresOnlyGenericAuthoredInputs() {
-        final StepDefinition definition = catalog()
+        final StepDefinition definition = StandardLibrary.catalog()
                 .find("railix.field-manipulation")
                 .orElseThrow();
 
@@ -76,7 +71,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void httpTriggerDeclaresRequestAndResponseBoundary() {
-        final StepDefinition definition = catalog()
+        final StepDefinition definition = StandardLibrary.catalog()
                 .find("railix.trigger.http")
                 .orElseThrow();
 
@@ -105,7 +100,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void httpClientDeclaresGenericRequestInputsAndOneResponseOutput() {
-        final StepDefinition definition = catalog()
+        final StepDefinition definition = StandardLibrary.catalog()
                 .find("railix.http.client")
                 .orElseThrow();
 
@@ -127,7 +122,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void branchDeclaresAnOrdinaryStepWithGenericRoutesAndExecutionSettings() {
-        final StepDefinition definition = catalog()
+        final StepDefinition definition = StandardLibrary.catalog()
                 .find("railix.branch")
                 .orElseThrow();
 
@@ -163,7 +158,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
                 });
         assertThat(definition.outcomes()).containsExactly("otherwise");
         for (final String retired : List.of("railix.filter", "railix.choice", "railix.switch")) {
-            assertThat(catalog().find(retired)).isEmpty();
+            assertThat(StandardLibrary.catalog().find(retired)).isEmpty();
         }
     }
 
@@ -172,7 +167,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
         final CompileResult compiled = ProjectCompiler.compileApplication(branchProject("""
                 [[{"option":"literal","inputs":{"value":"HELLO"},
                   "when":{"transforms":[],"all":[[{"use":"text.lowercase","inputs":{}}]]}}]]
-                """), catalog());
+                """), StandardLibrary.catalog());
 
         assertThat(compiled).isEqualTo(new CompileResult.Rejected(List.of(Diagnostic.atPath(
                 "PROJECT_MATCHER_PREDICATE_RESULT_INVALID",
@@ -183,7 +178,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void cliTriggerDeclaresOneInstanceAndSilentDefaults() {
-        final StepDefinition definition = catalog()
+        final StepDefinition definition = StandardLibrary.catalog()
                 .find("railix.trigger.cli")
                 .orElseThrow();
 
@@ -229,7 +224,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void secondCliTriggerIsRejectedAtTheSecondNode() {
-        assertThat(ProjectCompiler.compileApplication(twoCliProject(), catalog()))
+        assertThat(ProjectCompiler.compileApplication(twoCliProject(), StandardLibrary.catalog()))
                 .isEqualTo(new CompileResult.Rejected(List.of(Diagnostic.atPath(
                         "PROJECT_STEP_INSTANCE_LIMIT",
                         "Step railix.trigger.cli allows at most 1 instance.",
@@ -269,7 +264,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void textContainsDeclaresADefaultEmptyStringConfiguration() {
-        final StepDefinition definition = catalog().find("text.contains").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("text.contains").orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -318,7 +313,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
             final String primitive,
             final String input
     ) {
-        final StepDefinition definition = catalog().find(primitive).orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find(primitive).orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -372,7 +367,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
             "number.less-or-equal"
     })
     void numberComparisonDeclaresATotalZeroDefaultedConfigurationContract(final String primitive) {
-        final StepDefinition definition = catalog().find(primitive).orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find(primitive).orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -456,7 +451,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void valueEqualsDeclaresADefaultJsonNullConfiguration() {
-        final StepDefinition definition = catalog().find("value.equals").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("value.equals").orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -476,7 +471,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void valueIsTypeDeclaresOneGenericTypeSelector() {
-        final StepDefinition definition = catalog().find("value.is-type").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("value.is-type").orElseThrow();
         assertThat(definition.displayName()).isEqualTo("Is Type");
         assertThat(definition.receives()).containsExactly(new StepDefinition.Port("value", ValueShape.ANY));
         assertThat(definition.returns()).containsExactly(new StepDefinition.Port("value", ValueShape.BOOLEAN));
@@ -497,7 +492,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
     void valueIsTypeRejectsInvalidConfigurationAtCompilation(final String config) {
         assertThat(ProjectCompiler.compileApplication(
                 configuredProject(List.of("value.is-type"), "value.is-type", config, "42"),
-                catalog())).isInstanceOfSatisfying(CompileResult.Rejected.class,
+                StandardLibrary.catalog())).isInstanceOfSatisfying(CompileResult.Rejected.class,
                 rejected -> assertThat(rejected.diagnostics()).singleElement().satisfies(diagnostic ->
                         assertThat(diagnostic.path()).startsWith("nodes[2].inputs.steps[0].inputs")));
     }
@@ -515,7 +510,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void valueNotEqualsDeclaresADefaultJsonNullConfiguration() {
-        final StepDefinition definition = catalog().find("value.not-equals").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("value.not-equals").orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -617,7 +612,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void textToNumberDeclaresTheFallibleStringToNumberContract() {
-        final StepDefinition definition = catalog().find("text.to-number").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("text.to-number").orElseThrow();
 
         assertThat(definition.receives()).containsExactly(new StepDefinition.Port("value", ValueShape.STRING));
         assertThat(definition.returns()).containsExactly(new StepDefinition.Port("value", ValueShape.NUMBER));
@@ -626,7 +621,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void listSumDeclaresTheFallibleArrayToNumberContract() {
-        final StepDefinition definition = catalog().find("list.sum").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("list.sum").orElseThrow();
 
         assertThat(definition.receives()).containsExactly(new StepDefinition.Port("value", ValueShape.ARRAY));
         assertThat(definition.returns()).containsExactly(new StepDefinition.Port("value", ValueShape.NUMBER));
@@ -636,7 +631,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void listMinDeclaresTheEmptyAwareArrayToNumberContract() {
-        final StepDefinition definition = catalog().find("list.min").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("list.min").orElseThrow();
 
         assertThat(definition.receives()).containsExactly(new StepDefinition.Port("value", ValueShape.ARRAY));
         assertThat(definition.returns()).containsExactly(new StepDefinition.Port("value", ValueShape.NUMBER));
@@ -646,7 +641,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void listMaxDeclaresTheEmptyAwareArrayToNumberContract() {
-        final StepDefinition definition = catalog().find("list.max").orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find("list.max").orElseThrow();
 
         assertThat(definition.receives()).containsExactly(new StepDefinition.Port("value", ValueShape.ARRAY));
         assertThat(definition.returns()).containsExactly(new StepDefinition.Port("value", ValueShape.NUMBER));
@@ -657,7 +652,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
     @Test
     void listPercentileDeclaresItsEmptyAwareContractAndDefault() {
         final StepDefinition definition =
-                catalog().find("list.percentile").orElseThrow();
+                StandardLibrary.catalog().find("list.percentile").orElseThrow();
 
         assertThat(definition.receives()).containsExactly(new StepDefinition.Port("value", ValueShape.ARRAY));
         assertThat(definition.returns()).containsExactly(new StepDefinition.Port("value", ValueShape.NUMBER));
@@ -672,7 +667,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
 
     @Test
     void listPercentileRangeIsMachineReadable() {
-        final StepDefinition.JsonInput config = (StepDefinition.JsonInput) catalog()
+        final StepDefinition.JsonInput config = (StepDefinition.JsonInput) StandardLibrary.catalog()
                 .find("list.percentile")
                 .orElseThrow()
                 .inputs()
@@ -726,7 +721,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
     void listPercentileNeedsNoEmptyGraphConnection() {
         final CompileResult result = ProjectCompiler.compileApplication(
                 collectionProject("list.percentile", "{}", "[1]"),
-                catalog()
+                StandardLibrary.catalog()
         );
 
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
@@ -737,7 +732,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
     void listPercentileNeedsNoInvalidGraphConnection() {
         final CompileResult result = ProjectCompiler.compileApplication(
                 collectionProject("list.percentile", "{}", "[1]"),
-                catalog()
+                StandardLibrary.catalog()
         );
 
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
@@ -753,7 +748,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
                                 + "{\"from\":\"apply.empty\",\"to\":\"end\"}"
                 );
 
-        assertThat(ProjectCompiler.compileApplication(project, catalog()))
+        assertThat(ProjectCompiler.compileApplication(project, StandardLibrary.catalog()))
                 .isEqualTo(new CompileResult.Rejected(List.of(Diagnostic.atPath(
                         "PROJECT_LINK_OUTCOME_UNKNOWN",
                         "Link source outcome is not declared: apply.empty.",
@@ -770,7 +765,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
             final ValueShape input,
             final ValueShape output
     ) {
-        final StepDefinition definition = catalog().find(id).orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find(id).orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -790,7 +785,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
             final StepDefinition.Port input,
             final StepDefinition.Port output
     ) {
-        final StepDefinition definition = catalog().find(id).orElseThrow();
+        final StepDefinition definition = StandardLibrary.catalog().find(id).orElseThrow();
 
         assertThat(List.of(
                 definition.receives(),
@@ -811,7 +806,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
                 "{\"use\":\"" + primitive + "\",\"inputs\":{\"noise\":true}}"
         );
 
-        assertThat(ProjectCompiler.compileApplication(source, catalog()))
+        assertThat(ProjectCompiler.compileApplication(source, StandardLibrary.catalog()))
                 .isEqualTo(new CompileResult.Rejected(List.of(Diagnostic.atPath(
                         "PROJECT_INPUT_UNKNOWN",
                         "Step input is not declared: noise.",
@@ -828,7 +823,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
     ) {
         assertThat(ProjectCompiler.compileApplication(
                 configuredProject(List.of(primitive), primitive, config, "6"),
-                catalog()
+                StandardLibrary.catalog()
         )).isEqualTo(new CompileResult.Rejected(List.of(Diagnostic.atPath(code, message, path))));
     }
 
@@ -839,7 +834,7 @@ class PrimitiveStepsCreatorProjectE2eTest {
     ) {
         return ProjectCompiler.compileApplication(
                 collectionProject(primitive, config, input),
-                catalog()
+                StandardLibrary.catalog()
         );
     }
 

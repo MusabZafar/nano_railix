@@ -5,6 +5,7 @@ import dev.nanonative.railix.core.step.StepContractJson;
 import dev.nanonative.railix.core.step.StepDefinition;
 import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import java.io.IOException;
 import java.io.ByteArrayOutputStream;
@@ -15,6 +16,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,15 +32,6 @@ import javax.tools.ToolProvider;
 
 /** Builds and owns one real generated application from a locked test Step bundle. */
 final class GeneratedApplicationFixture implements AutoCloseable {
-    static StepCatalog catalog() {
-        try {
-            return StepCatalog.embedded(GeneratedApplicationFixture.class.getClassLoader(),
-                    Path.of("target", "provider-test-artifacts"));
-        } catch (final IOException invalidDistribution) {
-            throw new java.io.UncheckedIOException(invalidDistribution);
-        }
-    }
-
     private final DevelopmentRuntimeGeneratedProcess.Child application;
     private final URI baseUri;
     private final String token;
@@ -55,7 +50,7 @@ final class GeneratedApplicationFixture implements AutoCloseable {
             final Path workspace,
             final String source
     ) throws IOException {
-        return start(workspace, source, GeneratedApplicationFixture.catalog());
+        return start(workspace, source, StandardLibrary.catalog());
     }
 
     static GeneratedApplicationFixture start(
@@ -199,11 +194,44 @@ final class GeneratedApplicationFixture implements AutoCloseable {
         entries.put("META-INF/railix/steps.json", manifest.getBytes(StandardCharsets.UTF_8));
         final Path bundle = workspace.resolve("conformance-steps.jar");
         jar(bundle, entries);
+        final String digest = digest(Files.readAllBytes(bundle));
         final Path store = workspace.resolve("railix-home/artifacts");
-        final String lock = StepCatalog.bundleLock(bundle, store);
+        Files.createDirectories(store);
+        Files.copy(bundle, store.resolve(digest + ".jar"));
+        final RailixValue.ObjectValue manifestValue = (RailixValue.ObjectValue)
+                ((RailixJson.Parsed) RailixJson.parse(manifest)).value();
+        final List<RailixValue> lockedSteps = ((RailixValue.ArrayValue)
+                manifestValue.values().get("steps")).values().stream()
+                .map(RailixValue.ObjectValue.class::cast)
+                .<RailixValue>map(GeneratedApplicationFixture::lockedStep)
+                .toList();
+        final RailixValue lock = RailixValue.object(Map.of(
+                "format", RailixValue.number(1),
+                "artifacts", RailixValue.array(List.of(RailixValue.object(Map.of(
+                        "digest", RailixValue.string("sha256:" + digest),
+                        "origin", RailixValue.string("test:conformance-steps"),
+                        "size", RailixValue.number(Files.size(bundle))
+                )))),
+                "bundles", RailixValue.array(List.of(RailixValue.object(Map.of(
+                        "artifact", RailixValue.string("sha256:" + digest),
+                        "runtime", RailixValue.array(List.of()),
+                        "steps", RailixValue.array(lockedSteps)
+                ))))
+        ));
         final Path lockFile = workspace.resolve("railix.dependencies.lock.json");
-        Files.writeString(lockFile, lock, StandardCharsets.UTF_8);
-        return GeneratedApplicationFixture.catalog().install(lockFile, store);
+        Files.writeString(lockFile, RailixJson.write(lock), StandardCharsets.UTF_8);
+        return StandardLibrary.catalog().install(lockFile, store);
+    }
+
+    private static RailixValue lockedStep(final RailixValue.ObjectValue manifestStep) {
+        final RailixValue.ObjectValue contract = (RailixValue.ObjectValue) manifestStep.values().get("contract");
+        return RailixValue.object(Map.of(
+                "contract", manifestStep.values().get("contract_digest"),
+                "id", contract.values().get("id"),
+                "implementation", manifestStep.values().get("implementation"),
+                "implementation_entry", manifestStep.values().get("implementation_entry"),
+                "version", contract.values().get("version")
+        ));
     }
 
     private static Map<String, byte[]> classes(final Class<?>... types) throws IOException {
@@ -244,4 +272,11 @@ final class GeneratedApplicationFixture implements AutoCloseable {
         }
     }
 
+    private static String digest(final byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (final NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable.", exception);
+        }
+    }
 }

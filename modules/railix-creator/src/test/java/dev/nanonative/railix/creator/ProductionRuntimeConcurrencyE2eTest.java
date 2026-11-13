@@ -127,7 +127,6 @@ final class ProductionRuntimeConcurrencyE2eTest {
     private static List<StepDefinition> definitions() {
         return List.of(
                 StepDefinition.named("production.concurrent.barrier", "1")
-                        .dynamicClasses(ProductionRuntimeConcurrencySteps.Barrier.class)
                         .implementation(ProductionRuntimeConcurrencySteps.Barrier.class),
                 StepDefinition.named("production.concurrent.create-file", "1")
                         .receive("file", ValueShape.STRING)

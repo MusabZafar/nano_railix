@@ -2,6 +2,7 @@ package dev.nanonative.railix.creator;
 
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.RailixJson;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -57,7 +58,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         });
         final var metadata = com.google.gson.JsonParser.parseString(fixture.creator()).getAsJsonObject();
         metadata.getAsJsonObject("steps").remove("lane-0-0");
-        final var scene = new CreatorScene(project.toString(), object(metadata.toString()), GeneratedApplicationFixture.catalog())
+        final var scene = new CreatorScene(project.toString(), object(metadata.toString()), StandardLibrary.catalog())
                 .view("x=928.3084347979694&y=233.70079959538538&width=244.41310622026867&height=250.697039622573&scale=8.387445887445887&focus=group:group-lane-0-0");
         for (final var link : array(scene, "links")) assertThat(array((RailixValue.ObjectValue) link, "points"))
                 .as(RailixJson.write(link)).hasSizeGreaterThanOrEqualTo(2);
@@ -72,13 +73,13 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
             final var link = value.getAsJsonObject();
             if (link.get("from").getAsString().equals("payments-merge-right.next")) link.addProperty("to", "orders-lane-0-20");
         }
-        final var scene = new CreatorScene(source.toString(), metadata, GeneratedApplicationFixture.catalog()).view("scale=0.1");
+        final var scene = new CreatorScene(source.toString(), metadata, StandardLibrary.catalog()).view("scale=0.1");
         assertThat(scene.values().get("limited")).isEqualTo(RailixValue.bool(false));
         assertThat(nodes(scene).stream().map(part -> string(part, "id")))
                 .doesNotContain("area:orders-command", "area:payments-command").contains("area:stock-command");
         final var edited = fixture.project().replace("  ADA LOVELACE  ", "  NEW EXAMPLE  ");
-        final var first = new CreatorScene(fixture.project(), metadata, GeneratedApplicationFixture.catalog()).view("scale=0.1");
-        final var second = new CreatorScene(edited, metadata, GeneratedApplicationFixture.catalog()).view("scale=0.1");
+        final var first = new CreatorScene(fixture.project(), metadata, StandardLibrary.catalog()).view("scale=0.1");
+        final var second = new CreatorScene(edited, metadata, StandardLibrary.catalog()).view("scale=0.1");
         assertThat(nodes(first).stream().filter(part -> string(part, "id").startsWith("area:")).map(part -> string(part, "id")))
                 .containsExactlyElementsOf(nodes(second).stream().filter(part -> string(part, "id").startsWith("area:")).map(part -> string(part, "id")).toList());
     }
@@ -86,7 +87,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     @Test
     void independentRoutesHaveSeparateCorridorsInABranchHeavySystem() {
         final var fixture = CreatorWorldBrowserIT.systemStressScene();
-        final var indexed = new CreatorScene(fixture.project(), object(fixture.creator()), GeneratedApplicationFixture.catalog());
+        final var indexed = new CreatorScene(fixture.project(), object(fixture.creator()), StandardLibrary.catalog());
         final var overview = indexed.view("scale=0.1");
         assertThat(nodes(overview).stream().filter(part -> string(part, "kind").equals("trigger"))).hasSize(2);
         assertThat(nodes(overview)).hasSizeLessThanOrEqualTo(20);
@@ -800,7 +801,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     void wideBranchesCoarsenWithoutOmittingAnyStationOrConnection() throws Exception {
         final int count = 5000;
         final CreatorScene indexed = new CreatorScene(Files.readString(groupedBranches(count)),
-                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), GeneratedApplicationFixture.catalog());
+                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), StandardLibrary.catalog());
         for (final String query : List.of("", "x=-1000&y=-1000&width=10000000&height=10000000&scale=100000000")) {
             final RailixValue.ObjectValue visible = indexed.view(query);
             assertConnected(visible);
@@ -814,7 +815,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
     @Test
     void coarsenedSceneRegionsExposeBoundedIndividualCounters() throws Exception {
         final CreatorScene indexed = new CreatorScene(Files.readString(groupedBranches(5000)),
-                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), GeneratedApplicationFixture.catalog());
+                object("{\"format\":2,\"groups\":[],\"steps\":{}}"), StandardLibrary.catalog());
         final List<RailixValue.ObjectValue> regions = nodes(indexed.view("")).stream()
                 .filter(node -> string(node, "kind").equals("region")).toList();
         assertThat(regions).isNotEmpty();
@@ -846,7 +847,7 @@ final class CreatorSceneE2eTest extends CreatorServerE2eSupport {
         final int count = Integer.getInteger("railix.scene.scale", 20_000);
         final long started = System.nanoTime();
         final CreatorScene indexed = new CreatorScene(chain(count), object("{\"format\":2,\"groups\":[],\"steps\":{}}"),
-                GeneratedApplicationFixture.catalog());
+                StandardLibrary.catalog());
         final long indexedAt = System.nanoTime();
         final var times = new java.util.ArrayList<Long>();
         int queryBytes = 0;

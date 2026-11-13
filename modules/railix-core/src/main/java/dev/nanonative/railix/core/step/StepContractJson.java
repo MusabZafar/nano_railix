@@ -19,7 +19,7 @@ public final class StepContractJson {
     private static final Set<String> CONTRACT_FIELDS = Set.of(
             "display_name", "example_target", "examples", "id", "inputs", "kind",
             "maximum_instances", "outcomes", "primary_outcome", "receives", "results",
-            "returns", "search_terms", "source", "version", "jdk_modules", "continuations", "metrics", "dynamic_classes"
+            "returns", "search_terms", "source", "version", "jdk_modules", "continuations", "metrics"
     );
 
     private StepContractJson() {
@@ -37,7 +37,6 @@ public final class StepContractJson {
                 .ifPresent(address -> value.put("jdk_modules", strings(address.jdkModules())));
         value.put("display_name", RailixValue.string(definition.displayName()));
         value.put("search_terms", strings(definition.searchTerms()));
-        if (!definition.dynamicClasses().isEmpty()) value.put("dynamic_classes", strings(definition.dynamicClasses()));
         if (!definition.metrics().isEmpty()) value.put("metrics", RailixValue.array(definition.metrics().stream()
                 .<RailixValue>map(metric -> RailixValue.object(Map.of(
                         "name", RailixValue.string(metric.name()), "label", RailixValue.string(metric.label()),
@@ -82,7 +81,7 @@ public final class StepContractJson {
     /**
      * Generates the canonical bundle manifest from real Step definitions.
      *
-     * @param definitions definitions owned by one root bundle, including structural App metadata
+     * @param definitions executable definitions owned by one root bundle
      * @return canonical {@code META-INF/railix/steps.json} content
      */
     public static String writeManifest(final List<StepDefinition> definitions) {
@@ -124,19 +123,19 @@ public final class StepContractJson {
         final Map<String, RailixValue> manifest = new LinkedHashMap<>(Map.of(
                 "format", RailixValue.number(1),
                 "steps", RailixValue.array(sorted.stream().<RailixValue>map(definition -> {
-                    if (definition.kind() != StepDefinition.Kind.APP && definition.implementationAddress().isEmpty())
-                        throw new IllegalArgumentException("Bundle Step must declare an implementation: " + definition.id() + ".");
+                    final StepDefinition.ImplementationAddress implementation =
+                            definition.implementationAddress().orElseThrow(() ->
+                            new IllegalArgumentException("Bundle Step must declare an implementation: "
+                                    + definition.id() + ".")
+                    );
                     final RailixValue.ObjectValue contract = value(definition);
                     final String digest = sha256(RailixJson.write(contract).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                    final Map<String, RailixValue> item = new LinkedHashMap<>(Map.of(
+                    return RailixValue.object(Map.of(
                             "contract", contract,
-                            "contract_digest", RailixValue.string("sha256:" + digest)
+                            "contract_digest", RailixValue.string("sha256:" + digest),
+                            "implementation", RailixValue.string(implementation.sourceName()),
+                            "implementation_entry", RailixValue.string(implementation.classEntry())
                     ));
-                    definition.implementationAddress().ifPresent(implementation -> {
-                        item.put("implementation", RailixValue.string(implementation.sourceName()));
-                        item.put("implementation_entry", RailixValue.string(implementation.classEntry()));
-                    });
-                    return RailixValue.object(item);
                 }).toList())
         ));
         providers.forEach(provider -> manifest.put("definitions", RailixValue.object(Map.of(
@@ -146,7 +145,7 @@ public final class StepContractJson {
         return RailixJson.write(RailixValue.object(manifest));
     }
 
-    /** Reconstructs one external definition without loading its implementation class. */
+    /** Reconstructs one external executable definition without loading its implementation class. */
     static StepDefinition read(
             final RailixValue.ObjectValue contract,
             final String implementation,
@@ -168,12 +167,6 @@ public final class StepContractJson {
         if (optionalBoolean(contract, "continuations", "contract").orElse(false)) builder.withContinuations();
         final List<String> terms = strings(contract, "search_terms", "contract");
         builder.searchTerms(terms.toArray(String[]::new));
-        if (contract.values().containsKey("dynamic_classes")) {
-            final List<String> names = strings(contract, "dynamic_classes", "contract");
-            if (names.isEmpty() || !names.equals(names.stream().sorted().distinct().toList()))
-                throw invalid("contract.dynamic_classes", "must contain sorted unique class names");
-            builder.dynamicClassNames(names);
-        }
         if (contract.values().containsKey("metrics")) {
             for (final RailixValue value : array(contract, "metrics", "contract").values()) {
                 final var item = object(value, "contract.metrics[]");
@@ -669,7 +662,7 @@ public final class StepContractJson {
             final Set<String> fields,
             final String path
     ) {
-        object(value, fields, path, Set.of("example_target", "source", "jdk_modules", "continuations", "metrics", "dynamic_classes"));
+        object(value, fields, path, Set.of("example_target", "source", "jdk_modules", "continuations", "metrics"));
     }
 
     private static void object(

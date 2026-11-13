@@ -238,7 +238,7 @@ public final class CreatorServer implements AutoCloseable {
         if (!projectExists && Files.exists(absoluteProject.resolveSibling("railix.examples.json")))
             throw new IOException("An Example file already exists here. Restore or open its project before creating another one.");
         final var documents = projectExists ? ProjectFiles.read(absoluteProject)
-                : new ProjectFiles.Read(defaultProject(absoluteProject, catalog), List.of());
+                : new ProjectFiles.Read(defaultProject(absoluteProject), List.of());
         if (!documents.diagnostics().isEmpty()) {
             final var diagnostic = documents.diagnostics().getFirst();
             throw new IOException(diagnostic.code() + " " + diagnostic.path() + " " + diagnostic.message());
@@ -2818,12 +2818,7 @@ public final class CreatorServer implements AutoCloseable {
 
     private Response accept(final CompileResult.Compiled compiled, final long revision, final boolean fullDocument)
             throws IOException {
-        final String applicationKey;
-        try {
-            applicationKey = ApplicationBuilder.key(compiled);
-        } catch (final ApplicationBuilder.GeneratedCompilationException exception) {
-            return json(422, diagnostics(List.of(Diagnostic.atPath(exception.code(), exception.getMessage(), "")), application()));
-        }
+        final String applicationKey = ApplicationBuilder.key(compiled);
         synchronized (buildLock) {
             final String cleanupPhase = cleanupRetirement();
             long generation = -1;
@@ -3553,9 +3548,7 @@ public final class CreatorServer implements AutoCloseable {
         return editor;
     }
 
-    private static String defaultProject(final Path project, final StepCatalog catalog) throws IOException {
-        final var app = catalog.definitions().stream().filter(definition -> definition.kind() == StepDefinition.Kind.APP)
-                .findFirst().orElseThrow(() -> new IOException("Default providers contain no App definition."));
+    private static String defaultProject(final Path project) {
         final int combinations = PROJECT_PREFIXES.length * PROJECT_SUBJECTS.length * PROJECT_OBJECTS.length;
         int index = Math.floorMod(project.toString().hashCode(), combinations);
         final String prefix = PROJECT_PREFIXES[index % PROJECT_PREFIXES.length];
@@ -3565,9 +3558,9 @@ public final class CreatorServer implements AutoCloseable {
         final String name = prefix + "-" + subject + "-" + PROJECT_OBJECTS[index];
         return """
                 {"format":1,"id":"%s","nodes":[
-                  {"id":"app","use":%s,"inputs":{}}
+                  {"id":"app","use":"railix.app","inputs":{}}
                 ],"links":[]}
-                """.formatted(name, RailixJson.write(RailixValue.string(app.id())));
+                """.formatted(name);
     }
 
     private RailixValue.ObjectValue application() {
@@ -3602,9 +3595,7 @@ public final class CreatorServer implements AutoCloseable {
     }
 
     private static RailixValue definition(final StepDefinition definition) {
-        final Map<String, RailixValue> value = new LinkedHashMap<>(StepContractJson.value(definition).values());
-        value.put("native", RailixValue.bool(definition.nativeStep()));
-        return RailixValue.object(value);
+        return StepContractJson.value(definition);
     }
 
     private static Response resource(final HttpExchange exchange, final String path) throws IOException {

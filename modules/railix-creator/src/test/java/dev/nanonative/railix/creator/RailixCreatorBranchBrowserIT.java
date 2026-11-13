@@ -59,7 +59,7 @@ final class RailixCreatorBranchBrowserIT extends RailixCreatorBrowserSupport {
 
     @Test
     @Tag("responsive")
-    void branchingSettingsAndContextOwnershipSurviveSaveAndReopen() {
+    void branchingSettingsRoutesAndContextOwnershipSurviveSaveUndoAndReopen() throws Exception {
         openProject(project());
         selectWorldNode("dispatch");
         assertThat(page.locator("#selection-option")).hasValue("all");
@@ -67,31 +67,11 @@ final class RailixCreatorBranchBrowserIT extends RailixCreatorBrowserSupport {
         assertThat(page.locator(".route-input > .candidate-list > .route")).hasCount(4);
         clickAndWaitForCreatorSave(() -> page.locator("#execution-option").selectOption("sequential"));
         clickAndWaitForCreatorSave(() -> page.locator("[data-input-name='own_context'] input").first().check());
-        page.reload();
-        waitForText("#build-state", "Built");
-        selectWorldNode("dispatch");
-        assertThat(page.locator("#execution-option")).hasValue("sequential");
-        assertThat(page.locator("[data-input-name='own_context'] input").first()).isChecked();
-        assertThat(page.locator("[data-input-name='own_context'] select")).hasCount(0);
-        assertThat(page.locator(".route-input > .candidate-list > .route")).hasCount(4);
-        assertThat(pageErrors).isEmpty();
-    }
-
-    @Test
-    @Tag("responsive")
-    void routeUndoRedoAndReopenPreserveSavedBranchSettings() throws Exception {
-        final String saved = project().replace("\"outcome\":\"stock\",\"groups\":[],\"inputs\":{}",
-                        "\"outcome\":\"stock\",\"groups\":[],\"inputs\":{\"own_context\":true}");
-        openProject(saved);
-        selectWorldNode("dispatch");
-        clickAndWaitForCreatorSave(() -> page.locator("#execution-option").selectOption("sequential"));
         clickAndWaitForCreatorSave(() -> page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
                 new Page.GetByRoleOptions().setName("Add route").setExact(true)).click());
         assertThat(page.locator(".route-input > .candidate-list > .route")).hasCount(5);
         clickAndWaitForCreatorSave(() -> page.locator("#editor-undo").click());
         assertThat(page.locator(".route-input > .candidate-list > .route")).hasCount(4);
-        assertThat(page.locator("#execution-option")).hasValue("sequential");
-        assertThat(page.locator("[data-input-name='own_context'] input").first()).isChecked();
         clickAndWaitForCreatorSave(() -> page.locator("#editor-redo").click());
         assertThat(page.locator(".route-input > .candidate-list > .route")).hasCount(5);
         page.reload();

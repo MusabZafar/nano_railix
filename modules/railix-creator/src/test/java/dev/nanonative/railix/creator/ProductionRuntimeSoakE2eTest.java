@@ -4,6 +4,7 @@ import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepDefinition;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -164,7 +165,7 @@ final class ProductionRuntimeSoakE2eTest {
         Files.createDirectories(projectDirectory);
         Files.writeString(project, source, StandardCharsets.UTF_8);
 
-        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
         if (!(result instanceof CompileResult.Compiled compiled)) {
             throw new IOException("Production soak project did not compile: " + result);
         }

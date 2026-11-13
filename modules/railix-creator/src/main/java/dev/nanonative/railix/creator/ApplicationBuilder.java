@@ -5,6 +5,7 @@ import dev.nanonative.railix.core.project.WorkflowRuntime;
 import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.development.ArtifactLease;
 import dev.nanonative.railix.development.DevelopmentRuntime;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaFileObject;
@@ -59,6 +60,7 @@ final class ApplicationBuilder {
             "dev/nanonative/railix/core/value/"
     );
     private static final String DEVELOPMENT_PREFIX = "dev/nanonative/railix/development/";
+    private static final String PLATFORM_CLASS_PREFIX = "dev/nanonative/railix/";
 
     private ApplicationBuilder() {
     }
@@ -174,8 +176,7 @@ final class ApplicationBuilder {
                     applicationSource,
                     compiled.applicationDependencies(),
                     classes,
-                    runtime.locations(),
-                    runtime.jdkModules()
+                    runtime.locations()
             );
             final Map<String, RuntimeEntry> generated = inventoryDirectory(classes, name -> name.endsWith(".class"));
             if (!generated.containsKey(GENERATED_CLASS)) {
@@ -384,8 +385,7 @@ final class ApplicationBuilder {
             final String applicationSource,
             final List<StepCatalog.Implementation> implementations,
             final Path classes,
-            final List<Path> dependencies,
-            final String jdkModules
+            final List<Path> dependencies
     ) throws IOException {
         final var compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
@@ -403,9 +403,10 @@ final class ApplicationBuilder {
                     "-g:none",
                     "--release", Integer.toString(Runtime.version().feature())
             ));
-            if (!jdkModules.isEmpty()) {
+            final String modules = jdkModules(implementations);
+            if (!modules.isEmpty()) {
                 options.add("--add-modules");
-                options.add(jdkModules);
+                options.add(modules);
             }
             options.addAll(List.of(
                     "-classpath", dependencies.stream()
@@ -459,8 +460,8 @@ final class ApplicationBuilder {
         return GeneratedCompilationException.generatedSource();
     }
 
-    private static String jdkModules(final List<StepCatalog.Implementation> implementations, final Set<String> runtimeEntries)
-            throws IOException {
+    private static String jdkModules(final List<StepCatalog.Implementation> implementations)
+            throws GeneratedCompilationException {
         final Set<String> modules = new java.util.TreeSet<>();
         final var available = java.lang.module.ModuleFinder.ofSystem();
         for (final StepCatalog.Implementation implementation : implementations) {
@@ -470,12 +471,6 @@ final class ApplicationBuilder {
                             "Step implementation " + implementation.className() + " requires unavailable JDK module: " + module + ".");
                 }
                 modules.add(module);
-            }
-            for (final String name : implementation.dynamicClasses()) {
-                final String entry = name.replace('.', '/') + ".class";
-                if (runtimeEntries.contains(entry)) continue;
-                if (!RuntimeClassDependencies.systemClass(entry, available.findAll())) throw new GeneratedCompilationException("STEP_DEPENDENCY_OWNER_MISSING",
-                        "STEP_DEPENDENCY_OWNER_MISSING: Declared dynamic class is absent from the application: " + name + ".");
             }
         }
         return String.join(",", modules);
@@ -495,17 +490,32 @@ final class ApplicationBuilder {
             final boolean development,
             final Set<String> reservedResources
     ) throws IOException {
+        final Set<String> stdlib = new LinkedHashSet<>();
         for (final StepCatalog.Implementation dependency : dependencies) {
-            if (dependency.platformOwned()) throw new IOException("STEP_DEPENDENCY_OWNER_MISSING: Package the Step as a provider bundle before building: " + dependency.className() + ".");
+            if (!dependency.platformOwned()) {
+                continue;
+            }
+            if (!dependency.className().startsWith("dev.nanonative.railix.stdlib.")) {
+                throw new IOException("STEP_DEPENDENCY_OWNER_MISSING: Platform Step is outside the Railix standard library: "
+                        + dependency.className() + ".");
+            }
+            final String implementationEntry = dependency.classEntry();
+            String name = implementationEntry.substring(0, implementationEntry.length() - ".class".length());
+            stdlib.add(name + ".class");
+            while (name.contains("$")) {
+                name = name.substring(0, name.lastIndexOf('$'));
+                stdlib.add(name + ".class");
+            }
         }
         final Map<String, RuntimeEntry> entries = new TreeMap<>();
         final LinkedHashSet<Path> locations = new LinkedHashSet<>();
         locations.add(location(WorkflowRuntime.class));
+        if (!stdlib.isEmpty()) {
+            locations.add(location(StandardLibrary.class));
+        }
         final Map<String, StepCatalog.Artifact> artifacts = new TreeMap<>();
-        final Set<Path> providerArtifacts = new java.util.HashSet<>();
         for (final StepCatalog.Implementation dependency : dependencies) {
             dependency.artifacts().forEach(artifact -> artifacts.putIfAbsent(artifact.digest(), artifact));
-            providerArtifacts.add(dependency.artifacts().getFirst().path());
         }
         verifyClosure(artifacts.values());
         for (final StepCatalog.Artifact artifact : artifacts.values()) {
@@ -518,28 +528,15 @@ final class ApplicationBuilder {
         if (development) {
             locations.add(location(DevelopmentRuntime.class));
         }
-        final Set<String> providerClasses = new java.util.HashSet<>();
-        final Set<String> libraryClasses = new java.util.HashSet<>();
         for (final Path path : locations) {
             if (artifacts.values().stream().anyMatch(artifact -> artifact.path().equals(path))) {
-                if (providerArtifacts.contains(path)) {
-                    try (var jar = new JarFile(path.toFile())) {
-                        jar.stream().map(JarEntry::getName).filter(name -> name.endsWith(".class"))
-                                .forEach(providerClasses::add);
-                    }
-                } else {
-                    try (var jar = new JarFile(path.toFile())) {
-                        jar.stream().map(JarEntry::getName).filter(name -> name.endsWith(".class"))
-                                .forEach(libraryClasses::add);
-                    }
-                }
                 addDependencyJar(entries, path, reservedResources);
                 continue;
             }
             if (Files.isDirectory(path)) {
-                addEntries(entries, inventoryDirectory(path, name -> runtimeEntry(name, development)), false);
+                addEntries(entries, inventoryDirectory(path, name -> runtimeEntry(name, stdlib, development)), false);
             } else if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".jar")) {
-                addEntries(entries, inventoryJar(path, name -> runtimeEntry(name, development)), false);
+                addEntries(entries, inventoryJar(path, name -> runtimeEntry(name, stdlib, development)), false);
             } else {
                 throw new IOException("Railix runtime location is not a classes directory or JAR: " + path + ".");
             }
@@ -552,160 +549,7 @@ final class ApplicationBuilder {
         for (final StepCatalog.Implementation dependency : dependencies) {
             require(entries, dependency.classEntry());
         }
-        final String modules = jdkModules(dependencies, entries.keySet());
-        providerClasses.removeAll(libraryClasses);
-        final Set<String> retained = new java.util.HashSet<>();
-        final Set<String> completeClasses = new java.util.HashSet<>();
-        final Map<String, Set<RuntimeClassDependencies.Method>> methods = new java.util.HashMap<>();
-        final String descriptor = "(Ldev/nanonative/railix/core/step/StepInput;Ldev/nanonative/railix/core/step/StepInput;)Ldev/nanonative/railix/core/step/StepResult;";
-        final var pending = new java.util.ArrayDeque<String>();
-        dependencies.forEach(owner -> {
-            pending.add(owner.classEntry());
-            final var entrypoints = methods.computeIfAbsent(owner.classEntry(), ignored -> new java.util.HashSet<>());
-            List.of("process", "pre", "post").forEach(name -> entrypoints.add(
-                    new RuntimeClassDependencies.Method(owner.classEntry(), name, descriptor)));
-            owner.dynamicClasses().stream().map(name -> name.replace('.', '/') + ".class")
-                    .filter(entries::containsKey).forEach(name -> { completeClasses.add(name); pending.add(name); });
-        });
-        final var system = java.lang.module.ModuleFinder.ofSystem().findAll();
-        for (final var entry : entries.values()) {
-            if (entry.name().endsWith(".class") && !providerClasses.contains(entry.name())) pending.add(entry.name());
-            if (entry.name().startsWith("META-INF/services/")) {
-                final String serviceType = entry.name().substring("META-INF/services/".length()).replace('.', '/') + ".class";
-                if (!entries.containsKey(serviceType) && !RuntimeClassDependencies.systemClass(serviceType, system)) continue;
-                final var service = mergeServices(entry, entry);
-                pending.add(serviceType);
-                new String(service.bytes(), StandardCharsets.UTF_8).lines().map(name -> name.replace('.', '/') + ".class")
-                        .forEach(name -> { completeClasses.add(name); pending.add(name); });
-            }
-        }
-        final Set<String> jdkClasses = new java.util.HashSet<>();
-        final Map<String, byte[]> originals = new java.util.HashMap<>();
-        final Map<String, java.lang.classfile.ClassModel> models = new java.util.HashMap<>();
-        final Map<String, Map<RuntimeClassDependencies.Method, Set<RuntimeClassDependencies.Method>>> calls = new java.util.HashMap<>();
-        final Map<String, RuntimeEntry> sources = entries.entrySet().stream().filter(entry -> entry.getKey().endsWith(".class"))
-                .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
-        final var classFile = java.lang.classfile.ClassFile.of(java.lang.classfile.ClassFile.ConstantPoolSharingOption.NEW_POOL,
-                java.lang.classfile.ClassFile.ClassHierarchyResolverOption.of(java.lang.classfile.ClassHierarchyResolver.ofResourceParsing(type -> {
-                    final String symbol = type.descriptorString();
-                    final String name = symbol.substring(1, symbol.length() - 1) + ".class";
-                    try {
-                        final RuntimeEntry source = sources.get(name);
-                        if (source != null) {
-                            final byte[] bytes = source.readBounded(Math.toIntExact(StepCatalog.MAX_ARTIFACT_ENTRY_BYTES));
-                            if (bytes.length != source.size() || !digest(bytes).equals(source.digest()))
-                                throw new IOException("DEPENDENCY_ARTIFACT_DIGEST_MISMATCH: Hierarchy class changed during build: " + name + ".");
-                            return new java.io.ByteArrayInputStream(bytes);
-                        }
-                        final int slash = name.lastIndexOf('/');
-                        final String packageName = slash < 0 ? "" : name.substring(0, slash).replace('/', '.');
-                        for (final var module : system) {
-                            if (!module.descriptor().packages().contains(packageName)) continue;
-                            try (var reader = module.open()) {
-                                final var resource = reader.open(name);
-                                if (resource.isPresent()) {
-                                    try (var input = resource.orElseThrow()) { return new java.io.ByteArrayInputStream(input.readAllBytes()); }
-                                }
-                            }
-                        }
-                        throw new IllegalArgumentException("Class hierarchy is unavailable in the application: " + name + ".");
-                    } catch (final IOException failure) { throw new java.io.UncheckedIOException(failure); }
-                }).cached()));
-        final Set<String> queued = new java.util.HashSet<>(pending);
-        while (!pending.isEmpty()) {
-            final String name = pending.removeFirst();
-            queued.remove(name);
-            retained.add(name);
-            final var entry = entries.get(name);
-            if (entry == null) {
-                if (RuntimeClassDependencies.systemClass(name, system)) continue;
-                throw new GeneratedCompilationException("STEP_DEPENDENCY_OWNER_MISSING",
-                        "STEP_DEPENDENCY_OWNER_MISSING: Registered service class is absent from the application: " + name + ".");
-            }
-            final boolean provider = providerClasses.contains(name);
-            final boolean known = originals.containsKey(name);
-            final byte[] bytes = known ? originals.get(name)
-                    : entry.readBounded(Math.toIntExact(StepCatalog.MAX_ARTIFACT_ENTRY_BYTES));
-            if (!known && (bytes.length != entry.size() || !digest(bytes).equals(entry.digest())))
-                throw new IOException("DEPENDENCY_ARTIFACT_DIGEST_MISMATCH: Runtime class changed during build: " + name + ".");
-            final RuntimeClassDependencies.Selection selected;
-            final java.util.Optional<String> parent;
-            try {
-                final var model = models.containsKey(name) ? models.get(name) : java.lang.classfile.ClassFile.of().parse(bytes);
-                if (!(model.thisClass().asInternalName() + ".class").equals(name))
-                    throw new GeneratedCompilationException("STEP_RUNTIME_CLASS_INVALID", "Class entry does not match its declared name: " + name + ".");
-                if (provider) { originals.putIfAbsent(name, bytes); models.putIfAbsent(name, model); }
-                if (provider && !calls.containsKey(name)) calls.put(name, RuntimeClassDependencies.calls(model));
-                selected = RuntimeClassDependencies.select(model, bytes,
-                        methods.getOrDefault(name, Set.of()), !provider || completeClasses.contains(name), provider,
-                        calls.getOrDefault(name, Map.of()), classFile);
-                parent = model.superclass().map(type -> type.asInternalName() + ".class");
-            } catch (final java.io.UncheckedIOException failure) {
-                throw failure.getCause();
-            } catch (final IllegalArgumentException invalid) {
-                throw GeneratedCompilationException.invalidRuntimeClass(name, invalid);
-            }
-            if (providerClasses.contains(name)) entries.put(name, new MemoryRuntimeEntry(name, selected.bytes().length,
-                    digest(selected.bytes()), selected.bytes()));
-            for (final var method : selected.methods()) {
-                if (!providerClasses.contains(method.owner())) continue;
-                if (methods.computeIfAbsent(method.owner(), ignored -> new java.util.HashSet<>()).add(method)
-                        && !method.owner().equals(name) && queued.add(method.owner())) pending.add(method.owner());
-            }
-            if (parent.isPresent()) {
-                final String superclass = parent.orElseThrow();
-                if (providerClasses.contains(superclass)) {
-                    for (final var method : methods.getOrDefault(name, Set.of())) {
-                        if (methods.computeIfAbsent(superclass, ignored -> new java.util.HashSet<>()).add(
-                                new RuntimeClassDependencies.Method(superclass, method.name(), method.descriptor()))
-                                && queued.add(superclass)) pending.add(superclass);
-                    }
-                }
-            }
-            for (final String target : selected.classes()) {
-                if (entries.containsKey(target)) {
-                    if (!retained.contains(target) && queued.add(target)) pending.add(target);
-                } else if (providerClasses.contains(name) && !jdkClasses.contains(target)) {
-                    if (!RuntimeClassDependencies.systemClass(target, system)) throw new GeneratedCompilationException("STEP_DEPENDENCY_OWNER_MISSING",
-                            "STEP_DEPENDENCY_OWNER_MISSING: Runtime class " + name + " references unavailable class " + target
-                                    + ". Runtime code and initialization cannot depend on authoring APIs.");
-                    jdkClasses.add(target);
-                }
-            }
-        }
-        entries.keySet().removeIf(name -> providerClasses.contains(name) && !retained.contains(name));
-        final Set<String> available = new java.util.HashSet<>(entries.keySet());
-        available.addAll(jdkClasses);
-        for (final String name : providerClasses) {
-            final var model = models.get(name);
-            if (model == null) continue;
-            try {
-                for (final var attribute : model.attributes()) {
-                    if (attribute instanceof java.lang.classfile.attribute.InnerClassesAttribute nested) {
-                        for (final var info : nested.classes()) {
-                            final var types = new ArrayList<java.lang.classfile.constantpool.ClassEntry>();
-                            types.add(info.innerClass());
-                            info.outerClass().ifPresent(types::add);
-                            for (final var type : types) {
-                                final String target = type.asInternalName() + ".class";
-                                if (!available.contains(target) && RuntimeClassDependencies.systemClass(target, system)) available.add(target);
-                            }
-                        }
-                    }
-                }
-            } catch (final java.io.UncheckedIOException failure) {
-                throw failure.getCause();
-            } catch (final IllegalArgumentException invalid) {
-                throw GeneratedCompilationException.invalidRuntimeClass(name, invalid);
-            }
-        }
-        for (final String name : providerClasses) {
-            final var entry = entries.get(name);
-            if (entry == null) continue;
-            final byte[] bytes = RuntimeClassDependencies.finish(name, entry.readBounded(Math.toIntExact(StepCatalog.MAX_ARTIFACT_ENTRY_BYTES)), available, classFile);
-            entries.put(name, new MemoryRuntimeEntry(name, bytes.length, digest(bytes), bytes));
-        }
-        return new RuntimeFiles(entries, List.copyOf(locations), modules);
+        return new RuntimeFiles(entries, List.copyOf(locations));
     }
 
     private static Path location(final Class<?> type) throws IOException {
@@ -722,6 +566,7 @@ final class ApplicationBuilder {
 
     private static boolean runtimeEntry(
             final String name,
+            final Set<String> stdlib,
             final boolean development
     ) {
         if (!name.endsWith(".class") || "module-info.class".equals(name)) {
@@ -730,7 +575,8 @@ final class ApplicationBuilder {
         if (RUNTIME_PREFIXES.stream().anyMatch(name::startsWith)) {
             return true;
         }
-        return development && name.startsWith(DEVELOPMENT_PREFIX);
+        return stdlib.contains(name)
+                || development && name.startsWith(DEVELOPMENT_PREFIX);
     }
 
     private static void require(final Map<String, RuntimeEntry> entries, final String name) throws IOException {
@@ -797,9 +643,7 @@ final class ApplicationBuilder {
                     continue;
                 }
                 final String name = entry.getName();
-                StepCatalog.artifactEntry(name);
-                if (reservedResources.contains(name) || name.startsWith(ProjectFiles.ARCHIVE_ROOT))
-                    throw new IOException("DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN: Dependency JAR cannot provide generated application resource: " + name + ".");
+                dependencyEntry(name, reservedResources);
                 if (entry.getSize() < 0 || entry.getSize() > StepCatalog.MAX_ARTIFACT_ENTRY_BYTES) {
                     throw new IOException("DEPENDENCY_ARTIFACT_ENTRY_SIZE_LIMIT: Dependency entry exceeds "
                             + StepCatalog.MAX_ARTIFACT_ENTRY_BYTES + " uncompressed bytes: " + name + ".");
@@ -843,6 +687,33 @@ final class ApplicationBuilder {
         }
     }
 
+    private static void dependencyEntry(
+            final String name,
+            final Set<String> reservedResources
+    ) throws IOException {
+        if (name.isBlank() || name.startsWith("/") || name.contains("\\") || name.indexOf('\0') >= 0
+                || java.util.Arrays.stream(name.split("/", -1)).anyMatch(part -> part.isEmpty()
+                || ".".equals(part) || "..".equals(part))) {
+            throw new IOException("DEPENDENCY_LOCAL_ENTRY_UNSAFE: Dependency JAR contains unsafe entry: "
+                    + name + ".");
+        }
+        if (name.endsWith(".class") && name.startsWith(PLATFORM_CLASS_PREFIX)) {
+            throw new IOException("DEPENDENCY_PLATFORM_CLASS_FORBIDDEN: Dependency JAR cannot provide Railix "
+                    + "platform class: " + name + ".");
+        }
+        if (reservedResources.contains(name) || name.startsWith(ProjectFiles.ARCHIVE_ROOT)) {
+            throw new IOException("DEPENDENCY_RESERVED_RESOURCE_FORBIDDEN: Dependency JAR cannot provide generated "
+                    + "application resource: " + name + ".");
+        }
+        final String upper = name.toUpperCase(java.util.Locale.ROOT);
+        if (name.endsWith("module-info.class")
+                || upper.startsWith("META-INF/") && (upper.endsWith(".SF")
+                || upper.endsWith(".RSA") || upper.endsWith(".DSA") || upper.endsWith(".EC"))) {
+            throw new IOException("DEPENDENCY_ARTIFACT_UNSUPPORTED_METADATA: Dependency JAR contains unsupported "
+                    + "module or signature metadata: " + name + ".");
+        }
+    }
+
     private static boolean ignoredDependencyEntry(final String name) {
         return JarFile.MANIFEST_NAME.equalsIgnoreCase(name)
                 || "META-INF/INDEX.LIST".equalsIgnoreCase(name)
@@ -855,7 +726,7 @@ final class ApplicationBuilder {
     ) throws IOException {
         final String name = first.name();
         final Set<String> providers = new java.util.TreeSet<>();
-        for (final RuntimeEntry entry : first == second ? List.of(first) : List.of(first, second)) {
+        for (final RuntimeEntry entry : List.of(first, second)) {
             final byte[] bytes = entry.readBounded(SERVICE_DESCRIPTOR_LIMIT);
             final String source;
             try {
@@ -1206,20 +1077,12 @@ final class ApplicationBuilder {
             );
         }
 
-        static GeneratedCompilationException invalidRuntimeClass(final String name, final Throwable failure) {
-            final String detail = failure.getMessage();
-            final var result = new GeneratedCompilationException("STEP_RUNTIME_CLASS_INVALID", "Cannot package runtime class: " + name + "."
-                    + (detail == null || detail.isBlank() ? "" : " " + detail));
-            result.initCause(failure);
-            return result;
-        }
-
         String code() {
             return code;
         }
     }
 
-    private record RuntimeFiles(Map<String, RuntimeEntry> entries, List<Path> locations, String jdkModules) {
+    private record RuntimeFiles(Map<String, RuntimeEntry> entries, List<Path> locations) {
         private RuntimeFiles {
             entries = Collections.unmodifiableMap(new TreeMap<>(entries));
             locations = List.copyOf(locations);

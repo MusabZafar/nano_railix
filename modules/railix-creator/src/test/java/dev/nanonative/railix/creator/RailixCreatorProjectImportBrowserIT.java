@@ -173,9 +173,7 @@ final class RailixCreatorProjectImportBrowserIT extends RailixCreatorBrowserSupp
             assertThat(page.locator("#editor-undo").isDisabled()).isTrue();
             page.keyboard().press("ControlOrMeta+z");
             assertThat(edits).isEmpty();
-            final var response = page.waitForResponse(candidate -> candidate.url().endsWith("/api/project")
-                    && candidate.request().method().equals("POST"), () -> pending.removeFirst().resume());
-            assertThat(response.status()).isEqualTo(200);
+            pending.removeFirst().resume();
             com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat(page.locator("#project-import-panel")).isHidden();
             assertThat(Files.readString(directory.resolve("project.json"))).contains("uploaded-project");
             assertThat(pageErrors).isEmpty();

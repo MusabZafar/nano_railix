@@ -6,6 +6,7 @@ import dev.nanonative.railix.core.step.StepCatalog;
 import dev.nanonative.railix.core.step.StepDefinition;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueShape;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -597,7 +598,6 @@ final class CreatorForwardingLifecycleE2eTest {
                         .defaultValue(RailixValue.string(mode)))
                 .input("marker", StepDefinition.Input.path(StepDefinition.PathAccess.READ)
                         .defaultPath("context", "payload", "marker"))
-                .dynamicClasses(ProcessTreeStepHandler.class)
                 .implementation(ProcessTreeStepHandler.class);
         final String project = """
                 {"format":1,"id":"%s","nodes":[
@@ -678,7 +678,7 @@ final class CreatorForwardingLifecycleE2eTest {
 
     private DevelopmentApplication application(final String id, final long generation) throws IOException {
         final String source = CreatorProjects.lowercaseCli().replace("lowercase-cli", id);
-        final CompileResult result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
+        final CompileResult result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
         assertThat(result).isInstanceOf(CompileResult.Compiled.class);
         final Path project = directory.resolve(id).resolve("railix.project.json");
         Files.createDirectories(project.getParent());

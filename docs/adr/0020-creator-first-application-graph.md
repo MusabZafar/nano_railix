@@ -2,16 +2,6 @@
 
 ## Status
 
-Provider-portability amendment: default Steps must use the same public authoring, validation,
-integration and packaging path as external providers. Their current presence in this repository
-must not bind their identities or behavior to its layout or a host-owned Java package. A later
-official provider repository is another source, not another execution model. Local delivery comes
-first; Git acquisition is deferred until its trust, revision and build-execution decisions are
-settled in the [provider contract](../specs/system-model.md#portable-step-providers).
-The accepted `native` catalog flag is derived from whether the author declares additional dynamic
-classes. It is not a verified Native Image claim or another execution mode. Keep the class list
-as the only stored fact and derive the Boolean for filtering under SYS-036.
-
 Amended on 2026-11-03: execution and operational metrics MUST NOT vary by development,
 test or production labels. Explicit build capabilities may omit optional features. Examples
 are the execution exception: they inject Trigger output and may record per-Step values.
@@ -92,17 +82,6 @@ Groups, geometry and themes remain presentation only. Operational observations b
 generated application and share one implementation in every build that includes that capability.
 Example execution, recorded Example values and Creator assertions remain separate capabilities,
 not reasons to generate a slower ordinary execution path for local use.
-
-Provider acquisition, checked bundle integration and generated execution have separate ownership.
-Embedded defaults and local extensions converge on one contract and packaging path, without a
-standard-library namespace privilege. Git may later supply an artifact or source according to its
-agreed acquisition contract; a running application never depends on that remote. This preserves
-offline defaults and repository portability without adding runtime discovery or another Step API.
-The user subsequently selected automatic static-method selection, including classes that contain
-both definition factories and runtime functions. The build follows PROCESS/PRE/POST and their
-dependencies, retains declared dynamic entrypoints, and removes unused authoring methods and
-stale class-inventory metadata. It does not run provider code to discover dependencies or alter
-method bodies and initialization. SYS-037 owns the packaging boundary and acceptance scenarios.
 
 Creator may additionally copy and share a Step or group's functional contents. It resolves those edits
 into ordinary Steps and links before compilation; a deployed application never follows a live

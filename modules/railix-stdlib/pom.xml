@@ -16,28 +16,6 @@
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
             </plugin>
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>exec-maven-plugin</artifactId>
-                <version>3.6.2</version>
-                <executions>
-                    <execution>
-                        <id>export-provider-bundle</id>
-                        <phase>process-classes</phase>
-                        <goals><goal>exec</goal></goals>
-                        <configuration>
-                            <executable>${java.home}/bin/java</executable>
-                            <arguments>
-                                <argument>-cp</argument>
-                                <classpath/>
-                                <argument>dev.nanonative.railix.stdlib.StandardLibrary</argument>
-                                <argument>${project.build.outputDirectory}</argument>
-                                <argument>${project.build.outputDirectory}/META-INF/railix/providers/railix-stdlib.jar</argument>
-                            </arguments>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
     </build>
 

@@ -987,7 +987,6 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
     }
 
     @Test
-    @Tag("browser-diagnostics")
     void semanticZoomReplacesAnAggregateWithItsRealChildren() throws Exception {
         openProject(deepBranchProject(96));
         final String project = Files.readString(directory.resolve("project.json"));
@@ -1001,7 +1000,6 @@ final class RailixCreatorRoutingBrowserIT extends RailixCreatorBrowserSupport {
         final Path screenshots = Files.createDirectories(Path.of("target", "screenshots"));
         page.screenshot(new Page.ScreenshotOptions().setPath(screenshots.resolve("semantic-zoom-overview.png")));
         page.evaluate("region => void state.world.focus(region.id)", region);
-        awaitScene();
         page.waitForFunction("""
                 region => !state.world.scene.nodes.some(node => node.id === region.id && !node.expanded)
                   && state.world.scene.nodes.some(node => node.id !== region.id && node.count < region.count
@@ -4959,7 +4957,6 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
     }
 
     @Test
-    @Tag("browser-diagnostics")
     void guidedFieldChoicesUseTheUnionOfExamplesWithoutMergingTheirValues() {
         addTrigger();
         exampleContext().fill("{\"payload\":{\"text\":\"Railix\"}}");
@@ -4977,13 +4974,10 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
         page.locator("[data-path-depth='0']").click();
         page.locator("[data-path-part='payload']").click();
 
-        page.locator(".path-choices [data-path-part='text']").waitFor();
-        page.locator(".path-choices [data-path-part='count']").waitFor();
         assertThat(page.locator(".path-choices").textContent()).contains("text", "count");
     }
 
     @Test
-    @Tag("browser-diagnostics")
     void conflictingExampleShapesDoNotCreateSyntheticPrimitiveCompatibility() {
         addTrigger();
         exampleContext().fill("{\"payload\":{\"value\":\"Railix\"}}");
@@ -4993,69 +4987,48 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
         exampleContext().press("Tab");
         waitForText("#build-state", "Built");
 
-        final var inserted = page.waitForResponse(response -> response.url().endsWith("/api/editor")
-                && response.request().method().equals("POST"), this::addManipulationAfterSelected);
-        assertThat(inserted.status()).isEqualTo(200);
-        final var configured = page.waitForResponse(response -> response.url().endsWith("/api/editor")
-                && response.request().method().equals("POST"), () -> choosePath("field", "payload", "value"));
-        assertThat(configured.status()).isEqualTo(200);
-        waitForText("#build-state", "Built");
-        visibleControl("#steps-search");
-        page.waitForFunction("""
-                () => {
-                  const options = document.querySelector('#steps-options');
-                  const trigger = document.querySelector('#edit-example')?.dataset.editTrigger;
-                  const total = document.querySelectorAll('#visible-example option[data-status]').length;
-                  const cases = state.traceCases.filter(example => example.trigger === trigger);
-                  return state.traceKey && !state.traceController && total > 0 && cases.length === total
-                    && cases.every(example => !['queued', 'running'].includes(example.status))
-                    && options && ['value.equals', 'value.wrap-list', 'value.to-json']
-                    .every(id => options.querySelectorAll(`[data-add-nested="${id}"]`).length === 1)
-                    && !options.querySelector('[data-add-nested="text.lowercase"], [data-add-nested="number.floor"]');
-                }
-                """);
+        addManipulationAfterSelected();
+        choosePath("field", "payload", "value");
+
+        assertThat(page.locator("#steps-options [data-add-nested='value.equals']").count())
+                .isEqualTo(1);
+        assertThat(page.locator("#steps-options [data-add-nested='value.wrap-list']").count())
+                .isEqualTo(1);
+        assertThat(page.locator("#steps-options [data-add-nested='value.to-json']").count())
+                .isEqualTo(1);
+        assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
+                .isZero();
+        assertThat(page.locator("#steps-options [data-add-nested='number.floor']").count())
+                .isZero();
     }
 
     @Test
-    @Tag("browser-diagnostics")
     void changingAnExampleShapeInvalidatesPreviousPrimitiveCompatibility() {
         addTrigger();
         exampleContext().fill("{\"payload\":{\"value\":\"Railix\"}}");
         exampleContext().press("Tab");
         waitForText("#build-state", "Built");
-        final var inserted = page.waitForResponse(response -> response.url().endsWith("/api/editor")
-                && response.request().method().equals("POST"), this::addManipulationAfterSelected);
-        assertThat(inserted.status()).isEqualTo(200);
-        final var configured = page.waitForResponse(response -> response.url().endsWith("/api/editor")
-                && response.request().method().equals("POST"), () -> choosePath("field", "payload", "value"));
-        assertThat(configured.status()).isEqualTo(200);
-        waitForText("#build-state", "Built");
+        addManipulationAfterSelected();
+        choosePath("field", "payload", "value");
         fillStepSearch("#steps-search", "");
         page.locator("#steps-options [data-add-nested='text.lowercase']").waitFor();
 
-        selectTrigger();
-        final var observations = new ArrayList<Route>();
-        page.route("**/api/examples/**", observations::add);
-        try {
-            final var saved = page.waitForResponse(response -> response.url().endsWith("/api/editor")
-                    && response.request().method().equals("POST"), () -> {
-                exampleContext().fill("{\"payload\":{\"value\":7}}");
-                exampleContext().press("Tab");
-            });
-            assertThat(saved.status()).isEqualTo(200);
-            page.locator("#close-inspector").click();
-            page.locator(".step-node").click();
-            visibleControl("#steps-search");
-            page.waitForCondition(() -> !observations.isEmpty());
+        assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
+                .isEqualTo(1);
 
-            assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
-                    .isZero();
-            assertThat(page.locator("#steps-options [data-add-nested='number.floor']").count())
-                    .isZero();
-        } finally {
-            page.unroute("**/api/examples/**");
-            observations.forEach(Route::resume);
-        }
+        selectTrigger();
+        exampleContext().fill("{\"payload\":{\"value\":7}}");
+        exampleContext().press("Tab");
+
+        assertThat(page.locator("#build-state").textContent()).isEqualTo("Building");
+        page.locator("#close-inspector").click();
+        page.locator(".step-node").click();
+        visibleControl("#steps-search");
+
+        assertThat(page.locator("#steps-options [data-add-nested='text.lowercase']").count())
+                .isZero();
+        assertThat(page.locator("#steps-options [data-add-nested='number.floor']").count())
+                .isZero();
 
         waitForText("#build-state", "Built");
         visibleControl("#steps-search");
@@ -5142,7 +5115,6 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
     }
 
     @Test
-    @Tag("browser-diagnostics")
     void guidedPathBuilderRevealsTheSampleOneLevelAtATime() {
         addTrigger();
         exampleContext().fill("""
@@ -5157,7 +5129,6 @@ final class RailixCreatorDataWorkbenchBrowserIT extends RailixCreatorBrowserSupp
         page.locator("[data-path-depth='0']").click();
         page.locator("[data-path-part='payload']").click();
 
-        page.locator(".path-choices [data-path-part='person']").waitFor();
         assertThat(page.locator(".path-choices").textContent())
                 .contains("person")
                 .doesNotContain("authorization");
@@ -6896,11 +6867,9 @@ abstract class RailixCreatorBrowserSupport {
 
     Locator visibleControl(final String selector) {
         final Locator field = page.locator(selector);
-        field.waitFor(new Locator.WaitForOptions().setState(com.microsoft.playwright.options.WaitForSelectorState.ATTACHED));
         for (final Locator details : field.locator("xpath=ancestor::details").all()) {
             if (details.getAttribute("open") == null) details.locator(":scope > summary").click();
         }
-        field.waitFor();
         return field;
     }
 

@@ -2,6 +2,7 @@ package dev.nanonative.railix.creator;
 
 import dev.nanonative.railix.core.project.CompileResult;
 import dev.nanonative.railix.core.project.ProjectCompiler;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -63,7 +64,7 @@ final class HttpPortApplicationE2eTest {
                     scenario.equals("disabled") ? ",\"metrics\":false" : "");
             final Path project = directory.resolve("railix.project.json");
             Files.writeString(project, source);
-            final var result = ProjectCompiler.compileApplication(source, GeneratedApplicationFixture.catalog());
+            final var result = ProjectCompiler.compileApplication(source, StandardLibrary.catalog());
             assertThat(result).isInstanceOf(CompileResult.Compiled.class);
             final Path jar;
             if (examples) {

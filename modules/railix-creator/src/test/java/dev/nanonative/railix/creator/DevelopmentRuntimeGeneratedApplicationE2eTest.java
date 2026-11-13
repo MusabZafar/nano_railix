@@ -6,6 +6,7 @@ import dev.nanonative.railix.core.value.RailixJson;
 import dev.nanonative.railix.core.value.RailixValue;
 import dev.nanonative.railix.core.value.ValueShape;
 import dev.nanonative.railix.development.ExampleSuiteTestAccess;
+import dev.nanonative.railix.stdlib.StandardLibrary;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -123,7 +124,6 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
         final var step = StepDefinition.named("test.startup-child", "1")
                 .input("marker", StepDefinition.Input.json(ValueShape.STRING))
                 .input("failure", StepDefinition.Input.json(ValueShape.STRING))
-                .dynamicClasses(ProcessTreeStepHandler.class)
                 .implementation(DevelopmentRuntimeConformanceSteps.StartupChild.class);
         final var candidate = DevelopmentRuntimeGeneratedProcess.build(workspace, """
                 {"format":1,"id":"startup-child","nodes":[
@@ -794,7 +794,7 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
         final DevelopmentRuntimeGeneratedProcess.Build bounded = DevelopmentRuntimeGeneratedProcess.build(
                 workspace,
                 largeTraceExamples("bounded-trace", 1, 40),
-                GeneratedApplicationFixture.catalog()
+                StandardLibrary.catalog()
         );
         try (var child = started(bounded)) {
             final URI uri = child.awaitReady();
@@ -885,7 +885,7 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
         final DevelopmentRuntimeGeneratedProcess.Build bounded = DevelopmentRuntimeGeneratedProcess.build(
                 workspace,
                 largeTraceExamples("bounded-replay", 2, 28),
-                GeneratedApplicationFixture.catalog()
+                StandardLibrary.catalog()
         );
         try (var child = started(bounded)) {
             final URI uri = child.awaitReady();
@@ -980,7 +980,7 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
         final DevelopmentRuntimeGeneratedProcess.Build projected = DevelopmentRuntimeGeneratedProcess.build(
                 workspace,
                 largeTraceExamples("projection-owner-close", 1, 34),
-                GeneratedApplicationFixture.catalog()
+                StandardLibrary.catalog()
         );
         try (var child = started(projected)) {
             final URI uri = child.awaitReady();
@@ -1748,7 +1748,7 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
                   {"from":"choice.match","to":"matched"},{"from":"choice.otherwise","to":"otherwise"},
                   {"from":"matched.next","to":"end"},{"from":"otherwise.next","to":"end"}
                 ]}
-                """, GeneratedApplicationFixture.catalog());
+                """, StandardLibrary.catalog());
         try (var child = started(candidate)) {
             final URI uri = child.awaitReady();
             awaitExamples(child, uri, 2, WAIT);
@@ -3879,9 +3879,7 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
 
     private static List<StepDefinition> definitions() {
         return List.of(
-                trigger("success", false, DevelopmentRuntimeConformanceSteps.NullApplicationMain.class,
-                        DevelopmentRuntimeConformanceSteps.ProcessTreeMain.class,
-                        DevelopmentRuntimeConformanceSteps.NoisyMain.class, ProcessTreeStepHandler.class),
+                trigger("success", false),
                 trigger("details", false),
                 trigger("rejected", true),
                 trigger("failed", false),
@@ -3953,14 +3951,14 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
         );
     }
 
-    private static StepDefinition trigger(final String id, final boolean requiredResult, final Class<?>... dynamicClasses) {
+    private static StepDefinition trigger(final String id, final boolean requiredResult) {
         final StepDefinition.Builder definition = StepDefinition.named("development.runtime.trigger." + id, "1")
                 .kind(StepDefinition.Kind.TRIGGER)
                 .source("development.runtime.source." + id);
         if (requiredResult) {
             definition.requiredResult("result", ValueShape.ANY);
         }
-        return definition.dynamicClasses(dynamicClasses).implementation(DevelopmentRuntimeConformanceSteps.Pass.class);
+        return definition.implementation(DevelopmentRuntimeConformanceSteps.Pass.class);
     }
 
     private static StepDefinition pass() {
@@ -4098,7 +4096,6 @@ final class DevelopmentRuntimeGeneratedApplicationE2eTest {
                 StepDefinition.named("development.runtime.process-tree", "1")
                         .input("mode", StepDefinition.Input.json(ValueShape.STRING))
                         .input("marker", StepDefinition.Input.path(READ).defaultPath("context", "payload", "marker"))
-                        .dynamicClasses(ProcessTreeStepHandler.class)
                         .implementation(ProcessTreeStepHandler.class)
         ), DevelopmentRuntimeConformanceSteps.Pass.class, ProcessTreeStepHandler.class);
     }
