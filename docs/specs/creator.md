@@ -497,7 +497,9 @@ Trigger ID into canonical stable-ID removals on the server; deleting a Group una
 including unloaded Steps. The editor saves complete actions through revision-checked
 `POST /api/editor`. Existing document PATCH APIs remain available for interchange. Nodes and groups are keyed by stable ID, links are
 keyed by source port with all of that port's targets retained. Removing an entry uses JSON null.
-An editor action contains `revision`, `creator_revision` and `command`, with optional `preview`.
+An editor action contains `revision`, `creator_revision` and `command`, with optional `preview`
+and `catalog_revision`. The browser supplies the catalog revision to reject actions against
+definitions that changed in another tab.
 Commands cover patches, connections, grouping, copy, reuse, detach, deletion, Undo and Redo.
 Preview validates the proposed graph and metadata without building or persisting them.
 Successful responses contain revisions, history availability, selection, workspace and
@@ -527,6 +529,15 @@ does not infer whether an unanswered request committed or merge concurrent edits
 Reload remains available when a local JSON or Example draft is invalid.
 Undo/Redo keeps bounded deltas for the current Creator session. History is not persisted.
 Oldest deltas are evicted above the scene-response byte budget, retaining the latest action.
+Custom-Step definition creation and deletion each add one entry to that history,
+shared across tabs. Undo restores a deleted definition before earlier placement
+edits; Redo removes placements before deleting the definition again. New accepted
+definition changes clear Redo and retain earlier Undo within the existing budget.
+Cancelled, rejected or failed changes preserve history. The red Delete button opens
+a Railix-themed confirmation dialog explaining that Undo is available during this
+Creator session and history is lost when Creator closes.
+See [custom-Step deletion and history](custom-java-steps.md#custom-step-deletion-and-history).
+
 Legacy document writes invalidate history. Revision conflicts preserve accepted work, and
 external file changes require reopening rather than silent overwrite. A temporary transaction
 backup under `.railix/run/` keeps the original file contents, including invalid optional metadata,
@@ -555,6 +566,8 @@ does not change automatically.
 The Step/Group insertion chooser keeps search fields stationary when its results change. Result
 rows retain readable labels and scroll independently. Short landscape windows keep the primary
 toolbar accessible while the chooser temporarily covers the lower navigation rows.
+Background Example updates, including Retry completion, refresh the results list without rebuilding
+an active reuse form. Its selected entrance, continuation and keyboard focus remain intact.
 
 ### Editing An Existing Flow
 
@@ -566,6 +579,21 @@ Inserting a Step into one outgoing connection preserves its previous destination
 Step's primary outcome. Additional outcomes initially end the flow. Deleting a linear Step
 reconnects its predecessor to its primary successor; deletion is blocked while a secondary
 outcome still has a connected branch. Other branches and stable Step IDs remain unchanged.
+
+New Step compatibility and automatic input mappings use recorded Example values at the insertion
+point, independently of the Example selected for preview. After a catalog refresh or rebuild,
+Creator reloads current observations as needed; clearing preview selection does not require choosing
+an Example to populate Step choices. For insertion after a particular outcome, only Examples whose
+recorded Step output took that outcome contribute field types and coverage. A required source must
+be present with a compatible type in every contributing Example; Examples on other outcomes do not
+reduce its coverage. An outcome with no recorded output provides no observed source fields.
+When an Example visits the source Step repeatedly, every recorded visit on the selected outcome
+contributes to compatibility. An Example counts as covered for a field only when that field is
+present in all its relevant visits; conflicting visit types remain incompatible with a specific
+typed input. Incomplete visit recordings cannot supply inferred bindings. These aggregate checks
+are separate from the existing selected-Example preview of the last visit.
+Picker filtering and insertion use the same mapping calculation. Step choices must use observations
+matching the current application build, Example revision and insertion point.
 
 These graph edits do not rewrite downstream field mappings. Changing or removing an upstream
 producer can therefore leave a structurally valid flow with a missing or incompatible value.
@@ -741,12 +769,12 @@ Undo/Redo use curved action arrows, not navigation arrows. Navigation and Exampl
 create history. Automated mutation checks use isolated projects, never the user's active preview.
 For a Step reachable from several Triggers, its Inspector source follows the selected Example.
 Typed Step suggestions and required read-path compatibility use the Examples that actually reach
-the selected location, not every Example at its Trigger. An explicitly recorded single-visit outcome
-narrows insertion evidence to that exit. Missing or incompatible fields in an actual arrival remain
+the selected location, not every Example at its Trigger. Recorded outcomes narrow insertion evidence
+to the selected exit. Missing or incompatible fields in an actual arrival remain
 incompatible; Examples on unrelated paths do not count as missing data. Until the source's Examples
 have settled, incomplete observations cannot establish full field coverage, including for `ANY` ports.
-Last-visit-only projections remain available for inspection but cannot establish field-level
-coverage for earlier arrivals when suggesting an automatic binding.
+Repeated visits use every recorded invocation on the selected exit. A compatible final visit
+cannot hide a missing or incompatible field in an earlier arrival.
 There is no redundant source selector while an Example is active. With no Example, the source can
 still be chosen for observation. Selecting an ordinary Step never activates an Example implicitly.
 Changing that source while another Step is loading preserves the pending Step selection and reloads
@@ -799,6 +827,8 @@ A failure jump loads its destination before requesting recorded values. Summary 
 stay within the application's existing concurrent-read budget.
 A failed Step-value read does not discard an independently validated Example result or its reached
 path. The read error remains visible and explicitly retryable, separate from an execution failure.
+A failed Example-summary read likewise retains independently validated Step values for previews
+and compatibility checks while showing the summary read error and its Retry action.
 Example observation status appears once per inspected selection as an accessible visual mark.
 Hover, keyboard, touch and assistive technology expose its meaning. Configure does not repeat loading, unavailable
 or unreached messages under every field, and no Example selection shows no observation status.

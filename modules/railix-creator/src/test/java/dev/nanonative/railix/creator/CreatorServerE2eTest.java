@@ -1335,7 +1335,7 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
                 assertThat(response.statusCode()).as(path).isEqualTo(200);
                 assertThat(response.headers().firstValue("Content-Security-Policy")).contains(policy);
             }
-            for (final String path : List.of("/app.css", "/themes/railix.css", "/themes/classic.css", "/app.js", "/world.js", "/audio.js", "/api/themes")) {
+            for (final String path : List.of("/app.css", "/themes/railix.css", "/themes/classic.css", "/app.js", "/custom-steps.js", "/world.js", "/audio.js", "/api/themes")) {
                 final HttpResponse<String> response = request(creator.baseUri(), "GET", path, "");
                 assertThat(response.statusCode()).as(path).isEqualTo(200);
                 assertThat(response.headers().firstValue("Content-Security-Policy")).isEmpty();
@@ -3347,6 +3347,30 @@ final class CreatorServerProtocolE2eTest extends CreatorServerE2eSupport {
 }
 
 abstract class CreatorServerE2eSupport {
+    static String repeatedBranchProject(final String execution, final String firstPayload, final String secondPayload) {
+        return """
+                {"format":1,"id":"repeated-branch","nodes":[
+                  {"id":"app","use":"railix.app","inputs":{}},
+                  {"id":"command","use":"railix.trigger.cli","inputs":{},"examples":[
+                    {"name":"one request","payload":[],"context":{"payload":%s}}]},
+                  {"id":"split","use":"railix.branch","inputs":{"selection":{"option":"all","inputs":{}},
+                    "execution":{"option":"%s","inputs":{}},"routes":[
+                      {"outcome":"left","groups":[],"inputs":{"own_context":true}},
+                      {"outcome":"right","groups":[],"inputs":{"own_context":true}}]}},
+                  {"id":"change","use":"railix.field-manipulation","inputs":{"field":["context","payload"],
+                    "value":[{"option":"literal","inputs":{"literal":%s}}]}},
+                  {"id":"credentials","use":"railix.branch","inputs":{"routes":[{"outcome":"match","inputs":{},
+                    "groups":[[{"option":"field","inputs":{"field":["context","payload","allowed"]},
+                      "when":{"transforms":[],"all":[[{"use":"value.equals","inputs":{"expected":true}}]]}}]]}]}}
+                ],"links":[
+                  {"from":"app.start","to":"command"},{"from":"command.next","to":"split"},
+                  {"from":"split.left","to":"credentials"},{"from":"split.right","to":"change"},
+                  {"from":"split.otherwise","to":"end"},{"from":"change.next","to":"credentials"},
+                  {"from":"credentials.match","to":"end"},{"from":"credentials.otherwise","to":"end"}
+                ]}
+                """.formatted(firstPayload, execution, secondPayload);
+    }
+
     static final String CONTEXT = """
             {"payload":{"arguments":["Hello RAILIX"]}}
             """;
@@ -3457,6 +3481,16 @@ abstract class CreatorServerE2eSupport {
             Thread.sleep(20);
         } while (System.nanoTime() < deadline);
         throw new AssertionError("Example did not complete: " + state);
+    }
+
+    static RailixValue.ObjectValue successfulExampleView(final URI baseUri, final String id) throws Exception {
+        final var response = awaitExampleView(baseUri, id);
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+        final var view = object(response.body());
+        assertThat(view.values().get("complete")).isEqualTo(RailixValue.bool(true));
+        final var result = (RailixValue.ObjectValue) view.values().get("result");
+        assertThat(string(result, "status")).isIn("succeeded", "completed");
+        return view;
     }
 
     static RailixValue.ObjectValue object(final String source) {

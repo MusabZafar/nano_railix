@@ -102,16 +102,37 @@ final class RailixPackageIT {
                 StandardCharsets.UTF_8
         );
         final List<Process> processes = new ArrayList<>();
-        for (int index = 0; index < 16; index++) {
-            processes.add(startExecutable(noSystemJavaEnvironment(), "run", "concurrent"));
+        final long started = System.nanoTime();
+        try (final AutoCloseable ownedRuns = () -> {
+            final List<ProcessHandle> owned = processes.stream()
+                    .flatMap(process -> Stream.concat(process.descendants(), Stream.of(process.toHandle())))
+                    .filter(ProcessHandle::isAlive).distinct().toList();
+            if (!owned.isEmpty()) System.out.println("PACKAGED_RUNS_UNFINISHED pids="
+                    + owned.stream().map(ProcessHandle::pid).toList());
+            boolean interrupted = Thread.interrupted();
+            owned.forEach(ProcessHandle::destroyForcibly);
+            try {
+                for (final var process : owned) process.onExit().get(5, TimeUnit.SECONDS);
+            } catch (final InterruptedException cancelled) {
+                interrupted = true;
+                throw cancelled;
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt();
+                System.out.printf(java.util.Locale.ROOT, "PACKAGED_CONCURRENT_RUNS calls=%d elapsed_ms=%.3f%n",
+                        processes.size(), (System.nanoTime() - started) / 1_000_000.0);
+            }
+        }) {
+            for (int index = 0; index < 16; index++) {
+                processes.add(startExecutable(noSystemJavaEnvironment(), "run", "concurrent"));
+            }
+            final List<ProcessResult> results = new ArrayList<>();
+            for (final Process process : processes) results.add(awaitExecutable(process));
+            assertThat(results).containsOnly(new ProcessResult(0, "[\"concurrent\"]"));
+            try (var artifacts = Files.list(directory.resolve(".railix/build"))) {
+                assertThat(artifacts.map(path -> path.getFileName().toString()).toList())
+                        .singleElement().asString().startsWith("sha256-");
+            }
         }
-
-        final List<ProcessResult> results = new ArrayList<>();
-        for (final Process process : processes) {
-            results.add(awaitExecutable(process));
-        }
-
-        assertThat(results).containsOnly(new ProcessResult(0, "[\"concurrent\"]"));
     }
 
     @Test

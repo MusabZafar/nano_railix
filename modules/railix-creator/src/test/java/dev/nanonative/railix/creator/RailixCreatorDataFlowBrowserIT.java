@@ -247,7 +247,8 @@ final class RailixCreatorDataFlowBrowserIT extends RailixCreatorBrowserSupport {
                 clickOverview("#add-next-step");
             }
             page.locator("#step-search").fill("lowercase");
-            assertThat(page.locator("#step-options")).hasText("No Step matches.");
+            assertThat(page.locator("#step-options")).hasText("Loading Example values...");
+            assertThat(page.locator("[data-add-step='text.lowercase']")).hasCount(0);
             page.waitForCondition(() -> !held.isEmpty());
         } finally {
             page.unroute("**/api/examples/steps/*");

@@ -49,6 +49,7 @@ const state = {
   creatorVersion: 0,
   creator: { format: 2, groups: [], steps: {} },
   catalog: [],
+  catalogRevision: -1,
   definitions: new Map(),
   iconUrls: new Map(),
   icons: null,
@@ -102,7 +103,6 @@ const state = {
   previewCases: [],
   traceCases: [],
   traceCasesKey: "",
-  traceCasesPid: 0,
   traceContext: "",
   traceSummary: null,
   traceSummaryKey: "",
@@ -159,6 +159,113 @@ const nouns = [
 ];
 boot();
 
+function setCatalog(catalog) {
+  state.catalog = catalog.steps;
+  state.definitions = new Map(catalog.steps.map(definition => [definition.id, definition]));
+  state.catalogRevision = Number(catalog.revision);
+  customSteps.refreshCompiledStatus();
+}
+
+async function ensureCatalog(revision, signal) {
+  if (Number(revision) <= state.catalogRevision) return;
+  const epoch = state.workspaceEpoch;
+  const response = await fetch('/api/catalog', {signal, cache:'no-store'});
+  const catalog = parseExact(await response.text());
+  if (epoch !== state.workspaceEpoch) throw new DOMException('Workspace changed', 'AbortError');
+  if (!response.ok || Number(catalog.revision) < Number(revision))
+    throw new Error('Step definitions could not be refreshed. Try again.');
+  await applyCatalog(catalog);
+}
+
+async function applyCatalog(catalog) {
+  if (Number(catalog.revision) <= state.catalogRevision) return;
+  const definitions = new Map(catalog.steps.map(definition => [definition.id, definition]));
+  if (state.catalog.every(definition => JSON.stringify(definition) === JSON.stringify(definitions.get(definition.id)))) {
+    setCatalog(catalog);
+    return;
+  }
+  await refreshProjectAfterCatalogChange();
+}
+
+async function refreshProjectAfterCatalogChange() {
+  // Only removals/replacements require a fresh project view. Keep local drafts untouched.
+  if (state.writeActive || state.pendingProject || state.saveFailure || state.jsonDraft || state.exampleDraft
+      || Object.keys(documentChanges(state.builtProject, state.project)).length
+      || Object.keys(documentChanges(state.savedCreator, state.creator)).length)
+    throw new Error('The project changed in another editor. Your unsaved changes are retained; reload before saving.');
+  const epoch = state.workspaceEpoch;
+  const revision = state.revision;
+  const [response, catalogResponse] = await fetchEditorAndCatalog();
+  if (epoch !== state.workspaceEpoch || revision !== state.revision) throw new DOMException('Workspace changed', 'AbortError');
+  if (!response.ok || !catalogResponse.ok) throw new Error('The project could not be refreshed. Try again.');
+  const project = parseExact(await response.text()), latest = parseExact(await catalogResponse.text());
+  if (epoch !== state.workspaceEpoch || revision !== state.revision) throw new DOMException('Workspace changed', 'AbortError');
+  if (Number(latest.revision) < state.catalogRevision || Number(project.revision) < Number(state.projectVersion)
+      || Number(project.creator_revision) < Number(state.creatorVersion)) return;
+  setCatalog(latest);
+  applyProjectSnapshot(project);
+  render();
+}
+
+function canEditCustomSteps() {
+  return Boolean(state.project) && !state.liveView && !state.switchingWorkspace && !state.actionPending;
+}
+
+async function submitCustomStep(draft) {
+  return changeCustomStep('POST', draft);
+}
+
+async function changeCustomStep(method, body) {
+  if (!canEditCustomSteps()) throw new Error('Wait for the current edit to finish.');
+  const workspaceEpoch = state.workspaceEpoch;
+  state.actionPending = true;
+  renderBuildStatus();
+  try {
+    if (!await flushEdits()) throw new Error('Save the current edits before changing custom Steps.');
+    if (workspaceEpoch !== state.workspaceEpoch || state.liveView) throw new Error('The workspace changed. Reopen Custom Steps.');
+    const response = await fetch('/api/custom-steps', {method, headers:mutationHeaders(), body:JSON.stringify(body)});
+    return {ok:response.ok, payload:parseExact(await response.text()), workspaceEpoch};
+  } finally {
+    state.actionPending = false;
+    renderBuildStatus();
+  }
+}
+
+async function loadCustomSteps() {
+  const workspaceEpoch = state.workspaceEpoch;
+  const response = await fetch('/api/custom-steps', {cache:'no-store'});
+  const payload = parseExact(await response.text());
+  if (workspaceEpoch !== state.workspaceEpoch || !canEditCustomSteps()) throw new Error('The workspace changed. Reopen Custom Steps.');
+  if (!response.ok) throw new Error(payload.message || 'Custom Steps could not be loaded.');
+  await ensureCatalog(payload.catalog_revision);
+  if (Number(payload.catalog_revision) !== state.catalogRevision) return loadCustomSteps();
+  return payload;
+}
+
+async function acceptCustomStepChange({payload, workspaceEpoch}) {
+  if (workspaceEpoch !== state.workspaceEpoch || state.liveView) return;
+  if (Number(payload.catalog.revision) < state.catalogRevision) return;
+  await applyCatalog(payload.catalog);
+  if (workspaceEpoch !== state.workspaceEpoch || state.liveView || Number(payload.catalog.revision) < state.catalogRevision) return;
+  if (Number(payload.revision) === Number(state.projectVersion) && Number(payload.creator_revision) === Number(state.creatorVersion))
+    state.history = payload.history;
+  renderBuildStatus();
+  if (state.picker?.mode === 'step') updatePickerSearch('step', payload.definition?.display_name || '');
+}
+
+async function fetchEditorAndCatalog(signal) {
+  // Deletion can shrink the catalog. Open a read view only with its matching definitions.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const project = await fetch('/api/editor', {cache:'no-store', signal});
+    const catalog = await fetch('/api/catalog', {cache:'no-store', signal});
+    if (!project.ok || !catalog.ok) return [project, catalog];
+    const view = parseExact(await project.clone().text());
+    const definitions = parseExact(await catalog.clone().text());
+    if (Number(view.catalog_revision) === Number(definitions.revision)) return [project, catalog];
+  }
+  throw new Error('Step definitions keep changing. Try opening the project again.');
+}
+
 function mutationHeaders() {
   return {
     "Content-Type": "application/json",
@@ -172,10 +279,7 @@ async function boot() {
     if (!exactJsonSupported()) {
       throw new Error("Browser does not support exact JSON numbers.");
     }
-    const [projectResponse, catalogResponse] = await Promise.all([
-      fetch("/api/editor"),
-      fetch("/api/catalog")
-    ]).catch(() => {
+    const [projectResponse, catalogResponse] = await fetchEditorAndCatalog().catch(() => {
       throw new Error("Check that the Creator is running, then retry.", {cause:"connection"});
     });
     if (projectResponse.status === 401 || catalogResponse.status === 401) {
@@ -201,8 +305,7 @@ async function boot() {
     state.liveConnection = project.live_application || null;
     state.liveChanges = project.comparison_instance===state.liveConnection?.instance ? project.changes || {} : {};
     state.diagnostics = project.diagnostics || [];
-    state.catalog = catalog.steps;
-    state.definitions = new Map(state.catalog.map(definition => [definition.id, definition]));
+    setCatalog(catalog);
     state.build = "Built";
     state.audio = new RailixAudio(document.querySelector('#audio-panel'), changeSettings);
     state.world = new RailixWorld(document.querySelector("#graph"), {
@@ -313,6 +416,7 @@ function render() {
     ? [...inspectorElement.querySelectorAll("details[open][id]")].map(detail => detail.id) : [];
   const content = document.querySelector('#inspector-content');
   const context = `${state.regionSelection?.id || state.selection.id}:${state.inspectorMode}`;
+  const scrollTop = content.dataset.context === context ? content.scrollTop : 0;
   const active = content.dataset.context === context && content.contains(document.activeElement)
     && document.activeElement.matches('input:not([type=checkbox]):not([type=radio]):not([type=file]), textarea')
     ? document.activeElement : null;
@@ -321,7 +425,6 @@ function render() {
   const focusedTab = document.activeElement.closest('#inspector-nav [data-inspector-mode]')?.dataset.inspectorMode;
   state.iconController?.abort();
   content.innerHTML = inspector();
-  if (content.dataset.context !== context) content.scrollTop = 0;
   content.dataset.context = context;
   const navigation = document.querySelector("#inspector-content .inspector-tabs");
   const tabs = document.querySelector('#inspector-nav');
@@ -355,6 +458,7 @@ function render() {
   }
   renderWorldStatus();
   syncInspectorLayout();
+  content.scrollTop = scrollTop;
 }
 
 async function showLiveConnections() {
@@ -408,7 +512,7 @@ async function switchWorkspace(liveView,connection=state.liveConnection) {
     for(const view of liveView ? [true,false] : [false]) {
       state.liveView=view;state.workspaceEpoch++;
       try {
-        const [response,catalogResponse]=await Promise.all([fetch('/api/editor'),fetch('/api/catalog')]);
+        const [response,catalogResponse]=await fetchEditorAndCatalog();
         const next=parseExact(await response.text()), definitions=parseExact(await catalogResponse.text());
         if(!response.ok || !catalogResponse.ok) throw Error(next.message || definitions.message || 'This version could not be opened.');
         payload=next;catalog=definitions;break;
@@ -419,7 +523,7 @@ async function switchWorkspace(liveView,connection=state.liveConnection) {
     }
     state.project=payload.project;state.builtProject=clone(payload.project);state.editor=payload.editor;state.history=payload.history;
     state.creator=payload.creator;state.savedCreator=clone(payload.creator);state.projectVersion=payload.revision;state.creatorVersion=payload.creator_revision;
-    state.catalog=catalog.steps;state.definitions=new Map(catalog.steps.map(definition=>[definition.id,definition]));
+    setCatalog(catalog);
     state.workspace=payload.workspace;state.diagnostics=payload.diagnostics || [];state.localDiagnostics=[];state.liveChanges=payload.comparison_instance===state.liveConnection?.instance ? payload.changes || {} : {};
     state.selection={type:'app',id:'app'};state.regionSelection=null;state.picker=state.pathPicker=state.groupPicker=null;state.groupDraft=null;
     state.managedGroup='';state.selectedSteps.clear();state.inspectorMode='overview';state.evidenceView=null;
@@ -944,6 +1048,7 @@ function renderBuildStatus() {
   document.querySelector('#project-menu').disabled=!state.project || state.actionPending && !state.projectImport.reload;
   document.querySelector('#open-settings').disabled=state.actionPending;
   document.querySelector('#open-project-import').disabled=state.liveView;
+  document.querySelectorAll('[data-create-custom-step],[data-manage-custom-steps]').forEach(button => button.disabled=!canEditCustomSteps());
   const selecting = Boolean(state.editorController && !state.editorController.signal.aborted
     && state.editorController.node && state.editorController.node !== (state.regionSelection ? 'app' : state.selection.id));
   document.querySelector('#inspector').setAttribute('aria-busy',String(selecting || state.inspectorMode === 'groups' && Boolean(state.editorController)));
@@ -1121,13 +1226,15 @@ async function editorAction(command, preview = false) {
     if(!await flushEdits()) return null;
     requestSent=true;
     const response = await fetch('/api/editor', {method:'POST', headers:mutationHeaders(),
-      body:JSON.stringify({revision:state.projectVersion, creator_revision:state.creatorVersion, command, preview})});
+      body:JSON.stringify({revision:state.projectVersion, creator_revision:state.creatorVersion,
+        catalog_revision:state.catalogRevision, command, preview})});
     const payload = parseExact(await response.text());
     if (!response.ok) {
       state.localDiagnostics = payload.diagnostics || [{code:'CREATOR_EDIT_REJECTED', message:payload.message || 'The change was not applied.', node:command.node || state.selection.id}];
       render(); return null;
     }
     if (preview) return payload;
+    await ensureCatalog(payload.catalog_revision);
     state.projectVersion = payload.revision;
     state.creatorVersion = payload.creator_revision;
     state.history = payload.history;
@@ -1216,7 +1323,7 @@ async function selectWorldNode(id, event, request) {
   render();
   showInspector(true);
   scheduleMetricsPoll(0);
-  if (id !== "app") requestSelectedTrace();
+  if (id !== "app") requestExampleEvidence();
   return true;
 }
 
@@ -1239,8 +1346,8 @@ function selectWorldGroup(group, region) {
   showInspector(true);
   refreshApplicationSelection();
   state.world.repaint();
-  if (group) void loadEditor('app', group).then(() => { renderDock(); state.world.repaint(); void requestSelectedTrace(); });
-  else void requestSelectedTrace();
+  if (group) void loadEditor('app', group).then(() => { renderDock(); state.world.repaint(); void requestExampleEvidence(); });
+  else void requestExampleEvidence();
 }
 
 async function loadEditor(id, group = state.managedGroup, query = state.groupQuery, offset = 0, owner) {
@@ -1263,7 +1370,9 @@ async function loadEditor(id, group = state.managedGroup, query = state.groupQue
     const response = await fetch(`/api/editor?${new URLSearchParams({ ...(id ? {node: id} : {}), group, q: query, offset,
       ...(trigger ? {trigger} : {}) })}`, { signal: controller.signal });
     const payload = parseExact(await response.text());
+    if (response.ok) await ensureCatalog(payload.catalog_revision, controller.signal);
     if (request !== state.editorRequest) return "superseded";
+    if (response.ok && Number(payload.catalog_revision) !== state.catalogRevision) return loadEditor(id, group, query, offset, owner);
     if (writer !== state.writePromise || state.writeActive
         || version !== state.projectVersion || creatorVersion !== state.creatorVersion || trigger !== state.exampleTrigger) {
       return loadEditor(id, group, query, offset, owner);
@@ -2651,14 +2760,17 @@ async function importProjectJson(reload=false) {
       clearProjectImport();
       await response.body?.cancel().catch(()=>{});
     }
-    const response=await fetch('/api/editor',{cache:'no-store',signal:controller.signal});
+    const [response,catalogResponse]=await fetchEditorAndCatalog(controller.signal);
     const payload=parseExact(await response.text());
-    if(!response.ok) {
+    if(!response.ok || !catalogResponse.ok) {
       draft.reload=true;
       projectImportStatus('Refresh the project to continue.', 'error');
       return;
     }
-    applyImportedProject(payload);
+    const definitions=parseExact(await catalogResponse.text());
+    if(Number(definitions.revision)<state.catalogRevision) throw new Error('Step definitions changed. Refresh the project.');
+    setCatalog(definitions);
+    applyProjectSnapshot(payload);
     closeProjectImport(false);
     showInspector(false);
     render();
@@ -2677,7 +2789,7 @@ async function importProjectJson(reload=false) {
   }
 }
 
-function applyImportedProject(payload) {
+function applyProjectSnapshot(payload) {
   state.editorRequest++;
   state.editorController?.abort();
   state.editorController = null;
@@ -2701,6 +2813,9 @@ function applyImportedProject(payload) {
   state.selection = { type: "app", id: "app" };
   state.regionSelection = null;
   state.groupPointer = null;
+  state.groupDraft = null;
+  state.managedGroup = '';
+  state.selectedSteps.clear();
   state.inspectorMode = "inspect";
   state.picker = null;
   state.groupPicker = null;
@@ -3659,7 +3774,7 @@ function pathBrowser(input, operation, locator) {
               <button type="button" class="path-choice" data-path-part="${html(pathPart(part))}"
                       data-path-draft-json="${encodeURIComponent(JSON.stringify(entry.path))}">
                 <span><strong>${html(pathPart(part))}</strong><small>${entry.shape}${
-                  entry.examples < entry.total ? ` · observed here in ${entry.examples} of ${entry.total} Examples` : ""
+                  entry.examples < entry.total ? ` · complete coverage in ${entry.examples} of ${entry.total} Examples` : ""
                 }</small></span>${pathChoiceValue(operation, entry.path)}
               </button>`;
           }).join("") || `<small class="path-hint">${
@@ -3729,7 +3844,12 @@ function picker() {
   return `
     <div class="construction-palette">
       <section class="step-picker" role="dialog" aria-label="${isTrigger ? 'Add Trigger' : 'Insert Step or Group'}">
-        <header><div><span class="eyebrow">${html(stepPresentation(state.picker.anchor).name || stepName(definitionFor(node(state.picker.anchor))))}</span><h2>${isTrigger ? 'Add Trigger' : 'Insert'}</h2></div><button type="button" data-close-picker aria-label="Close Step chooser">Close</button></header>
+        <header><div><span class="eyebrow">${html(stepPresentation(state.picker.anchor).name || stepName(definitionFor(node(state.picker.anchor))))}</span><h2>${isTrigger ? 'Add Trigger' : 'Insert'}</h2></div>
+          <nav class="picker-actions" aria-label="Step chooser actions">
+            ${!isTrigger ? '<button type="button" data-create-custom-step>Create custom Step</button>' : ''}
+            <button type="button" data-close-picker aria-label="Close Step chooser">Close</button>
+          </nav>
+        </header>
         <div class="picker-searches">
           <label for="step-search">${isTrigger ? 'Trigger' : 'Step'}<input type="search" id="step-search" value="${html(state.picker.queries.step)}"
                  placeholder="Search ${isTrigger ? 'triggers' : 'steps'}" autocomplete="off" aria-controls="step-options" autofocus></label>
@@ -3786,14 +3906,23 @@ function pickerOptions() {
   const reusable = (picker.items || []).map(item =>
     `<button type="button" class="catalog-option" data-reuse-item="${html(item.id)}" data-reuse-type="${item.kind}" ${item.entries.length>1?'disabled':''}><strong>${html(item.label || item.name)}</strong><small>${item.entries.length>1 ? `${item.entries.length} entrances, placement not yet supported` : `Existing ${item.kind}`}</small></button>`).join('');
   const pages = picker.matches > picker.pageSize ? `<nav class="picker-pages" aria-label="Reuse pages"><button type="button" data-reuse-page="${Math.max(0,(picker.offset || 0)-picker.pageSize)}" ${picker.offset ? '' : 'disabled'}>Previous</button><button type="button" data-reuse-page="${(picker.offset || 0)+picker.pageSize}" ${(picker.offset || 0)+(picker.items?.length || 0)<picker.matches ? '' : 'disabled'}>Next</button></nav>` : '';
-  if (picker.kind === 'group') return (reusable || (picker.loading ? '<p role="status">Loading...</p>' : '<p class="empty-options">No group matches.</p>')) + pages;
+  const feedback = picker.loading ? '<p role="status">Loading...</p>' : picker.error
+    ? `<p role="alert">${html(picker.error)} <button type="button" data-retry-picker>Retry</button></p>` : '';
+  if (picker.kind === 'group') return (reusable + feedback || '<p class="empty-options">No group matches.</p>') + pages;
+  const operation = node(picker.anchor);
+  const observation = operation && observationFor(operation);
+  const awaitingObservations = observation && state.traceCasesKey !== stepObservationsKey(operation, observation);
+  const observationFeedback = awaitingObservations && state.traceReadError
+    ? `<p role="alert">${html(state.traceReadError.message)} <button type="button" data-retry-example>Retry</button></p>`
+    : awaitingObservations && (state.traceController || ["queued", "running"].includes(state.application.examples?.state))
+      ? '<p role="status">Loading Example values...</p>' : '';
   const candidates = state.picker.mode === "trigger"
     ? availableTriggers()
     : addableDefinitions();
   const matching = candidates
     .filter(definition => definitionMatchesQuery(definition, query));
   const options = matching.filter(definition => state.picker.mode === "trigger"
-      || automaticBindingsAvailable(state.picker.anchor, definition, state.picker.outcome));
+      || automaticBindingsAvailable(picker.anchor, definition, picker.outcome));
   const catalog = options
     .map(definition => `
       <button type="button" class="catalog-option" data-add-step="${html(definition.id)}" title="${html(definition.id)}">
@@ -3806,7 +3935,7 @@ function pickerOptions() {
   if (picker.mode === 'trigger') return catalog || '<p class="empty-options">No installed Trigger matches.</p>';
   return (catalog ? `<div class="picker-results-label">New Steps</div>${catalog}` : '')
     + (reusable ? `<div class="picker-results-label">Existing Steps</div>${reusable}` : '')
-    + (picker.loading ? '<p role="status">Loading...</p>' : '') + pages
+    + feedback + observationFeedback + pages
     || '<p class="empty-options">No Step matches.</p>';
 }
 
@@ -3816,7 +3945,10 @@ function openPicker(mode, anchor, outcome = "") {
   state.pathDraft = [];
   render();
   document.querySelector("#step-search")?.focus();
-  if (mode !== 'trigger') void loadReusable();
+  if (mode !== 'trigger') {
+    void loadReusable();
+    void requestExampleEvidence();
+  }
 }
 
 async function openBeltPicker(id, outcome, arrivals = []) {
@@ -3845,7 +3977,6 @@ async function openBeltPicker(id, outcome, arrivals = []) {
   state.picker.returnFocus=returnFocus;
   state.picker.arrival={from:id,outcome};
   state.world?.repaint();
-  void requestSelectedTrace();
 }
 
 function closePicker() {
@@ -3859,9 +3990,9 @@ function closePicker() {
 
 function replacePickerOptions() {
   const slot = document.querySelector('#step-options');
-  if (!slot) return;
+  if (!slot || !state.picker || state.picker.chosen) return;
   const focused = slot.contains(document.activeElement) ? document.activeElement : null;
-  const identity = focused && ['addStep','reuseItem','reusePage','applyReuse','cancelReuse']
+  const identity = focused && ['addStep','reuseItem','reusePage','applyReuse','cancelReuse','retryPicker','retryExample']
     .find(key => Object.hasOwn(focused.dataset,key));
   slot.innerHTML = pickerOptions();
   if (identity) {
@@ -3872,28 +4003,62 @@ function replacePickerOptions() {
   }
 }
 
+function updatePickerSearch(kind, query) {
+  const picker = state.picker;
+  if (!picker) return;
+  picker.kind = kind;
+  picker.queries[kind] = query;
+  picker.chosen = null;
+  picker.items = [];
+  picker.matches = 0;
+  picker.pageSize = 0;
+  picker.offset = 0;
+  state.world?.preview(null);
+  const search = document.getElementById(kind === 'group' ? 'group-insert-search' : 'step-search');
+  if (search) search.value = query;
+  if (picker.mode === 'trigger') replacePickerOptions();
+  else void loadReusable();
+}
+
+function currentPickerRequest(picker, kind, request) {
+  return state.picker === picker && picker.kind === kind && picker.request === request;
+}
+
+function setPickerLoadFailure(picker, message) {
+  picker.error = message || 'Step choices could not be loaded. Try again.';
+  picker.items = [];
+  picker.matches = 0;
+  picker.pageSize = 0;
+}
+
 async function loadReusable() {
   const picker = state.picker;
   if (!picker || picker.mode === 'trigger') return;
   const kind = picker.kind;
   const request=picker.request=(picker.request || 0)+1;
   picker.controller?.abort();
-  picker.controller=new AbortController();
+  const controller = picker.controller = new AbortController();
   picker.loading = true;
+  picker.error = '';
+  replacePickerOptions();
   try {
-    const response = await fetch(`/api/editor?${new URLSearchParams({reuse:'1',reuse_kind:kind,q:picker.queries[kind],offset:picker.offset || 0})}`,{signal:picker.controller.signal});
+    const response = await fetch(`/api/editor?${new URLSearchParams({reuse:'1',reuse_kind:kind,q:picker.queries[kind],offset:picker.offset || 0})}`,{signal:controller.signal});
     const payload = parseExact(await response.text());
-    if (state.picker !== picker || request !== picker.request || picker.kind !== kind) return;
-    picker.items = response.ok ? payload.editor.reusable : [];
-    picker.matches = response.ok ? payload.editor.reuse_matches : 0;
-    picker.pageSize = response.ok ? payload.editor.reuse_page_size : 0;
+    if (!response.ok) {
+      if (currentPickerRequest(picker, kind, request)) setPickerLoadFailure(picker, payload.message);
+      return;
+    }
+    await ensureCatalog(payload.catalog_revision, controller.signal);
+    if (!currentPickerRequest(picker, kind, request)) return;
+    if (Number(payload.catalog_revision) !== state.catalogRevision) return loadReusable();
+    picker.items = payload.editor.reusable;
+    picker.matches = payload.editor.reuse_matches;
+    picker.pageSize = payload.editor.reuse_page_size;
   } catch(error) {
-    if(error.name==='AbortError') return;
-    picker.items=[];
-    picker.matches=0;
-    picker.pageSize=0;
+    if (error.name === 'AbortError' || !currentPickerRequest(picker, kind, request)) return;
+    setPickerLoadFailure(picker, error.message);
   } finally {
-    if(state.picker===picker && request===picker.request && picker.kind===kind) {
+    if (currentPickerRequest(picker, kind, request)) {
       picker.loading=false;
       replacePickerOptions();
     }
@@ -3956,15 +4121,7 @@ document.addEventListener('focusin', event => {
   if (!picker || !['step-search','group-insert-search'].includes(event.target.id)) return;
   const kind = event.target.id === 'step-search' ? 'step' : 'group';
   if (picker.kind !== kind) {
-    picker.kind = kind;
-    picker.chosen = null;
-    picker.items = [];
-    picker.matches = 0;
-    picker.pageSize = 0;
-    picker.offset = 0;
-    picker.loading = true;
-    replacePickerOptions();
-    void loadReusable();
+    updatePickerSearch(kind, picker.queries[kind]);
   } else if (picker.chosen) {
     picker.chosen = null;
     replacePickerOptions();
@@ -4054,6 +4211,9 @@ function graphBindings(after, definition, outcome = "") {
   if (state.build !== "Built" && definition.receives.length) {
     return null;
   }
+  const observation = observationFor(after);
+  if (definition.receives.length && (!observation
+      || state.traceCasesKey !== stepObservationsKey(after, observation))) return null;
   const context = definitionFor(after)?.kind === "trigger" ? "trigger" : "output";
   const available = availablePaths(after, context, outcome || primaryOutcome(after))
     .filter(entry => entry.path[1] !== "runtime" && entry.examples === entry.total);
@@ -4188,14 +4348,14 @@ function selectExample(index, trigger = node(state.selection.id), {deferObservat
   render();
   refreshApplicationSelection();
   if (deferObservation) return Promise.resolve();
-  const trace = requestSelectedTrace();
+  const trace = requestExampleEvidence();
   if (sourceChanged && !state.editorController && !state.regionSelection && state.selection.id
       && state.editor.sources?.some(source => source.id === trigger.id)) {
     const selected = state.selection.id;
     void loadEditor(selected).then(result => {
       if (result === 'loaded' && state.selection.id === selected && !state.regionSelection) {
         render();
-        void requestSelectedTrace();
+        void requestExampleEvidence();
       }
     });
   }
@@ -5181,7 +5341,6 @@ function clearPreview(clearSummary = false, clearCases = true) {
   if (clearCases) {
     state.traceCases = [];
     state.traceCasesKey = "";
-    state.traceCasesPid = 0;
     state.traceContext = "";
   }
   if (clearSummary) {
@@ -5318,7 +5477,7 @@ async function refreshApplication() {
         refreshApplicationFacts();
         applyExampleCoverage();
       }
-      await requestSelectedTrace();
+      await requestExampleEvidence();
     } else {
       nextDelay = observationRetryDelay();
     }
@@ -5705,27 +5864,27 @@ function formatPercentPpm(value) {
   return `${(metricNumber(value) / 10_000).toFixed(1)}%`;
 }
 
-async function requestSelectedTrace() {
+async function requestExampleEvidence() {
   if (document.hidden || state.build === "Building" || !state.application.pid || state.jsonDraft || state.exampleDraft
       || state.editorController && state.editorController.node !== state.selection.id) {
     return;
   }
-  const example = selectedTraceCase();
-  if (!example || ["queued", "running"].includes(example.status)) {
-    if (state.traceKey || state.traceSummaryKey) {
-      clearPreview(true);
-      renderPreview();
-      renderRunResult();
-    }
-    return;
+  const selectedExample = selectedTraceCase();
+  const example = selectedExample && !["queued", "running"].includes(selectedExample.status) ? selectedExample : null;
+  if (!example && state.traceSummaryKey) {
+    clearPreview(true, false);
+    renderPreview();
+    renderRunResult();
   }
-  if (state.regionSelection) return requestRegionTrace(example);
-  const summaryKey = exampleSummaryKey(example);
+  if (!example && state.application.examples?.state !== "completed") return;
+  if (state.regionSelection) return example ? requestRegionTrace(example) : undefined;
+  const summaryKey = example ? exampleSummaryKey(example) : "";
   const operation = ["trigger", "step"].includes(state.selection.type)
     ? selectedOperation()
     : null;
   const observation = operation ? observationFor(operation) : null;
   if (!observation) {
+    if (!example) return;
     if (state.traceSummaryKey === summaryKey && state.traceSummary || state.traceKey === summaryKey
         && (state.traceController || state.traceReadError?.key === summaryKey && !state.traceReadError.retry)) return;
     const retrying = state.traceKey === summaryKey && state.traceReadError?.retry === true;
@@ -5733,14 +5892,7 @@ async function requestSelectedTrace() {
     const controller = state.traceController = new AbortController();
     state.traceKey = summaryKey;
     try {
-      const summary = await readExampleProjection(`/api/examples/${encodeURIComponent(example.id)}/view`, controller.signal);
-      if (controller.signal.aborted || state.traceController !== controller || selectedExampleId() !== example.id
-          || exampleSummaryKey(selectedTraceCase() || {}) !== summaryKey) return;
-      if (Number(summary.application_pid) !== Number(state.application.pid) || !Array.isArray(summary.nodes))
-        throw new Error('Example summary is from another application.');
-      summary.nodes = new Set(summary.nodes || []);
-      state.traceSummary = summary;
-      state.traceSummaryKey = summaryKey;
+      if (!await loadExampleSummary(example, summaryKey, controller)) return;
       state.traceReadError = null;
       refreshTraceView();
     } catch (error) {
@@ -5754,19 +5906,10 @@ async function requestSelectedTrace() {
     }
     return;
   }
-  const casesKey = [
-    state.application.fingerprint || "",
-    state.application.pid || 0,
-    state.application.examples?.state === "completed"
-      ? "complete"
-      : `selected:${example.id}:${example.status}:${example.events}`,
-    observation.node,
-    observation.context,
-    operation.id
-  ].join(":");
+  const casesKey = stepObservationsKey(operation, observation);
   const key = summaryKey + ":" + casesKey;
   if (state.traceKey === key && (state.traceController || state.traceReadError?.key === summaryKey && !state.traceReadError.retry
-      || state.traceSummary && state.traceCasesKey === casesKey)) {
+      || (!example || state.traceSummaryKey === summaryKey && state.traceSummary) && state.traceCasesKey === casesKey)) {
     return;
   }
   const retrying = state.traceKey === key && state.traceReadError?.retry === true;
@@ -5774,45 +5917,21 @@ async function requestSelectedTrace() {
   const controller = new AbortController();
   state.traceController = controller;
   state.traceKey = key;
-  const applicationPid = Number(state.application.pid);
   try {
-    const summary = state.traceSummaryKey === summaryKey && state.traceSummary
-      ? state.traceSummary
-      : await readExampleProjection(
-        `/api/examples/${encodeURIComponent(example.id)}/view`,
-        controller.signal
-      );
-    if (controller.signal.aborted || state.traceController !== controller || state.traceKey !== key) return;
-    if (Number(summary.application_pid) !== applicationPid
-        || !(summary.nodes instanceof Set) && !Array.isArray(summary.nodes)) {
-      throw new Error("Example summary is from another application.");
-    }
-    summary.nodes = summary.nodes instanceof Set
-      ? summary.nodes
-      : new Set(summary.nodes.filter(Number.isInteger));
-    state.traceSummary = summary;
-    state.traceSummaryKey = summaryKey;
-    const stepCases = state.traceCasesKey === casesKey
-      ? {
-        application_pid: state.traceCasesPid,
-        node: observation.node,
-        cases: state.traceCases
+    // These projections share a bounded read budget. Keep a successful read if the other fails.
+    let summaryFailure;
+    if (example) {
+      try {
+        if (!await loadExampleSummary(example, summaryKey, controller)) return;
+      } catch (error) {
+        summaryFailure = error;
       }
-      : await readExampleProjection(`/api/examples/steps/${observation.node}`, controller.signal);
-    if (!Array.isArray(stepCases.cases)
-        || Number(stepCases.application_pid) !== applicationPid
-        || Number(stepCases.node) !== observation.node) {
-      throw new Error("Built Example projection is from another application process.");
     }
-    if (controller.signal.aborted || state.traceController !== controller || state.traceKey !== key) {
-      return;
-    }
-    state.traceReadError = null;
-    state.traceCases = stepCases.cases.filter(plainObject);
-    state.traceCasesKey = casesKey;
-    state.traceCasesPid = Number(stepCases.application_pid);
-    state.traceContext = observation.context;
-    const selected = state.traceCases.find(candidate => candidate.id === example.id);
+    if (controller.signal.aborted || state.traceController !== controller || state.traceKey !== key) return;
+    if (!await loadStepObservations(operation, observation, casesKey, controller)) return;
+    state.traceReadError = summaryFailure ? {key:summaryKey, message:summaryFailure.message,
+      retry:!retrying && (summaryFailure.retryable === true || summaryFailure instanceof TypeError)} : null;
+    const selected = example && state.traceCases.find(candidate => candidate.id === example.id);
     const matchesBuilt = JSON.stringify(operation) === JSON.stringify(
       state.builtProject?.nodes.find(candidate => candidate.id === operation.id));
     state.traceStep = state.selection.type === "step"
@@ -5824,15 +5943,13 @@ async function requestSelectedTrace() {
     state.traceChanges = state.traceStep && plainObject(state.traceStep.input_context) && plainObject(state.traceStep.context)
       ? contextChanges(state.traceStep.input_context, state.traceStep.context, state.traceStep.own_changes) : null;
     state.previewCases = matchesBuilt && observation.context === "input"
-      ? state.traceCases.flatMap(candidate => plainObject(candidate.projection)
-      ? [{
-        ...candidate.projection,
-        step: candidate.projection.id,
+      ? state.traceCases.flatMap(candidate => recordedStepVisits(candidate).map(projection => ({
+        ...projection,
+        step: projection.id,
         trigger: candidate.trigger,
         example: candidate.index,
         example_name: candidate.name
-      }]
-      : [])
+      })))
       : [];
     state.traceController = null;
     selectTracePreview(example);
@@ -5844,21 +5961,70 @@ async function requestSelectedTrace() {
     state.traceStep = null;
     state.traceReadError = {key:summaryKey, message:error.message,
       retry:!retrying && (error.retryable === true || error instanceof TypeError)};
-    state.traceCases = [];
-    state.traceCasesKey = "";
-    state.traceCasesPid = 0;
-    state.traceContext = "";
+    if (state.traceCasesKey !== casesKey) {
+      state.traceCases = [];
+      state.traceCasesKey = "";
+      state.traceContext = "";
+    }
     state.previewCases = [];
-    state.preview = {
+    state.preview = example ? {
       step: state.selection.id,
       status: "unavailable",
       inputs: {},
       stages: [],
       message: error instanceof Error ? error.message : "Built example trace is unavailable."
-    };
+    } : null;
     state.runResult = exampleRunResult(example);
     refreshTraceView();
+  } finally {
+    if (state.traceController === controller) state.traceController = null;
   }
+}
+
+async function loadExampleSummary(example, key, controller) {
+  if (state.traceSummaryKey === key && state.traceSummary) return true;
+  const summary = await readExampleProjection(`/api/examples/${encodeURIComponent(example.id)}/view`, controller.signal);
+  if (controller.signal.aborted || state.traceController !== controller
+      || exampleSummaryKey(selectedTraceCase() || {}) !== key) return false;
+  if (Number(summary.application_pid) !== Number(state.application.pid) || !Array.isArray(summary.nodes))
+    throw new Error('Example summary is from another application.');
+  summary.nodes = new Set(summary.nodes.filter(Number.isInteger));
+  state.traceSummary = summary;
+  state.traceSummaryKey = key;
+  return true;
+}
+
+function stepObservationsKey(operation, observation) {
+  return JSON.stringify([state.workspaceEpoch, state.application.fingerprint, state.application.pid,
+    state.application.examples?.revision, state.application.examples?.state,
+    operation.id, observation.node, observation.context]);
+}
+
+async function loadStepObservations(operation, observation, key, controller) {
+  if (state.traceCasesKey === key) return true;
+  const applicationPid = Number(state.application.pid);
+  const revision = state.application.examples?.revision;
+  const projection = await readExampleProjection(`/api/examples/steps/${observation.node}`, controller.signal);
+  if (controller.signal.aborted || state.traceController !== controller
+      || stepObservationsKey(operation, observation) !== key) return false;
+  if (!Array.isArray(projection.cases) || Number(projection.application_pid) !== applicationPid
+      || Number(projection.node) !== observation.node)
+    throw new Error('Built Example projection is from another application process.');
+  if (revision !== undefined && Number(projection.revision) !== Number(revision)) {
+    const error = new Error('Example changed. Retry after the update.');
+    error.retryable = true;
+    throw error;
+  }
+  const cases = projection.cases.filter(plainObject);
+  if (cases.some(example => Number(example.projection?.visits) > 1
+      && (!Array.isArray(example.projection.invocations)
+        || example.projection.invocations.length !== Number(example.projection.visits)
+        || !example.projection.invocations.every(plainObject))))
+    throw new Error('Some Step visits were not recorded. Complete Example values are required for field choices.');
+  state.traceCases = cases;
+  state.traceCasesKey = key;
+  state.traceContext = observation.context;
+  return true;
 }
 
 async function requestRegionTrace(example) {
@@ -6015,7 +6181,7 @@ function refreshTraceView() {
 
 function refreshPickerOptions() {
   const options = document.querySelector("#step-options");
-  if (options && state.picker && observationMayReplace(options)) {
+  if (options && state.picker && !state.picker.chosen && observationMayReplace(options)) {
     options.innerHTML = pickerOptions();
   }
 }
@@ -6333,7 +6499,7 @@ async function drainWrites() {
         state.worldGroups = new Map(state.creator.groups.map(group => [group.id, group]));
         if (state.inspectorMode === "groups") render();
         else applyExampleCoverage();
-        void requestSelectedTrace();
+        void requestExampleEvidence();
       });
     }
   }, 0);
@@ -6491,28 +6657,35 @@ function availablePaths(operation, context = state.traceContext, outcome = "") {
   if (!trigger) {
     return [];
   }
-  const roots = observedRoots(operation, context, outcome);
+  const cases = observedRootsByExample(operation, context, outcome);
   const merged = new Map();
-  roots.forEach(root => {
-    const entries = [];
-    collectPaths(root, [], entries);
-    entries.forEach(entry => {
-      const key = JSON.stringify(entry.path);
-      const value = merged.get(key) || { path: entry.path, shapes: new Set(), examples: 0 };
-      value.shapes.add(entry.shape);
-      value.examples++;
-      merged.set(key, value);
+  cases.forEach(roots => {
+    const visitCounts = new Map();
+    roots.forEach(root => {
+      const entries = [];
+      collectPaths(root, [], entries);
+      entries.forEach(entry => {
+        const key = JSON.stringify(entry.path);
+        const value = merged.get(key) || { path: entry.path, shapes: new Set(), examples: 0 };
+        value.shapes.add(entry.shape);
+        merged.set(key, value);
+        visitCounts.set(key, (visitCounts.get(key) || 0) + 1);
+      });
+    });
+    visitCounts.forEach((count, key) => {
+      if (count === roots.length) merged.get(key).examples++;
     });
   });
-  const cases = state.traceCases.filter(example => example.trigger === trigger.id);
-  const settled = cases.length === trigger.examples.length
-    && cases.every(example => !["queued", "running"].includes(example.status));
-  const total = Math.max(1, settled ? roots.length : trigger.examples.length);
+  // Field coverage belongs to this location; completion still covers all trigger Examples.
+  const coverageTotal = Math.max(1, cases.length);
+  const triggerCases = state.traceCases.filter(example => example.trigger === trigger.id);
+  const allTriggerExamplesFinished = triggerCases.length === Math.max(1, trigger.examples.length)
+    && triggerCases.every(example => !["queued", "running"].includes(example.status));
   const paths = [...merged.values()].map(entry => ({
     path: entry.path,
-    shape: settled && entry.shapes.size === 1 ? [...entry.shapes][0] : "mixed",
-    examples: entry.examples,
-    total
+    shape: allTriggerExamplesFinished && entry.shapes.size === 1 ? [...entry.shapes][0] : "mixed",
+    examples: allTriggerExamplesFinished ? entry.examples : 0,
+    total: coverageTotal
   }));
   definitionOf(trigger.use).results
     .filter(result => Object.hasOwn(result, "default"))
@@ -6520,9 +6693,9 @@ function availablePaths(operation, context = state.traceContext, outcome = "") {
       const path = ["context", result.name];
       const existing = paths.find(entry => samePath(entry.path, path));
       if (existing) {
-        existing.examples = total;
+        existing.examples = coverageTotal;
       } else {
-        paths.push({ path, shape: result.shape, examples: total, total });
+        paths.push({ path, shape: result.shape, examples: coverageTotal, total: coverageTotal });
       }
     });
   return paths;
@@ -6550,25 +6723,28 @@ function observationFor(operation) {
 }
 
 function observedRoots(operation, context = state.traceContext, outcome = "") {
+  return observedRootsByExample(operation, context, outcome).flat();
+}
+
+function recordedStepVisits(example) {
+  const projection = example.projection;
+  return plainObject(projection) ? projection.invocations || [projection] : [];
+}
+
+function observedRootsByExample(operation, context = state.traceContext, outcome = "") {
   const trigger = triggerFor(operation.id);
   if (!trigger) {
     return [];
   }
   return state.traceCases
     .filter(example => example.trigger === trigger.id)
-    .filter(example => context !== "output" || !outcome
-      || Number(example.projection?.visits) !== 1
-      || !outcomes(operation).includes(example.projection?.outcome)
-      || example.projection.outcome === outcome)
     .flatMap(example => {
-      // A last-visit snapshot cannot establish field presence on every earlier visit.
-      if (context === "output" && outcome && Number(example.projection?.visits) > 1) return [{ context: {} }];
-      const value = context === "trigger"
-        ? example.initial_context
-        : context === "output"
-          ? example.projection?.context
-          : example.projection?.input_context;
-      return plainObject(value) ? [{ context: value }] : [];
+      const values = context === "trigger" ? [example.initial_context] : recordedStepVisits(example)
+        .filter(projection => context !== "output" || !outcome
+          || (projection.outcomes || [projection.outcome]).includes(outcome))
+        .map(projection => context === "output" ? projection.context : projection.input_context);
+      const roots = values.filter(plainObject).map(value => ({context:value}));
+      return roots.length ? [roots] : [];
     });
 }
 
@@ -6948,7 +7124,7 @@ function selectStep(id) {
   render();
   scheduleMetricsPoll(0);
   if (definitionFor(node(id))?.kind === "step") {
-    requestSelectedTrace();
+    requestExampleEvidence();
   }
 }
 
@@ -7309,6 +7485,7 @@ document.addEventListener("click", event => {
   }
   const reuse = target.closest('[data-reuse-item]');
   const reusePage=target.closest('[data-reuse-page]');
+  if (target.closest('[data-retry-picker]')) { void loadReusable(); return; }
   if(reusePage && state.picker) {state.picker.offset=Number(reusePage.dataset.reusePage);void loadReusable();return;}
   if (reuse && state.picker) {
     state.picker.chosen = state.picker.items.find(item => item.id === reuse.dataset.reuseItem && item.kind === reuse.dataset.reuseType);
@@ -7389,7 +7566,15 @@ document.addEventListener("click", event => {
     selectExample(-1, {id:state.exampleTrigger});
     return;
   }
-  if (target.closest('[data-retry-example]')) { clearPreview(true); void requestSelectedTrace(); renderExampleContext(); return; }
+  if (target.closest('[data-retry-example]')) {
+    clearPreview(true);
+    const picker = state.picker;
+    void requestExampleEvidence().then(() => {
+      if (picker && state.picker === picker) replacePickerOptions();
+    });
+    renderExampleContext();
+    return;
+  }
   const evidenceStep = target.closest('[data-evidence-step]');
   if (target.closest('[data-evidence-fields]')) {
     const view = state.evidenceView;
@@ -7730,17 +7915,7 @@ document.addEventListener("input", event => {
   if (event.target.id === 'symbol-search') { renderIconOptions(); return; }
   if (['step-search','group-insert-search'].includes(event.target.id) && state.picker) {
     const kind = event.target.id === 'step-search' ? 'step' : 'group';
-    state.picker.kind = kind;
-    state.picker.queries[kind] = event.target.value;
-    state.picker.offset = 0;
-    state.picker.chosen = null;
-    state.picker.items = [];
-    state.picker.matches = 0;
-    state.picker.pageSize = 0;
-    state.picker.loading = true;
-    state.world?.preview(null);
-    replacePickerOptions();
-    void loadReusable();
+    updatePickerSearch(kind, event.target.value);
   } else if (event.target.id === "group-search") {
     state.groupQuery = event.target.value;
     const detail = document.querySelector('[data-managed-group-details]');
@@ -8118,4 +8293,14 @@ window.addEventListener("beforeunload", event => {
 window.addEventListener('pagehide',()=>{
   state.projectImport.reader?.abort();
   state.projectImport.request?.abort();
+});
+
+const customSteps = initializeCustomSteps({
+  canEdit: canEditCustomSteps,
+  getDefinition: id => state.definitions.get(id),
+  submit: submitCustomStep,
+  onChanged: acceptCustomStepChange,
+  load: loadCustomSteps,
+  remove: (id, revision) => changeCustomStep('DELETE', {id, catalog_revision:revision}),
+  onClose: () => { if (!state.picker) render(); }
 });
