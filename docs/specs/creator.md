@@ -768,6 +768,13 @@ through the connection controls.
 Undo/Redo use curved action arrows, not navigation arrows. Navigation and Example selection do not
 create history. Automated mutation checks use isolated projects, never the user's active preview.
 For a Step reachable from several Triggers, its Inspector source follows the selected Example.
+Typed Step suggestions and required read-path compatibility use the Examples that actually reach
+the selected location, not every Example at its Trigger. Recorded outcomes narrow insertion evidence
+to the selected exit. Missing or incompatible fields in an actual arrival remain
+incompatible; Examples on unrelated paths do not count as missing data. Until the source's Examples
+have settled, incomplete observations cannot establish full field coverage, including for `ANY` ports.
+Repeated visits use every recorded invocation on the selected exit. A compatible final visit
+cannot hide a missing or incompatible field in an earlier arrival.
 There is no redundant source selector while an Example is active. With no Example, the source can
 still be chosen for observation. Selecting an ordinary Step never activates an Example implicitly.
 Changing that source while another Step is loading preserves the pending Step selection and reloads

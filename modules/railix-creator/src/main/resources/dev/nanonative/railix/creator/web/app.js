@@ -3970,6 +3970,7 @@ async function openBeltPicker(id, outcome, arrivals = []) {
   const previous = state.picker;
   if (await loadEditor(id) !== 'loaded' || state.picker !== previous) return;
   const returnFocus=previous?.returnFocus || document.activeElement;
+  clearPreview();
   state.selection={type:definitionFor(node(id)).kind,id};
   state.regionSelection=null;
   openPicker('step',id,outcome);
@@ -6683,7 +6684,7 @@ function availablePaths(operation, context = state.traceContext, outcome = "") {
   const paths = [...merged.values()].map(entry => ({
     path: entry.path,
     shape: allTriggerExamplesFinished && entry.shapes.size === 1 ? [...entry.shapes][0] : "mixed",
-    examples: entry.examples,
+    examples: allTriggerExamplesFinished ? entry.examples : 0,
     total: coverageTotal
   }));
   definitionOf(trigger.use).results
