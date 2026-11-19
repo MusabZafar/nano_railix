@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -33,11 +34,15 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Consumer;
 import java.util.zip.CRC32;
 
 /**
@@ -106,6 +111,11 @@ public final class DatabaseStepHandlers {
     static final int MAX_FIELD_NAMES = 32;
     static final int DEFAULT_FIND_LIMIT = 100;
     static final int MAX_FIND_LIMIT = 1_000;
+    static final int MAX_FILTER_DEPTH = 16;
+    static final int MAX_FILTER_CLAUSES = 128;
+    static final int MAX_OPERATOR_ARRAY_SIZE = 1_000;
+    static final int MAX_FILTER_PATH_SEGMENTS = 16;
+    static final int MAX_FIELD_PATH_BYTES = 512;
 
     private static final Set<String> RESERVED_DEVICE_NAMES = Set.of(
             "con", "prn", "aux", "nul",
@@ -116,6 +126,50 @@ public final class DatabaseStepHandlers {
     private static final ValueRefinement DOCUMENT_REFINEMENT = ValueRefinement.canonical()
             .withMaxJsonBytes(MAX_PAYLOAD_BYTES);
     private static final RailixValue.ObjectValue NO_DEFAULTS = RailixValue.object(Map.of());
+    private static final FilterNode MATCH_ALL_FILTER = new AndNode(List.of());
+
+    private enum FilterOp {
+        EQ, NE, GT, GTE, LT, LTE, IN, NIN, EXISTS
+    }
+
+    private enum WriteOutcome {
+        OK, NOT_FOUND, INVALID
+    }
+
+    private record FieldPredicate(
+            FilterOp op,
+            RailixValue scalar,
+            Set<RailixValue> set,
+            boolean boolValue
+    ) {}
+
+    private sealed interface FilterNode permits AndNode, OrNode, FieldNode {}
+
+    private record AndNode(List<FilterNode> children) implements FilterNode {}
+
+    private record OrNode(List<FilterNode> children) implements FilterNode {}
+
+    private record FieldNode(
+            String fieldPath,
+            List<String> segments,
+            List<FieldPredicate> predicates
+    ) implements FilterNode {}
+
+    private record RangeBounds(
+            char targetType,
+            String loKey,
+            boolean loInclusive,
+            String hiKey,
+            boolean hiInclusive,
+            boolean empty
+    ) {
+        static final RangeBounds EMPTY = new RangeBounds('\0', null, false, null, false, true);
+    }
+
+    private record ParsedCondition(boolean valid, FilterNode filter) {
+        static final ParsedCondition NONE = new ParsedCondition(true, null);
+        static final ParsedCondition INVALID = new ParsedCondition(false, null);
+    }
 
     private record RecordLocation(long payloadOffset, int keyLength, int payloadLength) {
         long frameOffset() {
@@ -143,13 +197,15 @@ public final class DatabaseStepHandlers {
     private final Path compactPath;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
     private final Map<String, RecordLocation> index = new HashMap<>();
+    private final NavigableSet<String> sortedKeys = new TreeSet<>(DatabaseStepHandlers::compareTaggedValues);
     /** Secondary index field -> primary index key -> encoded scalar value; mutated only under the write lock. */
     private final Map<String, Map<String, String>> indexValueByKey = new HashMap<>();
-    /** Secondary index field -> encoded scalar value -> primary index keys; mutated only under the write lock. */
-    private final Map<String, Map<String, Set<String>>> indexKeysByValue = new HashMap<>();
+    /** Secondary index field -> ordered encoded scalar value -> primary keys; mutated only under write lock. */
+    private final Map<String, NavigableMap<String, Set<String>>> indexKeysByValue = new HashMap<>();
     /** Immutable snapshots replaced only during PRE, so request preparation can read them without locking. */
     private volatile Set<String> uniqueFields = Set.of();
     private volatile List<String> indexedFields = List.of();
+    private volatile Map<String, List<String>> fieldPathCache = Map.of();
 
     private FileChannel lockChannel;
     private FileLock fileLock;
@@ -222,7 +278,8 @@ public final class DatabaseStepHandlers {
                     fieldNames(selected.optionalValue("fields")),
                     selected.optionalValue("document")
                             .or(() -> selected.optionalValue("documents"))
-                            .orElse(null)
+                            .orElse(null),
+                    condition(configuration, selected)
             );
             case "bulk_upsert" -> store.upsertBatch(
                     keyField,
@@ -230,7 +287,8 @@ public final class DatabaseStepHandlers {
                     fieldNames(selected.optionalValue("fields")),
                     selected.optionalValue("documents")
                             .or(() -> selected.optionalValue("document"))
-                            .orElse(null)
+                            .orElse(null),
+                    condition(configuration, selected)
             );
             case "get" -> store.get(
                     keyField,
@@ -246,9 +304,24 @@ public final class DatabaseStepHandlers {
                     selected.optionalValue("filter").orElse(null),
                     selected.optionalValue("after").orElse(null)
             );
-            case "delete" -> store.delete(selected.optionalValue("key").orElse(null));
+            case "delete" -> store.delete(
+                    keyField,
+                    selected.optionalValue("key").orElse(null),
+                    condition(configuration, selected)
+            );
             default -> throw new IllegalArgumentException("Unsupported database operation: " + operation);
         };
+    }
+
+    private static ParsedCondition condition(final StepInput configuration, final StepInput selected) {
+        final boolean authored = configuration.options().containsKey("operation")
+                && configuration.selected("operation").optionalValue("condition").isPresent();
+        final RailixValue runtimeValue = selected.optionalValue("condition").orElse(null);
+        if (!authored && runtimeValue == null) {
+            return ParsedCondition.NONE;
+        }
+        final FilterNode filter = parseFilter(runtimeValue, false);
+        return filter == null ? ParsedCondition.INVALID : new ParsedCondition(true, filter);
     }
 
     /** Computes the deterministic 1,024-bucket partition ID for a valid string or number key. */
@@ -315,13 +388,35 @@ public final class DatabaseStepHandlers {
      * @return empty when valid, otherwise a user-facing rejection
      */
     static Optional<String> fieldListRejection(final RailixValue.ArrayValue value) {
+        return fieldListRejection(value, false);
+    }
+
+    /**
+     * Validates configured secondary/unique index field paths: at most {@value #MAX_FIELD_NAMES} distinct,
+     * valid field names or dot-separated nested paths.
+     *
+     * @param value authored array
+     * @return empty when valid, otherwise a user-facing rejection
+     */
+    static Optional<String> indexFieldListRejection(final RailixValue.ArrayValue value) {
+        return fieldListRejection(value, true);
+    }
+
+    private static Optional<String> fieldListRejection(
+            final RailixValue.ArrayValue value,
+            final boolean allowDotPaths
+    ) {
         if (value.values().size() > MAX_FIELD_NAMES) {
             return Optional.of("Use at most " + MAX_FIELD_NAMES + " field names.");
         }
         final Set<String> seen = new HashSet<>();
         for (final RailixValue item : value.values()) {
-            if (!(item instanceof RailixValue.StringValue string) || !validFieldName(string.value())) {
-                return Optional.of("Field names must be non-blank text up to 128 bytes and must not start with $.");
+            if (!(item instanceof RailixValue.StringValue string)
+                    || !(allowDotPaths ? validFieldPath(string.value()) : validFieldName(string.value()))) {
+                return Optional.of(allowDotPaths
+                        ? "Index field paths must have valid non-blank segments without leading $, dots at "
+                                + "boundaries, or '..'."
+                        : "Field names must be non-blank text up to 128 bytes and must not start with $.");
             }
             if (!seen.add(string.value())) {
                 return Optional.of("Field name is listed more than once: " + string.value() + ".");
@@ -354,6 +449,108 @@ public final class DatabaseStepHandlers {
 
     private static boolean validFieldName(final String value) {
         return validKeyField(value) && value.charAt(0) != '$';
+    }
+
+    private static boolean validFieldPath(final String value) {
+        if (value == null || value.isBlank() || invalidSurrogate(value)) {
+            return false;
+        }
+        if (value.getBytes(StandardCharsets.UTF_8).length > MAX_FIELD_PATH_BYTES) {
+            return false;
+        }
+        int segmentCount = 0;
+        int start = 0;
+        while (start <= value.length()) {
+            final int dot = value.indexOf('.', start);
+            final String segment = dot < 0 ? value.substring(start) : value.substring(start, dot);
+            if (!validFieldName(segment)) {
+                return false;
+            }
+            segmentCount++;
+            if (segmentCount > MAX_FILTER_PATH_SEGMENTS) {
+                return false;
+            }
+            if (dot < 0) {
+                break;
+            }
+            start = dot + 1;
+        }
+        return true;
+    }
+
+    private static List<String> splitFieldPath(final String path) {
+        if (path.indexOf('.') < 0) {
+            return List.of(path);
+        }
+        final List<String> segments = new ArrayList<>(4);
+        int start = 0;
+        while (start <= path.length()) {
+            final int dot = path.indexOf('.', start);
+            if (dot < 0) {
+                segments.add(path.substring(start));
+                break;
+            }
+            segments.add(path.substring(start, dot));
+            start = dot + 1;
+        }
+        return List.copyOf(segments);
+    }
+
+    /** Returns Java null when any path step is absent; returns {@link RailixValue.NullValue} for JSON null. */
+    private static RailixValue readPathValue(
+            final RailixValue.ObjectValue document,
+            final List<String> segments
+    ) {
+        if (segments.size() == 1) {
+            return document.values().get(segments.getFirst());
+        }
+        RailixValue current = document;
+        for (int i = 0; i < segments.size(); i++) {
+            final String segment = segments.get(i);
+            if (current instanceof RailixValue.ObjectValue object) {
+                current = object.values().get(segment);
+                if (current == null) {
+                    return null;
+                }
+            } else if (current instanceof RailixValue.ArrayValue array) {
+                final int index = parseArrayIndex(segment);
+                if (index < 0 || index >= array.values().size()) {
+                    return null;
+                }
+                current = array.values().get(index);
+            } else {
+                return null;
+            }
+        }
+        return current;
+    }
+
+    private static int parseArrayIndex(final String segment) {
+        final int len = segment.length();
+        if (len == 0 || len > 7) {
+            return -1;
+        }
+        if (len == 1) {
+            final char c = segment.charAt(0);
+            return (c >= '0' && c <= '9') ? c - '0' : -1;
+        }
+        if (segment.charAt(0) < '1' || segment.charAt(0) > '9') {
+            return -1;
+        }
+        int parsed = 0;
+        for (int i = 0; i < len; i++) {
+            final char c = segment.charAt(i);
+            if (c < '0' || c > '9') {
+                return -1;
+            }
+            parsed = parsed * 10 + (c - '0');
+        }
+        return parsed;
+    }
+
+    private List<String> cachedFieldPath(final String field) {
+        final List<String> cached = fieldPathCache.get(field);
+        return cached != null ? cached : splitFieldPath(field);
     }
 
     /**
@@ -404,20 +601,24 @@ public final class DatabaseStepHandlers {
             if (added.isEmpty() && !newlyUnique) {
                 return;
             }
+            final Map<String, List<String>> nextPathCache = new HashMap<>(fieldPathCache);
+            for (final String field : nextIndexed) {
+                nextPathCache.computeIfAbsent(field, DatabaseStepHandlers::splitFieldPath);
+            }
             for (final String field : added) {
                 indexValueByKey.put(field, new HashMap<>());
-                indexKeysByValue.put(field, new HashMap<>());
+                indexKeysByValue.put(field, new TreeMap<>(DatabaseStepHandlers::compareTaggedValues));
             }
             for (final Map.Entry<String, RecordLocation> entry : index.entrySet()) {
                 final RailixValue.ObjectValue document = parseStoredObject(readPayloadBytes(journal, entry.getValue()));
                 for (final String field : nextUnique) {
-                    if (!uniqueCompatible(document.values().get(field))) {
+                    if (!uniqueCompatible(readPathValue(document, nextPathCache.get(field)))) {
                         throw new IllegalStateException("DATABASE_UNIQUE_INDEX_VIOLATION: Unique field " + field
                                 + " holds an array or object value in collection " + directory + ".");
                     }
                 }
                 for (final String field : added) {
-                    addIndexEntry(field, entry.getKey(), document.values().get(field));
+                    addIndexEntry(field, entry.getKey(), readPathValue(document, nextPathCache.get(field)));
                 }
             }
             for (final String field : nextUnique) {
@@ -428,6 +629,7 @@ public final class DatabaseStepHandlers {
                     }
                 }
             }
+            fieldPathCache = Map.copyOf(nextPathCache);
             uniqueFields = Set.copyOf(nextUnique);
             indexedFields = List.copyOf(nextIndexed);
             added.clear();
@@ -463,7 +665,7 @@ public final class DatabaseStepHandlers {
                 }
             }
             if (document != null) {
-                addIndexEntry(field, indexKey, document.values().get(field));
+                addIndexEntry(field, indexKey, readPathValue(document, cachedFieldPath(field)));
             }
         }
     }
@@ -474,9 +676,10 @@ public final class DatabaseStepHandlers {
      */
     private boolean uniqueConflict(final Map<String, RailixValue.ObjectValue> finalDocuments) {
         for (final String field : uniqueFields) {
+            final List<String> segments = cachedFieldPath(field);
             final Map<String, String> claimed = new HashMap<>();
             for (final Map.Entry<String, RailixValue.ObjectValue> entry : finalDocuments.entrySet()) {
-                final String encoded = indexValue(entry.getValue().values().get(field));
+                final String encoded = indexValue(readPathValue(entry.getValue(), segments));
                 if (encoded != null && claimed.putIfAbsent(encoded, entry.getKey()) != null) {
                     return true;
                 }
@@ -497,9 +700,9 @@ public final class DatabaseStepHandlers {
         return !(value instanceof RailixValue.ArrayValue) && !(value instanceof RailixValue.ObjectValue);
     }
 
-    private static boolean uniqueFieldsCompatible(final Set<String> unique, final RailixValue.ObjectValue document) {
+    private boolean uniqueFieldsCompatible(final Set<String> unique, final RailixValue.ObjectValue document) {
         for (final String field : unique) {
-            if (!uniqueCompatible(document.values().get(field))) {
+            if (!uniqueCompatible(readPathValue(document, cachedFieldPath(field)))) {
                 return false;
             }
         }
@@ -853,6 +1056,8 @@ public final class DatabaseStepHandlers {
             journal.truncate(offset);
             journal.force(false);
         }
+        sortedKeys.clear();
+        sortedKeys.addAll(index.keySet());
         writeOffset = offset;
     }
 
@@ -938,10 +1143,14 @@ public final class DatabaseStepHandlers {
             final String keyField,
             final boolean autoKey,
             final List<String> fields,
-            final RailixValue candidate
+            final RailixValue candidate,
+            final ParsedCondition condition
     ) {
+        if (!condition.valid()) {
+            return StepResult.outcome("invalid");
+        }
         if (candidate instanceof RailixValue.ArrayValue array) {
-            return upsertBatch(keyField, autoKey, fields, array);
+            return upsertBatch(keyField, autoKey, fields, array, condition);
         }
         if (!(candidate instanceof RailixValue.ObjectValue rawObject)) {
             return StepResult.outcome("invalid");
@@ -950,18 +1159,30 @@ public final class DatabaseStepHandlers {
         if (prepared == null) {
             return StepResult.outcome("invalid");
         }
-        if (!commitPreparedWrites(List.of(prepared), Map.of(prepared.indexKey(), prepared.document()), "upsert")) {
-            return StepResult.outcome("invalid");
-        }
-        return StepResult.outcome("ok").write("target", prepared.document());
+        final WriteOutcome outcome = commitPreparedWrites(
+                List.of(prepared),
+                Map.of(prepared.indexKey(), prepared.document()),
+                keyField,
+                condition.filter(),
+                "upsert"
+        );
+        return switch (outcome) {
+            case OK -> StepResult.outcome("ok").write("target", prepared.document());
+            case NOT_FOUND -> StepResult.outcome("not_found");
+            case INVALID -> StepResult.outcome("invalid");
+        };
     }
 
     private StepResult upsertBatch(
             final String keyField,
             final boolean autoKey,
             final List<String> fields,
-            final RailixValue candidate
+            final RailixValue candidate,
+            final ParsedCondition condition
     ) {
+        if (!condition.valid()) {
+            return StepResult.outcome("invalid");
+        }
         if (!(candidate instanceof RailixValue.ArrayValue array)) {
             return StepResult.outcome("invalid");
         }
@@ -991,10 +1212,18 @@ public final class DatabaseStepHandlers {
             savedDocuments.add(prepared.document());
             finalDocuments.put(prepared.indexKey(), prepared.document());
         }
-        if (!commitPreparedWrites(preparedWrites, finalDocuments, "upsert")) {
-            return StepResult.outcome("invalid");
-        }
-        return StepResult.outcome("ok").write("target", RailixValue.array(savedDocuments));
+        final WriteOutcome outcome = commitPreparedWrites(
+                preparedWrites,
+                finalDocuments,
+                keyField,
+                condition.filter(),
+                "upsert"
+        );
+        return switch (outcome) {
+            case OK -> StepResult.outcome("ok").write("target", RailixValue.array(savedDocuments));
+            case NOT_FOUND -> StepResult.outcome("not_found");
+            case INVALID -> StepResult.outcome("invalid");
+        };
     }
 
     private PreparedWrite prepareWrite(
@@ -1032,9 +1261,11 @@ public final class DatabaseStepHandlers {
         );
     }
 
-    private boolean commitPreparedWrites(
+    private WriteOutcome commitPreparedWrites(
             final List<PreparedWrite> writes,
             final Map<String, RailixValue.ObjectValue> finalDocuments,
+            final String keyField,
+            final FilterNode condition,
             final String operationLabel
     ) {
         long totalBytes = 0L;
@@ -1050,8 +1281,11 @@ public final class DatabaseStepHandlers {
         rwLock.writeLock().lock();
         try {
             ensureOpen();
+            if (condition != null && !conditionsSatisfiedUnderLock(writes, keyField, condition)) {
+                return WriteOutcome.NOT_FOUND;
+            }
             if (!uniqueFields.isEmpty() && uniqueConflict(finalDocuments)) {
-                return false;
+                return WriteOutcome.INVALID;
             }
             final long startOffset = writeOffset;
             writeFully(journal, batch, startOffset);
@@ -1068,6 +1302,8 @@ public final class DatabaseStepHandlers {
                 if (previous != null) {
                     livePayloadBytes -= previous.payloadLength();
                     deadBytes += (long) HEADER_BYTES + previous.keyLength() + previous.payloadLength();
+                } else {
+                    sortedKeys.add(write.indexKey());
                 }
                 livePayloadBytes += payloadLen;
                 cursor += write.frameBytes();
@@ -1079,7 +1315,7 @@ public final class DatabaseStepHandlers {
             if (shouldCompact()) {
                 compactUnderWriteLock();
             }
-            return true;
+            return WriteOutcome.OK;
         } catch (final IOException exception) {
             rollbackJournalTail(exception);
             throw new UncheckedIOException(
@@ -1089,6 +1325,29 @@ public final class DatabaseStepHandlers {
         } finally {
             rwLock.writeLock().unlock();
         }
+    }
+
+    private boolean conditionsSatisfiedUnderLock(
+            final List<PreparedWrite> writes,
+            final String keyField,
+            final FilterNode condition
+    ) throws IOException {
+        final Map<String, RailixValue.ObjectValue> staged = new HashMap<>();
+        for (final PreparedWrite write : writes) {
+            final String indexKey = write.indexKey();
+            final RailixValue.ObjectValue current;
+            if (staged.containsKey(indexKey)) {
+                current = staged.get(indexKey);
+            } else {
+                final RecordLocation existingLoc = index.get(indexKey);
+                current = existingLoc == null ? null : parseStoredObject(readPayloadBytes(journal, existingLoc));
+            }
+            if (!matchesCondition(current, condition, keyField)) {
+                return false;
+            }
+            staged.put(indexKey, write.document());
+        }
+        return true;
     }
 
     private StepResult get(
@@ -1127,8 +1386,8 @@ public final class DatabaseStepHandlers {
             final RailixValue filterCandidate,
             final RailixValue afterCandidate
     ) {
-        if (filterCandidate != null && !(filterCandidate instanceof RailixValue.ObjectValue)
-                && !(filterCandidate instanceof RailixValue.NullValue)) {
+        final FilterNode filter = parseFilter(filterCandidate, true);
+        if (filter == null) {
             return StepResult.outcome("invalid");
         }
         final String afterIndexKey;
@@ -1137,17 +1396,6 @@ public final class DatabaseStepHandlers {
         } else {
             afterIndexKey = encodeIndexKey(afterCandidate);
             if (afterIndexKey == null) {
-                return StepResult.outcome("invalid");
-            }
-        }
-        final RailixValue.ObjectValue filter = filterCandidate instanceof RailixValue.ObjectValue object
-                ? object
-                : RailixValue.object(Map.of());
-        if (DOCUMENT_REFINEMENT.rejection(filter).isPresent()) {
-            return StepResult.outcome("invalid");
-        }
-        for (final String field : filter.values().keySet()) {
-            if (!validFieldName(field)) {
                 return StepResult.outcome("invalid");
             }
         }
@@ -1161,13 +1409,18 @@ public final class DatabaseStepHandlers {
                 return StepResult.outcome("ok").write("target", RailixValue.array(List.of()));
             }
 
-            final List<String> targetKeys = candidateKeys != null
-                    ? new ArrayList<>(candidateKeys)
-                    : new ArrayList<>(index.keySet());
-            targetKeys.sort(DatabaseStepHandlers::compareIndexKeys);
+            final Collection<String> orderedKeys;
+            if (candidateKeys != null) {
+                final List<String> sortedCandidates = new ArrayList<>(candidateKeys);
+                sortedCandidates.sort(DatabaseStepHandlers::compareTaggedValues);
+                orderedKeys = sortedCandidates;
+            } else {
+                orderedKeys = afterIndexKey != null ? sortedKeys.tailSet(afterIndexKey, false) : sortedKeys;
+            }
 
-            for (final String indexKey : targetKeys) {
-                if (afterIndexKey != null && compareIndexKeys(indexKey, afterIndexKey) <= 0) {
+            for (final String indexKey : orderedKeys) {
+                if (candidateKeys != null && afterIndexKey != null
+                        && compareTaggedValues(indexKey, afterIndexKey) <= 0) {
                     continue;
                 }
                 final RecordLocation location = index.get(indexKey);
@@ -1176,7 +1429,7 @@ public final class DatabaseStepHandlers {
                 }
                 final byte[] payloadBytes = readPayloadBytes(journal, location);
                 final RailixValue.ObjectValue stored = parseStoredObject(payloadBytes);
-                if (matchesFilter(stored, filter)) {
+                if (matchesFilterNode(stored, filter)) {
                     results.add(readView(stored, keyField, fields, defaults));
                     if (results.size() >= limit) {
                         break;
@@ -1191,49 +1444,315 @@ public final class DatabaseStepHandlers {
         return StepResult.outcome("ok").write("target", RailixValue.array(results));
     }
 
-    private static int compareIndexKeys(final String left, final String right) {
+    private static int compareTaggedValues(final String left, final String right) {
         if (left.equals(right)) {
             return 0;
         }
         final char leftType = left.charAt(0);
         final char rightType = right.charAt(0);
         if (leftType != rightType) {
-            return leftType == 'n' ? -1 : 1;
+            return Character.compare(leftType, rightType);
         }
-        if (leftType == 'n') {
-            return new BigDecimal(left.substring(2)).compareTo(new BigDecimal(right.substring(2)));
-        }
-        return left.substring(2).compareTo(right.substring(2));
+        return switch (leftType) {
+            case 'b' -> left.compareTo(right);
+            case 'n' -> new BigDecimal(left.substring(2)).compareTo(new BigDecimal(right.substring(2)));
+            default -> left.substring(2).compareTo(right.substring(2));
+        };
     }
 
-    private Set<String> resolveCandidateKeys(final String keyField, final RailixValue.ObjectValue filter) {
-        if (filter.values().containsKey(keyField)) {
-            final String primary = encodeIndexKey(filter.values().get(keyField));
-            return primary == null ? Set.of() : (index.containsKey(primary) ? Set.of(primary) : Set.of());
+    private static FilterNode parseFilter(final RailixValue candidate, final boolean allowEmpty) {
+        if (candidate == null || candidate instanceof RailixValue.NullValue) {
+            return allowEmpty ? MATCH_ALL_FILTER : null;
+        }
+        if (!(candidate instanceof RailixValue.ObjectValue object)
+                || DOCUMENT_REFINEMENT.rejection(object).isPresent()) {
+            return null;
+        }
+        return parseFilterObject(object, 0, new int[]{MAX_FILTER_CLAUSES});
+    }
+
+    private static FilterNode parseFilterObject(
+            final RailixValue.ObjectValue object,
+            final int depth,
+            final int[] budget
+    ) {
+        if (depth > MAX_FILTER_DEPTH) {
+            return null;
+        }
+        final Map<String, RailixValue> entries = object.values();
+        if (entries.isEmpty()) {
+            return MATCH_ALL_FILTER;
+        }
+        final List<FilterNode> children = new ArrayList<>(entries.size());
+        for (final Map.Entry<String, RailixValue> entry : entries.entrySet()) {
+            if (--budget[0] < 0) {
+                return null;
+            }
+            final String key = entry.getKey();
+            final RailixValue value = entry.getValue();
+            if ("$and".equals(key) || "$or".equals(key)) {
+                if (!(value instanceof RailixValue.ArrayValue array) || array.values().isEmpty()) {
+                    return null;
+                }
+                final List<FilterNode> subNodes = new ArrayList<>(array.values().size());
+                for (final RailixValue item : array.values()) {
+                    if (!(item instanceof RailixValue.ObjectValue subObject)) {
+                        return null;
+                    }
+                    final FilterNode parsed = parseFilterObject(subObject, depth + 1, budget);
+                    if (parsed == null) {
+                        return null;
+                    }
+                    subNodes.add(parsed);
+                }
+                children.add("$and".equals(key) ? new AndNode(subNodes) : new OrNode(subNodes));
+            } else if (key.startsWith("$") || !validFieldPath(key)) {
+                return null;
+            } else {
+                final List<FieldPredicate> predicates = parseFieldPredicates(value, budget);
+                if (predicates == null) {
+                    return null;
+                }
+                children.add(new FieldNode(key, splitFieldPath(key), predicates));
+            }
+        }
+        return children.size() == 1 ? children.getFirst() : new AndNode(List.copyOf(children));
+    }
+
+    private static List<FieldPredicate> parseFieldPredicates(final RailixValue value, final int[] budget) {
+        if (!(value instanceof RailixValue.ObjectValue object) || !hasOperatorKey(object)) {
+            return List.of(new FieldPredicate(FilterOp.EQ, canonicalValue(value), Set.of(), false));
+        }
+        final List<FieldPredicate> predicates = new ArrayList<>(object.values().size());
+        for (final Map.Entry<String, RailixValue> entry : object.values().entrySet()) {
+            if (--budget[0] < 0) {
+                return null;
+            }
+            final String opName = entry.getKey();
+            if (!opName.startsWith("$")) {
+                return null;
+            }
+            final FieldPredicate parsed = parseSingleOperator(opName, entry.getValue());
+            if (parsed == null) {
+                return null;
+            }
+            predicates.add(parsed);
+        }
+        return List.copyOf(predicates);
+    }
+
+    private static FieldPredicate parseSingleOperator(final String opName, final RailixValue operand) {
+        return switch (opName) {
+            case "$eq" -> new FieldPredicate(FilterOp.EQ, canonicalValue(operand), Set.of(), false);
+            case "$ne" -> new FieldPredicate(FilterOp.NE, canonicalValue(operand), Set.of(), false);
+            case "$gt", "$gte", "$lt", "$lte" -> {
+                if (!(operand instanceof RailixValue.NumberValue)
+                        && !(operand instanceof RailixValue.StringValue)) {
+                    yield null;
+                }
+                final FilterOp op = switch (opName) {
+                    case "$gt" -> FilterOp.GT;
+                    case "$gte" -> FilterOp.GTE;
+                    case "$lt" -> FilterOp.LT;
+                    default -> FilterOp.LTE;
+                };
+                yield new FieldPredicate(op, canonicalValue(operand), Set.of(), false);
+            }
+            case "$in", "$nin" -> {
+                if (!(operand instanceof RailixValue.ArrayValue array)
+                        || array.values().size() > MAX_OPERATOR_ARRAY_SIZE) {
+                    yield null;
+                }
+                final Set<RailixValue> canonicalSet = new HashSet<>(Math.max(4, array.values().size() * 2));
+                for (final RailixValue item : array.values()) {
+                    canonicalSet.add(canonicalValue(item));
+                }
+                yield new FieldPredicate(
+                        "$in".equals(opName) ? FilterOp.IN : FilterOp.NIN,
+                        null,
+                        Set.copyOf(canonicalSet),
+                        false
+                );
+            }
+            case "$exists" -> operand instanceof RailixValue.BooleanValue bool
+                    ? new FieldPredicate(FilterOp.EXISTS, null, Set.of(), bool.value())
+                    : null;
+            default -> null;
+        };
+    }
+
+    private static boolean hasOperatorKey(final RailixValue.ObjectValue object) {
+        for (final String key : object.values().keySet()) {
+            if (key.startsWith("$")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Set<String> resolveCandidateKeys(final String keyField, final FilterNode node) {
+        return switch (node) {
+            case AndNode and -> intersectClauseCandidates(keyField, and.children());
+            case OrNode or -> unionBranchCandidates(keyField, or.children());
+            case FieldNode field -> resolveFieldCandidates(keyField, field);
+        };
+    }
+
+    private Set<String> intersectClauseCandidates(final String keyField, final List<FilterNode> children) {
+        if (children.isEmpty()) {
+            return null;
         }
         List<Set<String>> matchedSets = null;
-        for (final String indexed : indexedFields) {
-            if (filter.values().containsKey(indexed)) {
-                final String enc = indexValue(filter.values().get(indexed));
-                if (enc == null) {
-                    continue;
+        for (final FilterNode child : children) {
+            final Set<String> candidates = resolveCandidateKeys(keyField, child);
+            if (candidates == null) {
+                continue;
+            }
+            if (candidates.isEmpty()) {
+                return Set.of();
+            }
+            if (matchedSets == null) {
+                matchedSets = new ArrayList<>(2);
+            }
+            matchedSets.add(candidates);
+        }
+        return intersectMatchedSets(matchedSets);
+    }
+
+    private Set<String> unionBranchCandidates(final String keyField, final List<FilterNode> branches) {
+        final Set<String> union = new LinkedHashSet<>();
+        for (final FilterNode branch : branches) {
+            final Set<String> candidates = resolveCandidateKeys(keyField, branch);
+            if (candidates == null) {
+                return null;
+            }
+            union.addAll(candidates);
+        }
+        return union;
+    }
+
+    private Set<String> resolveFieldCandidates(final String keyField, final FieldNode field) {
+        if (field.fieldPath().equals(keyField)) {
+            return resolvePrimaryKeyCandidates(field.predicates());
+        }
+        final NavigableMap<String, Set<String>> byValue = indexKeysByValue.get(field.fieldPath());
+        if (byValue == null) {
+            return null;
+        }
+        List<Set<String>> matchedSets = null;
+        for (final FieldPredicate predicate : field.predicates()) {
+            final Set<String> set = switch (predicate.op()) {
+                case EQ -> {
+                    final String enc = indexValue(predicate.scalar());
+                    yield enc == null ? null : byValue.getOrDefault(enc, Set.of());
                 }
-                final Map<String, Set<String>> byValue = indexKeysByValue.get(indexed);
-                final Set<String> matching = byValue == null ? null : byValue.get(enc);
-                if (matching == null || matching.isEmpty()) {
+                case IN -> secondaryInCandidates(byValue, predicate.set());
+                default -> null;
+            };
+            if (set != null) {
+                if (set.isEmpty()) {
                     return Set.of();
                 }
                 if (matchedSets == null) {
                     matchedSets = new ArrayList<>(2);
                 }
-                matchedSets.add(matching);
+                matchedSets.add(set);
             }
         }
+        final RangeBounds bounds = rangeBounds(field.predicates());
+        if (bounds != null) {
+            if (bounds.empty()) {
+                return Set.of();
+            }
+            final Set<String> rangeMatches = new LinkedHashSet<>();
+            collectKeysInRange(
+                    byValue.navigableKeySet(),
+                    bounds,
+                    valueKey -> rangeMatches.addAll(byValue.get(valueKey))
+            );
+            if (rangeMatches.isEmpty()) {
+                return Set.of();
+            }
+            if (matchedSets == null) {
+                matchedSets = new ArrayList<>(1);
+            }
+            matchedSets.add(rangeMatches);
+        }
+        return intersectMatchedSets(matchedSets);
+    }
+
+    private static Set<String> secondaryInCandidates(
+            final NavigableMap<String, Set<String>> byValue,
+            final Set<RailixValue> items
+    ) {
+        final Set<String> union = new LinkedHashSet<>();
+        for (final RailixValue item : items) {
+            final String enc = indexValue(item);
+            if (enc == null) {
+                return null;
+            }
+            union.addAll(byValue.getOrDefault(enc, Set.of()));
+        }
+        return union;
+    }
+
+    private Set<String> resolvePrimaryKeyCandidates(final List<FieldPredicate> predicates) {
+        List<Set<String>> matchedSets = null;
+        for (final FieldPredicate predicate : predicates) {
+            final Set<String> set = switch (predicate.op()) {
+                case EQ -> {
+                    final String key = encodeIndexKey(predicate.scalar());
+                    yield key != null && index.containsKey(key) ? Set.of(key) : Set.of();
+                }
+                case IN -> primaryInCandidates(predicate.set());
+                case EXISTS -> predicate.boolValue() ? null : Set.of();
+                default -> null;
+            };
+            if (set != null) {
+                if (set.isEmpty()) {
+                    return Set.of();
+                }
+                if (matchedSets == null) {
+                    matchedSets = new ArrayList<>(2);
+                }
+                matchedSets.add(set);
+            }
+        }
+        final RangeBounds bounds = rangeBounds(predicates);
+        if (bounds != null) {
+            if (bounds.empty()) {
+                return Set.of();
+            }
+            final Set<String> rangeMatches = new LinkedHashSet<>();
+            collectKeysInRange(sortedKeys, bounds, rangeMatches::add);
+            if (rangeMatches.isEmpty()) {
+                return Set.of();
+            }
+            if (matchedSets == null) {
+                matchedSets = new ArrayList<>(1);
+            }
+            matchedSets.add(rangeMatches);
+        }
+        return intersectMatchedSets(matchedSets);
+    }
+
+    private Set<String> primaryInCandidates(final Set<RailixValue> items) {
+        final Set<String> matches = new LinkedHashSet<>();
+        for (final RailixValue item : items) {
+            final String key = encodeIndexKey(item);
+            if (key != null && index.containsKey(key)) {
+                matches.add(key);
+            }
+        }
+        return matches;
+    }
+
+    private static Set<String> intersectMatchedSets(final List<Set<String>> matchedSets) {
         if (matchedSets == null) {
             return null;
         }
         if (matchedSets.size() == 1) {
-            return Set.copyOf(matchedSets.getFirst());
+            return matchedSets.getFirst();
         }
         matchedSets.sort(Comparator.comparingInt(Set::size));
         final Set<String> intersection = new LinkedHashSet<>(matchedSets.getFirst());
@@ -1246,32 +1765,238 @@ public final class DatabaseStepHandlers {
         return intersection;
     }
 
-    private static boolean matchesFilter(
-            final RailixValue.ObjectValue stored,
-            final RailixValue.ObjectValue filter
-    ) {
-        for (final Map.Entry<String, RailixValue> entry : filter.values().entrySet()) {
-            final String field = entry.getKey();
-            final RailixValue expected = entry.getValue();
-            final RailixValue actual = stored.values().get(field);
-            if (!filterValuesEqual(actual, expected)) {
-                return false;
+    private static RangeBounds rangeBounds(final List<FieldPredicate> predicates) {
+        char targetType = 0;
+        String loKey = null;
+        boolean loInc = false;
+        String hiKey = null;
+        boolean hiInc = false;
+        boolean hasRange = false;
+
+        for (final FieldPredicate predicate : predicates) {
+            final FilterOp op = predicate.op();
+            if (op != FilterOp.GT && op != FilterOp.GTE && op != FilterOp.LT && op != FilterOp.LTE) {
+                continue;
+            }
+            hasRange = true;
+            final String encoded = indexValue(predicate.scalar());
+            if (encoded == null) {
+                return RangeBounds.EMPTY;
+            }
+            final char type = encoded.charAt(0);
+            if (targetType == 0) {
+                targetType = type;
+            } else if (targetType != type) {
+                return RangeBounds.EMPTY;
+            }
+            final boolean inclusive = op == FilterOp.GTE || op == FilterOp.LTE;
+            if (op == FilterOp.GT || op == FilterOp.GTE) {
+                final int cmp = loKey == null ? 1 : compareTaggedValues(encoded, loKey);
+                if (loKey == null || cmp > 0 || (cmp == 0 && !inclusive)) {
+                    loKey = encoded;
+                    loInc = inclusive;
+                }
+            } else {
+                final int cmp = hiKey == null ? -1 : compareTaggedValues(encoded, hiKey);
+                if (hiKey == null || cmp < 0 || (cmp == 0 && !inclusive)) {
+                    hiKey = encoded;
+                    hiInc = inclusive;
+                }
             }
         }
-        return true;
+        if (!hasRange) {
+            return null;
+        }
+        if (loKey != null && hiKey != null) {
+            final int cmp = compareTaggedValues(loKey, hiKey);
+            if (cmp > 0 || (cmp == 0 && (!loInc || !hiInc))) {
+                return RangeBounds.EMPTY;
+            }
+        }
+        return new RangeBounds(targetType, loKey, loInc, hiKey, hiInc, false);
     }
 
-    private static boolean filterValuesEqual(final RailixValue actual, final RailixValue expected) {
+    private static void collectKeysInRange(
+            final NavigableSet<String> keySet,
+            final RangeBounds bounds,
+            final Consumer<String> consumer
+    ) {
+        if (bounds.empty()) {
+            return;
+        }
+        final NavigableSet<String> slice;
+        if (bounds.loKey() != null && bounds.hiKey() != null) {
+            slice = keySet.subSet(bounds.loKey(), bounds.loInclusive(), bounds.hiKey(), bounds.hiInclusive());
+        } else if (bounds.loKey() != null) {
+            slice = keySet.tailSet(bounds.loKey(), bounds.loInclusive());
+        } else {
+            slice = keySet.headSet(bounds.hiKey(), bounds.hiInclusive()).descendingSet();
+        }
+        for (final String key : slice) {
+            if (key.charAt(0) != bounds.targetType()) {
+                break;
+            }
+            consumer.accept(key);
+        }
+    }
+
+    private static boolean matchesCondition(
+            final RailixValue.ObjectValue existing,
+            final FilterNode condition,
+            final String keyField
+    ) {
+        return existing == null
+                ? conditionAllowsAbsentDocument(condition, keyField)
+                : matchesFilterNode(existing, condition);
+    }
+
+    private static boolean conditionAllowsAbsentDocument(final FilterNode node, final String keyField) {
+        return switch (node) {
+            case AndNode and -> {
+                if (and.children().isEmpty()) {
+                    yield false;
+                }
+                for (final FilterNode child : and.children()) {
+                    if (!conditionAllowsAbsentDocument(child, keyField)) {
+                        yield false;
+                    }
+                }
+                yield true;
+            }
+            case OrNode or -> {
+                for (final FilterNode child : or.children()) {
+                    if (conditionAllowsAbsentDocument(child, keyField)) {
+                        yield true;
+                    }
+                }
+                yield false;
+            }
+            case FieldNode field -> {
+                if (!field.fieldPath().equals(keyField)) {
+                    yield false;
+                }
+                boolean explicitAbsent = false;
+                for (final FieldPredicate predicate : field.predicates()) {
+                    if (predicate.op() == FilterOp.EXISTS && !predicate.boolValue()) {
+                        explicitAbsent = true;
+                    } else if (!matchesFieldPredicate(null, predicate)) {
+                        yield false;
+                    }
+                }
+                yield explicitAbsent;
+            }
+        };
+    }
+
+    private static boolean matchesFilterNode(final RailixValue.ObjectValue stored, final FilterNode node) {
+        return switch (node) {
+            case AndNode and -> {
+                for (final FilterNode child : and.children()) {
+                    if (!matchesFilterNode(stored, child)) {
+                        yield false;
+                    }
+                }
+                yield true;
+            }
+            case OrNode or -> {
+                for (final FilterNode child : or.children()) {
+                    if (matchesFilterNode(stored, child)) {
+                        yield true;
+                    }
+                }
+                yield false;
+            }
+            case FieldNode field -> {
+                final RailixValue actual = readPathValue(stored, field.segments());
+                for (final FieldPredicate predicate : field.predicates()) {
+                    if (!matchesFieldPredicate(actual, predicate)) {
+                        yield false;
+                    }
+                }
+                yield true;
+            }
+        };
+    }
+
+    private static boolean matchesFieldPredicate(final RailixValue actual, final FieldPredicate predicate) {
+        return switch (predicate.op()) {
+            case EXISTS -> (actual != null) == predicate.boolValue();
+            case EQ -> eqMatch(actual, predicate.scalar());
+            case NE -> !eqMatch(actual, predicate.scalar());
+            case IN -> inMatch(actual, predicate.set());
+            case NIN -> !inMatch(actual, predicate.set());
+            case GT, GTE, LT, LTE -> compareMatch(actual, predicate.op(), predicate.scalar());
+        };
+    }
+
+    private static boolean eqMatch(final RailixValue actual, final RailixValue expected) {
         if (expected instanceof RailixValue.NullValue) {
             return actual == null || actual instanceof RailixValue.NullValue;
         }
         if (actual == null) {
             return false;
         }
-        return canonicalValue(actual).equals(canonicalValue(expected));
+        return canonicalValueEquals(actual, expected);
     }
 
-    private StepResult delete(final RailixValue keyCandidate) {
+    private static boolean inMatch(final RailixValue actual, final Set<RailixValue> expectedSet) {
+        if (actual == null || actual instanceof RailixValue.NullValue) {
+            return expectedSet.contains(RailixValue.nullValue());
+        }
+        return expectedSet.contains(canonicalValue(actual));
+    }
+
+    private static boolean compareMatch(
+            final RailixValue actual,
+            final FilterOp op,
+            final RailixValue expected
+    ) {
+        if (actual == null) {
+            return false;
+        }
+        final int cmp;
+        if (expected instanceof RailixValue.NumberValue expectedNum) {
+            if (!(actual instanceof RailixValue.NumberValue actualNum)) {
+                return false;
+            }
+            cmp = actualNum.value().compareTo(expectedNum.value());
+        } else if (expected instanceof RailixValue.StringValue expectedStr) {
+            if (!(actual instanceof RailixValue.StringValue actualStr)) {
+                return false;
+            }
+            cmp = actualStr.value().compareTo(expectedStr.value());
+        } else {
+            return false;
+        }
+        return switch (op) {
+            case GT -> cmp > 0;
+            case GTE -> cmp >= 0;
+            case LT -> cmp < 0;
+            case LTE -> cmp <= 0;
+            default -> false;
+        };
+    }
+
+    private static boolean canonicalValueEquals(final RailixValue actual, final RailixValue expectedCanonical) {
+        if (expectedCanonical instanceof RailixValue.NumberValue expectedNum) {
+            return actual instanceof RailixValue.NumberValue actualNum
+                    && actualNum.value().compareTo(expectedNum.value()) == 0;
+        }
+        if (expectedCanonical instanceof RailixValue.StringValue
+                || expectedCanonical instanceof RailixValue.BooleanValue) {
+            return actual.equals(expectedCanonical);
+        }
+        return canonicalValue(actual).equals(expectedCanonical);
+    }
+
+    private StepResult delete(
+            final String keyField,
+            final RailixValue keyCandidate,
+            final ParsedCondition condition
+    ) {
+        if (!condition.valid()) {
+            return StepResult.outcome("invalid");
+        }
         final String indexKey = encodeIndexKey(keyCandidate);
         if (indexKey == null) {
             return StepResult.outcome("invalid");
@@ -1280,6 +2005,7 @@ public final class DatabaseStepHandlers {
         final byte[] keyBytes = indexKey.substring(2).getBytes(StandardCharsets.UTF_8);
         final ByteBuffer tombstone = buildFrame(OP_DELETE, keyType, (short) bucketOf(indexKey), keyBytes, new byte[0]);
         final byte[] removedBytes;
+        RailixValue.ObjectValue deletedDocument = null;
 
         rwLock.writeLock().lock();
         try {
@@ -1289,11 +2015,18 @@ public final class DatabaseStepHandlers {
                 return StepResult.outcome("not_found");
             }
             removedBytes = readPayloadBytes(journal, existing);
+            if (condition.filter() != null) {
+                deletedDocument = parseStoredObject(removedBytes);
+                if (!matchesCondition(deletedDocument, condition.filter(), keyField)) {
+                    return StepResult.outcome("not_found");
+                }
+            }
             final long frameOffset = writeOffset;
             writeFully(journal, tombstone, frameOffset);
             journal.force(false);
             writeOffset = frameOffset + HEADER_BYTES + keyBytes.length;
             index.remove(indexKey);
+            sortedKeys.remove(indexKey);
             reindex(indexKey, null);
             livePayloadBytes -= existing.payloadLength();
             deadBytes += (long) HEADER_BYTES + existing.keyLength() + existing.payloadLength()
@@ -1307,7 +2040,10 @@ public final class DatabaseStepHandlers {
         } finally {
             rwLock.writeLock().unlock();
         }
-        return StepResult.outcome("ok").write("target", parseStoredObject(removedBytes));
+        final RailixValue.ObjectValue returned = deletedDocument != null
+                ? deletedDocument
+                : parseStoredObject(removedBytes);
+        return StepResult.outcome("ok").write("target", returned);
     }
 
     private boolean shouldCompact() {
@@ -1448,6 +2184,7 @@ public final class DatabaseStepHandlers {
                 }
             }
             index.clear();
+            sortedKeys.clear();
             indexValueByKey.clear();
             indexKeysByValue.clear();
             if (firstFailure != null) {

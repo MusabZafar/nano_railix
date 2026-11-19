@@ -67,9 +67,15 @@ class DatabaseStepStoreTest {
                     assertThat(operation.defaultOption()).contains("upsert");
                     assertThat(operation.options()).extracting(StepDefinition.Option::name)
                             .containsExactly("upsert", "get", "find", "delete");
+                    final StepDefinition.Option upsert = operation.options().get(0);
+                    assertThat(upsert.inputs()).extracting(StepDefinition.Field::name)
+                            .containsExactly("document", "condition", "auto_key", "fields");
                     final StepDefinition.Option find = operation.options().get(2);
                     assertThat(find.inputs()).extracting(StepDefinition.Field::name)
                             .containsExactly("filter", "after", "fields", "defaults", "limit");
+                    final StepDefinition.Option delete = operation.options().get(3);
+                    assertThat(delete.inputs()).extracting(StepDefinition.Field::name)
+                            .containsExactly("key", "condition");
                 });
     }
 
@@ -993,6 +999,286 @@ class DatabaseStepStoreTest {
         }
     }
 
+    @ParameterizedTest(name = "invalid index path {0} fails configuration validation")
+    @CsvSource({
+            ".leading",
+            "trailing.",
+            "customer..tier",
+            "customer.$eq"
+    })
+    void compilerRejectsMalformedNestedIndexFieldPaths(final String badPath) {
+        final String project = """
+                {
+                  "format": 1,
+                  "id": "db-index-path-validation",
+                  "nodes": [
+                    {"id": "app", "use": "railix.app", "inputs": {}},
+                    {
+                      "id": "cli",
+                      "use": "railix.trigger.cli",
+                      "inputs": {},
+                      "examples": [{"name": "ex", "payload": []}]
+                    },
+                    {
+                      "id": "db",
+                      "use": "railix.database",
+                      "inputs": {"index_fields": [%s]}
+                    }
+                  ],
+                  "links": [
+                    {"from": "app.start", "to": "cli"},
+                    {"from": "cli.next", "to": "db"},
+                    {"from": "db.ok", "to": "end"},
+                    {"from": "db.not_found", "to": "end"},
+                    {"from": "db.invalid", "to": "end"}
+                  ]
+                }
+                """.formatted(RailixJson.write(RailixValue.string(badPath)));
+
+        final CompileResult result = ProjectCompiler.compileApplication(
+                project,
+                PrimitiveStepsCreatorProjectE2eTest.catalog()
+        );
+        assertThat(result).isInstanceOfSatisfying(CompileResult.Rejected.class, rejected ->
+                assertThat(rejected.diagnostics())
+                        .extracting(Diagnostic::code)
+                        .contains("PROJECT_INPUT_VALIDATION_INVALID"));
+    }
+
+    @Test
+    void extendedQueryOperatorsAndNestedDotPathsFilterAndPaginateDeterministically() {
+        final Path dataDir = tempDir.resolve("extended-operators");
+        try (StoreHarness store = StoreHarness.open(
+                dataDir,
+                "orders",
+                "_id",
+                List.of("customer.email"),
+                List.of("total", "customer.tier", "created_at")
+        )) {
+            assertThat(store.upsert(RailixValue.array(List.of(
+                    parseJsonObject("""
+                            {"_id": 10, "status": "open", "total": 100.00, "created_at": "2026-01-10",
+                             "notes": null,
+                             "customer": {"id": "c-1", "email": "ada@ex.org", "tier": "gold"},
+                             "items": [{"sku": "A-1", "qty": 2}], "meta": {"source": "api"}}"""),
+                    parseJsonObject("""
+                            {"_id": 20, "status": "closed", "total": 250, "created_at": "2026-03-05",
+                             "customer": {"id": "c-2", "email": "grace@ex.org", "tier": "silver"},
+                             "items": [{"sku": "B-2", "qty": 1}], "meta": {}}"""),
+                    parseJsonObject("""
+                            {"_id": 30, "status": "open", "total": "999", "created_at": "2026-06-15",
+                             "notes": "priority",
+                             "customer": {"id": "c-3", "email": "linus@ex.org", "tier": "gold"},
+                             "items": [{"sku": "A-1", "qty": 5}]}"""),
+                    parseJsonObject("""
+                            {"_id": 40, "total": 175.5, "created_at": "2026-02-20",
+                             "customer": {"id": "c-4", "email": "margaret@ex.org", "tier": "bronze"},
+                             "items": [{"sku": "C-3", "qty": 4}]}""")
+            )), false).outcome()).isEqualTo("ok");
+
+            assertThat(findIds(store, parseJsonObject("""
+                    {"total": {"$gte": 100, "$lt": 250}}"""), null)).containsExactly(10, 40);
+
+            assertThat(findIds(store, parseJsonObject("""
+                    {"total": {"$gt": 200, "$lt": 150}}"""), null)).isEmpty();
+            assertThat(findIds(store, parseJsonObject("""
+                    {"total": {"$gt": 10, "$lt": "abc"}}"""), null)).isEmpty();
+
+            assertThat(findIds(store, parseJsonObject("""
+                    {"created_at": {"$gte": "2026-02-01", "$lte": "2026-06-01"},
+                     "customer.tier": {"$in": ["silver", "bronze"]}}"""), null)).containsExactly(20, 40);
+
+            assertThat(findIds(store, parseJsonObject("""
+                    {"notes": {"$exists": true}}"""), null)).containsExactly(10, 30);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"notes": {"$exists": false}}"""), null)).containsExactly(20, 40);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"notes": null}"""), null)).containsExactly(10, 20, 40);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"notes": {"$ne": null}}"""), null)).containsExactly(30);
+
+            assertThat(findIds(store, parseJsonObject("""
+                    {"status": {"$ne": "closed"}}"""), null)).containsExactly(10, 30, 40);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"customer.tier": {"$nin": ["gold", "platinum"]}}"""), null)).containsExactly(20, 40);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"$and": [
+                      {"items.0.sku": "A-1"},
+                      {"$or": [{"status": "open"}, {"total": {"$gte": 200}}]}
+                    ]}"""), null)).containsExactly(10, 30);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"meta": {}}"""), null)).containsExactly(20);
+
+            assertThat(findIds(store, parseJsonObject("""
+                    {"$or": [{"customer.tier": "silver"}, {"customer.tier": "bronze"}]}"""), null))
+                    .containsExactly(20, 40);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"_id": {"$in": [10, 30, 999]}}"""), null)).containsExactly(10, 30);
+            assertThat(findIds(store, parseJsonObject("""
+                    {"_id": {"$gt": 10, "$lte": 40}}"""), RailixValue.number(20))).containsExactly(30, 40);
+
+            assertThat(store.upsert(parseJsonObject("""
+                    {"_id": 50, "customer": {"email": "ada@ex.org"}}"""), false).outcome()).isEqualTo("invalid");
+        }
+
+        try (StoreHarness reopened = StoreHarness.open(
+                dataDir,
+                "orders",
+                "_id",
+                List.of("customer.email"),
+                List.of("total", "customer.tier", "created_at")
+        )) {
+            assertThat(findIds(reopened, parseJsonObject("""
+                    {"customer.tier": "gold", "total": {"$gt": 50}}"""), null)).containsExactly(10);
+        }
+    }
+
+    @Test
+    void invalidExtendedFilterOperatorsAndPathsReturnInvalid() {
+        final Path dataDir = tempDir.resolve("invalid-filters");
+        try (StoreHarness store = StoreHarness.open(dataDir, "items", "_id")) {
+            for (final String badJson : List.of(
+                    """
+                    {"$unknown": 1}""",
+                    """
+                    {"price": {"$regex": "10"}}""",
+                    """
+                    {"price": {"$eq": 10, "extra": 1}}""",
+                    """
+                    {"price": {"$gt": true}}""",
+                    """
+                    {"price": {"$lte": null}}""",
+                    """
+                    {"status": {"$in": "open"}}""",
+                    """
+                    {"notes": {"$exists": "yes"}}""",
+                    """
+                    {"$or": []}""",
+                    """
+                    {"$and": ["not-an-object"]}""",
+                    """
+                    {"customer..tier": "gold"}""",
+                    """
+                    {".tier": "gold"}""",
+                    """
+                    {"customer.": "gold"}""",
+                    """
+                    {"customer.$gt": 1}"""
+            )) {
+                assertThat(store.find(parseJsonObject(badJson), List.of(), null, 10).outcome())
+                        .as("filter=%s", badJson)
+                        .isEqualTo("invalid");
+            }
+
+            RailixValue nested = RailixValue.object(Map.of("a", RailixValue.number(1)));
+            for (int d = 0; d <= DatabaseStepHandlers.MAX_FILTER_DEPTH + 1; d++) {
+                nested = RailixValue.object(Map.of("$and", RailixValue.array(List.of(nested))));
+            }
+            assertThat(store.find(nested, List.of(), null, 10).outcome()).isEqualTo("invalid");
+        }
+    }
+
+    @Test
+    void conditionalUpsertAndDeleteEnforceOptimisticConcurrencyAtomically() {
+        final Path dataDir = tempDir.resolve("conditional-writes");
+        try (StoreHarness store = StoreHarness.open(dataDir, "orders", "_id", List.of("sku"), List.of("status"))) {
+            final RailixValue.ObjectValue v1 = parseJsonObject("""
+                    {"_id": "ord-1", "sku": "SKU-1", "status": "draft", "version": 1}""");
+            final RailixValue insertIfAbsent = parseJsonObject("""
+                    {"_id": {"$exists": false}}""");
+
+            assertThat(store.upsert(v1, false, insertIfAbsent).outcome()).isEqualTo("ok");
+            assertThat(store.upsert(v1, false, insertIfAbsent).outcome()).isEqualTo("not_found");
+
+            assertThat(store.upsert(
+                    parseJsonObject("""
+                            {"_id": "ord-missing", "sku": "SKU-X", "status": null}"""),
+                    false,
+                    RailixValue.object(Map.of())
+            ).outcome()).isEqualTo("not_found");
+            assertThat(store.upsert(
+                    parseJsonObject("""
+                            {"_id": "ord-missing", "sku": "SKU-X", "status": "open"}"""),
+                    false,
+                    parseJsonObject("""
+                            {"status": null}""")
+            ).outcome()).isEqualTo("not_found");
+
+            final RailixValue.ObjectValue v2 = parseJsonObject("""
+                    {"_id": "ord-1", "sku": "SKU-1", "status": "submitted", "version": 2}""");
+            assertThat(store.upsert(v2, false, parseJsonObject("""
+                    {"version": 1, "status": "draft"}""")).outcome()).isEqualTo("ok");
+            assertThat(store.upsert(
+                    parseJsonObject("""
+                            {"_id": "ord-1", "sku": "SKU-1", "status": "hacked", "version": 99}"""),
+                    false,
+                    parseJsonObject("""
+                            {"version": 1}""")
+            ).outcome()).isEqualTo("not_found");
+            assertThat(store.get(RailixValue.string("ord-1")).writes().get("target")).isEqualTo(v2);
+
+            final RailixValue createOrV1 = parseJsonObject("""
+                    {"$or": [{"_id": {"$exists": false}}, {"version": 1}]}""");
+            assertThat(store.upsert(
+                    parseJsonObject("""
+                            {"_id": "ord-2", "sku": "SKU-2", "status": "draft", "version": 1}"""),
+                    false,
+                    createOrV1
+            ).outcome()).isEqualTo("ok");
+            assertThat(store.upsert(
+                    parseJsonObject("""
+                            {"_id": "ord-2", "sku": "SKU-2", "status": "paid", "version": 2}"""),
+                    false,
+                    createOrV1
+            ).outcome()).isEqualTo("ok");
+
+            final RailixValue batch = RailixValue.array(List.of(
+                    parseJsonObject("""
+                            {"_id": "ord-1", "sku": "SKU-1", "status": "done", "version": 3}"""),
+                    parseJsonObject("""
+                            {"_id": "ord-2", "sku": "SKU-2", "status": "done", "version": 3}""")
+            ));
+            assertThat(store.upsert(batch, false, parseJsonObject("""
+                    {"version": 1}""")).outcome()).isEqualTo("not_found");
+            assertThat(store.get(RailixValue.string("ord-1")).writes().get("target")).isEqualTo(v2);
+
+            assertThat(store.delete(RailixValue.string("ord-1"), parseJsonObject("""
+                    {"status": "draft"}""")).outcome()).isEqualTo("not_found");
+            assertThat(store.get(RailixValue.string("ord-1")).outcome()).isEqualTo("ok");
+            assertThat(store.delete(RailixValue.string("ord-1"), parseJsonObject("""
+                    {"status": "submitted", "version": {"$gte": 2}}""")).outcome()).isEqualTo("ok");
+            assertThat(store.get(RailixValue.string("ord-1")).outcome()).isEqualTo("not_found");
+
+            assertThat(store.upsertConfiguredMissingCondition(
+                    parseJsonObject("""
+                            {"_id": "ord-2", "sku": "SKU-2", "status": "tampered", "version": 99}""")
+            ).outcome()).isEqualTo("invalid");
+            assertThat(store.delete(RailixValue.string("ord-2"), RailixValue.nullValue()).outcome())
+                    .isEqualTo("invalid");
+            assertThat(store.upsert(v1, false, parseJsonObject("""
+                    {"$bad": 1}""")).outcome()).isEqualTo("invalid");
+        }
+    }
+
+    private static RailixValue.ObjectValue parseJsonObject(final String json) {
+        final RailixJson.Result parsed = RailixJson.parse(json);
+        assertThat(parsed).isInstanceOf(RailixJson.Parsed.class);
+        return (RailixValue.ObjectValue) ((RailixJson.Parsed) parsed).value();
+    }
+
+    private static List<Integer> findIds(
+            final StoreHarness store,
+            final RailixValue.ObjectValue filter,
+            final RailixValue after
+    ) {
+        final StepResult result = store.find(filter, List.of("_id"), null, 100, after);
+        assertThat(result.outcome()).isEqualTo("ok");
+        return ((RailixValue.ArrayValue) result.writes().get("target")).values().stream()
+                .map(item -> ((RailixValue.NumberValue) ((RailixValue.ObjectValue) item).values().get("_id"))
+                        .value().intValueExact())
+                .toList();
+    }
+
     private static final class StoreHarness implements AutoCloseable {
         private final StepInput configuration;
         private final InMemoryResources resources = new InMemoryResources();
@@ -1053,10 +1339,23 @@ class DatabaseStepStoreTest {
         }
 
         StepResult upsert(final RailixValue document, final boolean autoKey) {
-            return upsert(document, autoKey, List.of());
+            return upsert(document, autoKey, List.of(), null);
         }
 
         StepResult upsert(final RailixValue document, final boolean autoKey, final List<String> fields) {
+            return upsert(document, autoKey, fields, null);
+        }
+
+        StepResult upsert(final RailixValue document, final boolean autoKey, final RailixValue condition) {
+            return upsert(document, autoKey, List.of(), condition);
+        }
+
+        StepResult upsert(
+                final RailixValue document,
+                final boolean autoKey,
+                final List<String> fields,
+                final RailixValue condition
+        ) {
             final Map<String, RailixValue> child = new LinkedHashMap<>();
             child.put("auto_key", RailixValue.bool(autoKey));
             if (!fields.isEmpty()) {
@@ -1065,7 +1364,43 @@ class DatabaseStepStoreTest {
             if (document != null) {
                 child.put("document", document);
             }
+            if (condition != null) {
+                child.put("condition", condition);
+            }
             return invoke("upsert", child);
+        }
+
+        StepResult upsertConfiguredMissingCondition(final RailixValue document) {
+            final Map<String, RailixValue> configuredOp = new LinkedHashMap<>();
+            configuredOp.put("auto_key", RailixValue.bool(false));
+            configuredOp.put("condition", RailixValue.array(List.of(
+                    RailixValue.string("context"),
+                    RailixValue.string("payload"),
+                    RailixValue.string("expected")
+            )));
+            final StepInput guardedConfig = new StepInput(
+                    configuration.values(),
+                    Map.of("operation", "upsert"),
+                    Map.of(),
+                    Map.of("operation", new StepInput(configuredOp, Map.of(), Map.of(), Map.of(), "ok")),
+                    "ok"
+            );
+            final StepInput selected = new StepInput(
+                    Map.of("auto_key", RailixValue.bool(false), "document", document),
+                    Map.of(),
+                    Map.of(),
+                    Map.of(),
+                    "ok"
+            );
+            final StepInput invocation = StepInput.invocation(
+                    Map.of(),
+                    Map.of("operation", "upsert"),
+                    Map.of(),
+                    Map.of("operation", selected),
+                    "ok",
+                    resources
+            );
+            return DatabaseStepHandlers.process(guardedConfig, invocation);
         }
 
         StepResult bulkUpsert(final RailixValue documents, final boolean autoKey) {
@@ -1140,7 +1475,17 @@ class DatabaseStepStoreTest {
         }
 
         StepResult delete(final RailixValue key) {
-            final Map<String, RailixValue> child = key == null ? Map.of() : Map.of("key", key);
+            return delete(key, null);
+        }
+
+        StepResult delete(final RailixValue key, final RailixValue condition) {
+            final Map<String, RailixValue> child = new LinkedHashMap<>();
+            if (key != null) {
+                child.put("key", key);
+            }
+            if (condition != null) {
+                child.put("condition", condition);
+            }
             return invoke("delete", child);
         }
 
